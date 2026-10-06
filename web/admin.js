@@ -26,7 +26,7 @@ async function route() {
   const page = location.hash.slice(1) in PAGES ? location.hash.slice(1) : 'overview';
   document.querySelectorAll('nav a').forEach(a => a.classList.toggle('on', a.dataset.page === page));
   groups = await api('GET', '/api/admin/groups');
-  try { await { overview, licenses, servers, groupsPage, settings, audit }[page](); }
+  try { await { overview, licenses, servers, groups: groupsPage, settings, audit }[page](); }
   catch (e) { if (e.status === 401) return location.reload(); toast(e.message, true); }
 }
 const head = (title, ...actions) => h('div', { class: 'page-head' }, h('h1', null, title), h('div', { class: 'row' }, actions));
