@@ -1,0 +1,5 @@
+name: ExamplePlugin
+version: ${project.version}
+main: dev.licensex.client.ExamplePlugin
+api-version: '1.20'
+description: Example plugin protected by LicenseX

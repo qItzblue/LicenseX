@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LicenseX — Manage your license</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap">
+  <link rel="stylesheet" href="/app.css">
+  <style>
+    main { max-width: 760px; margin: 0 auto; padding: 28px 20px 80px; }
+    header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 72px; }
+    .hero { text-align: center; margin-bottom: 36px; }
+    .hero h1 { font-size: clamp(34px, 6vw, 52px); font-weight: 800; background: linear-gradient(180deg, #fff, #a9aec6); -webkit-background-clip: text; background-clip: text; color: transparent; }
+    .hero p { color: var(--muted); font-size: 17px; margin: 14px auto 0; max-width: 480px; }
+    form.lookup { display: flex; gap: 10px; padding: 8px; border-radius: 16px; background: var(--surface); border: 1px solid var(--border-strong); box-shadow: 0 20px 60px rgba(0, 0, 0, .4); }
+    form.lookup input { border: 0; background: transparent; font-family: var(--mono); font-size: 16px; letter-spacing: .04em; box-shadow: none; }
+    .err { color: var(--bad); margin: 14px 4px 0; }
+    #result { margin-top: 28px; display: grid; gap: 16px; }
+    .summary { display: grid; grid-template-columns: auto 1fr; gap: 24px; align-items: center; }
+    .ring { --p: 0; width: 96px; height: 96px; border-radius: 50%; display: grid; place-items: center;
+      background: conic-gradient(var(--accent) calc(var(--p) * 1%), var(--border) 0); position: relative; }
+    .ring::before { content: ''; position: absolute; inset: 8px; border-radius: 50%; background: var(--surface); }
+    .ring span { position: relative; font-size: 22px; font-weight: 700; }
+    .ring small { position: relative; display: block; font-size: 11px; color: var(--muted); font-weight: 500; text-align: center; margin-top: -4px; }
+    .keyline { font-family: var(--mono); font-size: 15px; color: var(--muted); }
+    .srv { display: grid; grid-template-columns: 1fr auto; gap: 14px; align-items: center; padding: 14px 0; border-bottom: 1px solid var(--border); }
+    .srv:last-child { border-bottom: 0; }
+    .srv b { font-weight: 600; }
+    .srv .meta { color: var(--muted); font-size: 13px; margin-top: 2px; }
+    .empty { text-align: center; color: var(--muted); padding: 24px 0 8px; }
+    footer { margin-top: 56px; text-align: center; color: var(--faint); font-size: 13px; }
+    @media (max-width: 520px) { .summary { grid-template-columns: 1fr; justify-items: center; text-align: center; } form.lookup { flex-direction: column; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <span class="brand"><span class="brand-mark">X</span>LicenseX</span>
+    <a href="/admin" class="muted" style="font-size:13px">Admin</a>
+  </header>
+
+  <section class="hero">
+    <h1>Your license,<br>under your control.</h1>
+    <p>Enter your license key to see which servers are using it and remove any you no longer run.</p>
+  </section>
+
+  <form class="lookup" id="form" autocomplete="off">
+    <input id="key" placeholder="LX-XXXX-XXXX-XXXX-XXXX" spellcheck="false" autocapitalize="characters" aria-label="License key" required>
+    <button class="btn primary" type="submit">Check license</button>
+  </form>
+  <div class="err" id="err" role="alert" hidden></div>
+
+  <div id="result" hidden></div>
+
+  <footer>LicenseX · Servers are identified by plugin instance, never by your personal data.</footer>
+</main>
+<script type="module" src="/portal.js"></script>
+</body>
+</html>

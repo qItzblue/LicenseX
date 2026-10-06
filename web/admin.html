@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LicenseX Admin</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap">
+  <link rel="stylesheet" href="/app.css">
+  <link rel="stylesheet" href="/admin.css">
+</head>
+<body>
+  <div id="login" hidden>
+    <form class="card login" id="loginForm">
+      <span class="brand"><span class="brand-mark">X</span>LicenseX</span>
+      <p class="muted">Admin sign in</p>
+      <div class="field"><input type="password" id="pw" placeholder="Admin password" autocomplete="current-password" required autofocus></div>
+      <div class="err" id="loginErr" hidden></div>
+      <button class="btn primary" style="width:100%;justify-content:center">Sign in</button>
+    </form>
+  </div>
+  <div id="app" class="shell" hidden>
+    <aside>
+      <span class="brand"><span class="brand-mark">X</span>LicenseX</span>
+      <nav id="nav"></nav>
+      <button class="btn ghost" id="logout" style="margin-top:auto">Sign out</button>
+    </aside>
+    <main id="view"></main>
+  </div>
+  <script type="module" src="/admin.js"></script>
+</body>
+</html>
