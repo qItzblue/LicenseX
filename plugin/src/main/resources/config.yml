@@ -1,0 +1,6 @@
+# LicenseX server that issues and validates licenses (no trailing slash).
+licensex-url: "http://localhost:3000"
+
+# Only needed when the jar was NOT downloaded through BuiltByBit (which injects a license automatically).
+# Paste the key you were given. Once a license is claimed it is stored in license.key and never changes.
+license-key: ""

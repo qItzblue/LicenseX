@@ -1,0 +1,14 @@
+{
+  "name": "licensex",
+  "version": "0.1.0",
+  "description": "LicenseX - license server, owner portal and admin panel for Minecraft plugins",
+  "type": "module",
+  "private": true,
+  "engines": { "node": ">=22.13" },
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "test": "node --test test/*.test.js"
+  },
+  "license": "Unlicense"
+}
