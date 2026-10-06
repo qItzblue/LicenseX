@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import { readFileSync, writeFileSync, existsSync, statSync, createReadStream, mkdirSync } from 'node:fs';
-import { join, normalize, extname, dirname } from 'node:path';
+import { join, resolve, relative, isAbsolute, extname, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
 import { openDb } from './db.js';
@@ -259,8 +259,9 @@ const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=u
 function serveStatic(req, res, pathname) {
   if (pathname === '/') pathname = '/index.html';
   if (pathname === '/admin') pathname = '/admin.html';
-  const file = normalize(join(WEB, pathname));
-  if (!file.startsWith(WEB + '/') || !existsSync(file) || !statSync(file).isFile()) return json(res, 404, { ok: false, message: 'Not found' });
+  const file = resolve(WEB, '.' + pathname);
+  const rel = relative(WEB, file);
+  if (!rel || rel.startsWith('..') || isAbsolute(rel) || !existsSync(file) || !statSync(file).isFile()) return json(res, 404, { ok: false, message: 'Not found' });
   res.writeHead(200, { 'Content-Type': MIME[extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
   createReadStream(file).pipe(res);
 }
