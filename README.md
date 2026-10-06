@@ -27,7 +27,7 @@ Other env: `PORT`, `LICENSEX_DATA` (data dir), `TRUST_PROXY=1` (read client IP f
 Drop your plugin **.jar** into the admin **Products** page. LicenseX then hosts a licensed download:
 
 ```
-GET /download/<slug>?token=<secret>&nonce=<per-download>&user=<buyer>
+GET /download/<slug>?token=<secret>&user=<buyer id>&name=<buyer name>&nonce=<per-download>
 ```
 
 On each download LicenseX looks up the buyer's license (creating it on their first download), stamps a
