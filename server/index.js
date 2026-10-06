@@ -1,18 +1,23 @@
 import { createServer } from 'node:http';
-import { readFileSync, writeFileSync, existsSync, statSync, createReadStream, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, statSync, createReadStream, createWriteStream, mkdirSync, renameSync, rmSync } from 'node:fs';
 import { join, resolve, relative, isAbsolute, extname, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
 import { openDb } from './db.js';
 import { createCore, normalizeKey, KEY_RE, hash, now } from './core.js';
+import { injectFiles } from './jarstamp.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const WEB = join(ROOT, 'web');
 const PORT = Number(process.env.PORT || 3000);
 const DATA = process.env.LICENSEX_DATA || join(ROOT, 'data');
+const PRODUCTS_DIR = join(DATA, 'products');
+const PUBLIC_URL = (process.env.LICENSEX_PUBLIC_URL || '').replace(/\/+$/, '');
+const MAX_UPLOAD = Number(process.env.LICENSEX_MAX_UPLOAD_MB || 64) * 1024 * 1024;
 const TRUST_PROXY = process.env.TRUST_PROXY === '1';
 
 mkdirSync(DATA, { recursive: true });
+mkdirSync(PRODUCTS_DIR, { recursive: true });
 const db = openDb(process.env.LICENSEX_DB || join(DATA, 'licensex.db'));
 const core = createCore(db);
 
@@ -65,6 +70,25 @@ const int = (v, { min = -1, max = 1e6, nullable = false } = {}) => {
   return n;
 };
 const str = (v, max = 200) => String(v ?? '').slice(0, max);
+const slugify = s => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'product';
+
+/** Stream a request body straight to disk with a hard size cap. Used for plugin uploads. */
+async function saveUpload(req, destPath) {
+  const tmp = destPath + '.tmp-' + randomBytes(4).toString('hex');
+  const out = createWriteStream(tmp);
+  let size = 0;
+  try {
+    for await (const c of req) {
+      size += c.length;
+      if (size > MAX_UPLOAD) throw new HttpError(413, `File too large (max ${Math.round(MAX_UPLOAD / 1048576)} MB)`);
+      if (!out.write(c)) await new Promise(r => out.once('drain', r));
+    }
+    await new Promise((res, rej) => out.end(err => err ? rej(err) : res()));
+  } catch (e) { out.destroy(); try { rmSync(tmp, { force: true }); } catch {} throw e; }
+  if (size === 0) { try { rmSync(tmp, { force: true }); } catch {} throw new HttpError(400, 'Empty upload'); }
+  renameSync(tmp, destPath);
+  return size;
+}
 
 // --- routes --------------------------------------------------------------
 const routes = []; // [method, regex, handler, {admin}]
@@ -214,6 +238,66 @@ route('DELETE', '/api/admin/servers/:id', async ctx => {
   return [200, { ok: true }];
 }, { admin: true });
 
+// Admin: products (plugin downloads) ------------------------------------------
+const productFile = slug => join(PRODUCTS_DIR, slug + '.bin');
+const downloadUrlFor = (req, p) => {
+  const origin = PUBLIC_URL || `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers.host || 'localhost:' + PORT}`;
+  return `${origin}/download/${p.slug}?token=${p.token}`;
+};
+const productRow = (req, p) => ({ ...p, download_url: downloadUrlFor(req, p),
+  // BuiltByBit replaces these placeholders per download, so each buyer's download gets its own license.
+  builtbybit_url: `${downloadUrlFor(req, p)}&nonce=%%__NONCE__%%&user=%%__USERNAME__%%` });
+route('GET', '/api/admin/products', async ctx => {
+  const rows = db.prepare('SELECT * FROM products ORDER BY id DESC').all();
+  return [200, rows.map(p => productRow(ctx.req, p))];
+}, { admin: true });
+route('POST', '/api/admin/products', async ctx => {
+  const b = await body(ctx.req);
+  const name = str(b.name, 60).trim();
+  if (!name) throw new HttpError(400, 'Name required');
+  const group_id = b.group_id ? int(b.group_id, { min: 1 }) : null;
+  if (group_id != null && !db.prepare('SELECT 1 FROM license_groups WHERE id=?').get(group_id)) throw new HttpError(400, 'Unknown group');
+  let slug = slugify(b.slug || name), base = slug, i = 2;
+  while (db.prepare('SELECT 1 FROM products WHERE slug=?').get(slug)) slug = `${base}-${i++}`;
+  const r = db.prepare('INSERT INTO products(slug,name,token,group_id,created_at) VALUES(?,?,?,?,?)').run(slug, name, randomBytes(12).toString('base64url'), group_id, now());
+  core.log('admin', 'product.create', slug, name);
+  return [201, productRow(ctx.req, db.prepare('SELECT * FROM products WHERE id=?').get(r.lastInsertRowid))];
+}, { admin: true });
+// Raw binary upload (the plugin jar). Streamed to disk, not parsed as JSON.
+route('POST', '/api/admin/products/:id/file', async ctx => {
+  const p = db.prepare('SELECT * FROM products WHERE id=?').get(ctx.params.id);
+  if (!p) throw new HttpError(404, 'Not found');
+  const filename = str(ctx.req.headers['x-filename'] || 'plugin.jar', 80);
+  const size = await saveUpload(ctx.req, productFile(p.slug));
+  // Reject anything that isn't a readable zip/jar, so download-time stamping can't fail later.
+  try { injectFiles(readFileSync(productFile(p.slug)), [{ name: '.licensex-probe', content: '1' }]); }
+  catch { rmSync(productFile(p.slug), { force: true }); throw new HttpError(400, 'That file is not a valid .jar/.zip archive.'); }
+  db.prepare('UPDATE products SET filename=?, size=?, has_file=1 WHERE id=?').run(filename, size, p.id);
+  core.log('admin', 'product.upload', p.slug, `${filename} ${size}B`);
+  return [200, productRow(ctx.req, db.prepare('SELECT * FROM products WHERE id=?').get(p.id))];
+}, { admin: true });
+route('PATCH', '/api/admin/products/:id', async ctx => {
+  const p = db.prepare('SELECT * FROM products WHERE id=?').get(ctx.params.id);
+  if (!p) throw new HttpError(404, 'Not found');
+  const b = await body(ctx.req), f = {};
+  if ('name' in b) { f.name = str(b.name, 60).trim(); if (!f.name) throw new HttpError(400, 'Name required'); }
+  if ('enabled' in b) f.enabled = b.enabled ? 1 : 0;
+  if ('group_id' in b) { f.group_id = b.group_id ? int(b.group_id, { min: 1 }) : null; if (f.group_id != null && !db.prepare('SELECT 1 FROM license_groups WHERE id=?').get(f.group_id)) throw new HttpError(400, 'Unknown group'); }
+  if (b.regenerate_token) f.token = randomBytes(12).toString('base64url');
+  const keys = Object.keys(f);
+  if (keys.length) db.prepare(`UPDATE products SET ${keys.map(k => k + '=?').join(',')} WHERE id=?`).run(...keys.map(k => f[k]), p.id);
+  core.log('admin', 'product.update', p.slug, JSON.stringify(f).replace(/"token":"[^"]+"/, '"token":"***"'));
+  return [200, productRow(ctx.req, db.prepare('SELECT * FROM products WHERE id=?').get(p.id))];
+}, { admin: true });
+route('DELETE', '/api/admin/products/:id', async ctx => {
+  const p = db.prepare('SELECT * FROM products WHERE id=?').get(ctx.params.id);
+  if (!p) throw new HttpError(404, 'Not found');
+  rmSync(productFile(p.slug), { force: true });
+  db.prepare('DELETE FROM products WHERE id=?').run(p.id);
+  core.log('admin', 'product.delete', p.slug, p.name);
+  return [200, { ok: true }];
+}, { admin: true });
+
 // Admin: groups ---------------------------------------------------------------
 const groupFields = b => {
   const name = str(b.name, 40).trim();
@@ -254,6 +338,32 @@ route('PUT', '/api/admin/settings', async ctx => {
 }, { admin: true });
 route('GET', '/api/admin/audit', async ctx => [200, db.prepare('SELECT * FROM audit ORDER BY id DESC LIMIT ?').all(Math.min(Number(ctx.url.searchParams.get('limit')) || 100, 500))], { admin: true });
 
+// --- public download (BuiltByBit points here) ------------------------------
+// GET /download/:slug?token=...&nonce=...&user=...
+// Issues a license for the nonce (new per nonce, stable on repeat), stamps the key into the jar and serves it.
+function handleDownload(req, res, slug, url) {
+  const ip = clientIp(req);
+  if (!rateLimit('dl:' + ip, 60, 60e3)) throw new HttpError(429, 'Too many downloads. Try again shortly.');
+  const p = db.prepare('SELECT * FROM products WHERE slug=?').get(slug);
+  if (!p || !p.has_file || !p.enabled) throw new HttpError(404, 'This download is not available.');
+  if (!safeEq(url.searchParams.get('token') || '', p.token)) throw new HttpError(403, 'Invalid or missing download token.');
+
+  // No nonce (a human clicking the raw link) => a fresh nonce each time, so each download is its own license.
+  const nonce = str(url.searchParams.get('nonce'), 128).trim() || 'anon-' + randomBytes(12).toString('hex');
+  const r = core.claim({ nonce, user: str(url.searchParams.get('user'), 64), product: p.name, group_id: p.group_id, ip, device: hash(ip + req.headers['user-agent']) });
+  if (!r.ok) throw new HttpError(403, r.message, r.code);
+
+  const stamped = injectFiles(readFileSync(productFile(p.slug)), [{ name: 'licensex.json',
+    content: JSON.stringify({ url: PUBLIC_URL || `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers.host}`, key: r.key, product: p.name, issued: now() }) }]);
+  db.prepare('UPDATE products SET downloads = downloads + 1 WHERE id=?').run(p.id);
+  core.log('system', 'product.download', p.slug, `${r.key} ip=${ip}`);
+
+  const dlName = (p.filename && /\.(jar|zip)$/i.test(p.filename) ? p.filename : slugify(p.name) + '.jar');
+  res.writeHead(200, { 'Content-Type': 'application/java-archive', 'Content-Length': stamped.length,
+    'Content-Disposition': `attachment; filename="${dlName.replace(/[^\w.\-]/g, '_')}"`, 'Cache-Control': 'no-store' });
+  res.end(stamped);
+}
+
 // --- static + dispatch -----------------------------------------------------
 const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
 function serveStatic(req, res, pathname) {
@@ -273,6 +383,11 @@ export const server = createServer(async (req, res) => {
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; frame-ancestors 'none'");
   try {
+    const dl = url.pathname.match(/^\/download\/([a-z0-9-]{1,48})$/);
+    if (dl) {
+      if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'Method not allowed');
+      return handleDownload(req, res, dl[1], url);
+    }
     if (!url.pathname.startsWith('/api/')) {
       if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'Method not allowed');
       return serveStatic(req, res, decodeURIComponent(url.pathname));

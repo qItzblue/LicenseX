@@ -3,7 +3,7 @@ import { h, api, toast, confirmDialog, ago, date, limitText, copy } from '/lib.j
 const $ = id => document.getElementById(id);
 const view = $('view');
 let groups = [];
-const PAGES = { overview: 'Overview', licenses: 'Licenses', servers: 'Servers', groups: 'Groups', settings: 'Settings', audit: 'Audit log' };
+const PAGES = { overview: 'Overview', licenses: 'Licenses', servers: 'Servers', products: 'Products', groups: 'Groups', settings: 'Settings', audit: 'Audit log' };
 
 // --- auth ------------------------------------------------------------------
 async function boot() {
@@ -26,7 +26,7 @@ async function route() {
   const page = location.hash.slice(1) in PAGES ? location.hash.slice(1) : 'overview';
   document.querySelectorAll('nav a').forEach(a => a.classList.toggle('on', a.dataset.page === page));
   groups = await api('GET', '/api/admin/groups');
-  try { await { overview, licenses, servers, groups: groupsPage, settings, audit }[page](); }
+  try { await { overview, licenses, servers, products, groups: groupsPage, settings, audit }[page](); }
   catch (e) { if (e.status === 401) return location.reload(); toast(e.message, true); }
 }
 const head = (title, ...actions) => h('div', { class: 'page-head' }, h('h1', null, title), h('div', { class: 'row' }, actions));
@@ -140,6 +140,89 @@ async function servers() {
   }
   view.replaceChildren(head('Servers'), h('div', { class: 'toolbar' }, h('input', { placeholder: 'Search name, IP, license, owner…', oninput: debounce(e => load(e.target.value)) })), body);
   await load();
+}
+
+// --- products (plugin downloads) -------------------------------------------
+async function uploadFile(id, file) {
+  const r = await fetch(`/api/admin/products/${id}/file`, { method: 'POST', headers: { 'X-Filename': file.name }, body: file });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error(data.message || 'Upload failed'), { status: r.status });
+  return data;
+}
+const fmtSize = b => b < 1024 ? b + ' B' : b < 1048576 ? (b / 1024).toFixed(0) + ' KB' : (b / 1048576).toFixed(1) + ' MB';
+
+async function products() {
+  const list = await api('GET', '/api/admin/products');
+  const grid = h('div', { class: 'product-grid' });
+
+  const drop = h('div', { class: 'dropzone', tabindex: 0 },
+    h('input', { type: 'file', id: 'file', accept: '.jar,.zip', hidden: true }),
+    h('div', { class: 'dz-icon' }, '⬆'),
+    h('div', null, h('b', null, 'Drop your plugin .jar here'), h('div', { class: 'muted' }, 'or click to browse · LicenseX stamps a license into every download')));
+  const fileEl = drop.querySelector('#file');
+  const pick = () => fileEl.click();
+  drop.addEventListener('click', e => { if (e.target !== fileEl) pick(); });
+  drop.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); } });
+  ['dragover', 'dragenter'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); if (ev !== 'drop') drop.classList.remove('over'); }));
+  drop.addEventListener('drop', e => e.dataTransfer.files[0] && createFromFile(e.dataTransfer.files[0]));
+  fileEl.addEventListener('change', () => fileEl.files[0] && createFromFile(fileEl.files[0]));
+
+  async function createFromFile(file) {
+    if (!/\.(jar|zip)$/i.test(file.name)) return toast('Please choose a .jar or .zip file', true);
+    drop.classList.add('busy'); drop.classList.remove('over');
+    try {
+      const name = file.name.replace(/\.(jar|zip)$/i, '');
+      const p = await api('POST', '/api/admin/products', { name });
+      await uploadFile(p.id, file);
+      toast(`Uploaded ${file.name}`); products();
+    } catch (e) { toast(e.message, true); drop.classList.remove('busy'); }
+  }
+
+  grid.replaceChildren(...(list.length ? list.map(productCard) : [h('div', { class: 'muted', style: { padding: '8px' } }, 'No products yet. Drop a plugin jar above to create your first licensed download.')]));
+  view.replaceChildren(head('Products'),
+    h('p', { class: 'muted', style: { marginTop: '-12px' } }, 'Upload a plugin jar. LicenseX serves it as a download that issues a license per buyer and bakes the key into the file, so the plugin runs under it automatically.'),
+    drop, grid);
+}
+
+function productCard(p) {
+  const refresh = () => products();
+  const patch = (body, msg) => async () => { try { await api('PATCH', `/api/admin/products/${p.id}`, body); toast(msg); refresh(); } catch (e) { toast(e.message, true); } };
+  const replaceInput = h('input', { type: 'file', accept: '.jar,.zip', hidden: true, onchange: async e => { if (e.target.files[0]) { try { await uploadFile(p.id, e.target.files[0]); toast('File replaced'); refresh(); } catch (err) { toast(err.message, true); } } } });
+  return h('div', { class: 'card product' },
+    h('div', { class: 'row spread' },
+      h('div', { class: 'row', style: { gap: '12px' } }, h('div', { class: 'product-ico' }, '📦'),
+        h('div', null, h('b', { style: { fontSize: '16px' } }, p.name),
+          h('div', { class: 'muted', style: { fontSize: '13px' } }, p.has_file ? `${p.filename} · ${fmtSize(p.size)}` : 'No file uploaded yet'))),
+      h('div', { class: 'row wrap', style: { gap: '6px', justifyContent: 'flex-end' } },
+        h('span', { class: 'chip ' + (p.enabled && p.has_file ? 'active' : 'disabled') }, p.enabled ? (p.has_file ? 'Live' : 'No file') : 'Disabled'),
+        p.group_id && groupTag(p.group_id))),
+    h('div', { class: 'row wrap', style: { gap: '18px', margin: '14px 0', color: 'var(--muted)', fontSize: '13px' } },
+      h('span', null, h('b', { style: { color: 'var(--text)', fontSize: '18px' } }, p.downloads), ' downloads'),
+      h('span', null, 'Licenses issued per download · ', p.group_id ? 'assigned to group' : 'default limit')),
+    h('label', { style: { marginTop: '4px' } }, 'BuiltByBit download URL (paste into your resource\'s off-site download)'),
+    h('div', { class: 'url-row' }, h('input', { class: 'mono', readonly: true, value: p.builtbybit_url, onclick: e => e.target.select() }),
+      h('button', { class: 'btn sm', onclick: () => copy(p.builtbybit_url) }, 'Copy')),
+    h('div', { class: 'row wrap', style: { marginTop: '14px', gap: '8px' } },
+      h('a', { class: 'btn sm primary', href: p.download_url, target: '_blank' }, '⬇ Test download'),
+      h('button', { class: 'btn sm', onclick: () => replaceInput.click() }, p.has_file ? 'Replace file' : 'Upload file'), replaceInput,
+      h('button', { class: 'btn sm', onclick: () => productEdit(p) }, 'Edit'),
+      h('button', { class: 'btn sm', onclick: patch({ enabled: !p.enabled }, p.enabled ? 'Disabled' : 'Enabled') }, p.enabled ? 'Disable' : 'Enable'),
+      h('button', { class: 'btn sm', onclick: async () => { if (await confirmDialog('Regenerate download token?', 'The old BuiltByBit URL stops working immediately. Update your resource with the new URL.', 'Regenerate', false)) patch({ regenerate_token: true }, 'New token generated')(); } }, 'New token'),
+      h('button', { class: 'btn sm danger', onclick: async () => { if (await confirmDialog('Delete product?', `"${p.name}" and its uploaded file are removed. Issued licenses are not affected.`, 'Delete')) { await api('DELETE', `/api/admin/products/${p.id}`); toast('Deleted'); refresh(); } } }, 'Delete')));
+}
+
+function productEdit(p) {
+  const dlg = h('dialog', null, h('h3', { style: { marginBottom: '16px' } }, 'Edit product'),
+    h('div', { class: 'field' }, h('label', null, 'Name'), h('input', { id: 'p-name', value: p.name })),
+    h('div', { class: 'field' }, h('label', null, 'Assign issued licenses to group'), groupSelect(p.group_id),
+      h('div', { class: 'hint' }, 'Buyers of this product get a license in this group, inheriting its server limit.')),
+    h('div', { class: 'row', style: { 'justify-content': 'flex-end' } }, h('button', { class: 'btn', onclick: () => dlg.close() }, 'Cancel'),
+      h('button', { class: 'btn primary', onclick: async () => {
+        try { await api('PATCH', `/api/admin/products/${p.id}`, { name: dlg.querySelector('#p-name').value, group_id: dlg.querySelector('#f-group').value || null }); dlg.close(); toast('Saved'); products(); }
+        catch (e) { toast(e.message, true); }
+      } }, 'Save')));
+  dlg.addEventListener('close', () => dlg.remove()); document.body.append(dlg); dlg.showModal();
 }
 
 // --- groups ----------------------------------------------------------------

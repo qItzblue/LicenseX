@@ -66,7 +66,7 @@ export function createCore(db) {
    * so every download gets its own license - even from the same IP/device - and re-claiming
    * with the same nonce always returns the same license, so a license never changes.
    */
-  function claim({ nonce, user = '', product = '', ip, device }) {
+  function claim({ nonce, user = '', product = '', group_id = null, ip, device }) {
     if (getSetting('claims_enabled') !== '1') return { ok: false, code: 'CLAIMS_DISABLED', message: 'License issuing is currently disabled.' };
     nonce = String(nonce || '').slice(0, 128);
     if (!nonce) return { ok: false, code: 'BAD_REQUEST', message: 'Missing nonce.' };
@@ -74,11 +74,11 @@ export function createCore(db) {
     let created = false;
     if (!lic) {
       lic = createLicense({ owner: String(user).slice(0, 64), source: 'claim', product: String(product).slice(0, 64),
-        nonce, issued_ip: ip, issued_device: device });
-      log('system', 'license.claim', lic.key, `ip=${ip} user=${user}`);
+        group_id, nonce, issued_ip: ip, issued_device: device });
+      log('system', 'license.claim', lic.key, `ip=${ip} user=${user} product=${product}`);
       created = true;
     }
-    return { ok: true, key: lic.key, created };
+    return { ok: true, key: lic.key, created, product: lic.product };
   }
 
   /** Called by the plugin on start and on every heartbeat. */

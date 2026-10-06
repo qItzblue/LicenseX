@@ -7,7 +7,8 @@ functional first pass and should be redesigned to look **modern, sleek and polis
 1. **Public license page** (`index.html` + `portal.js`): hero, license key input, result with usage ring, status chip,
    group tag, server list with Remove. Must feel trustworthy and effortless for a non-technical Minecraft server owner. Mobile first.
 2. **Admin panel** (`admin.html`, `admin.css`, `admin.js`): sidebar app with Overview (stats, chart, activity), Licenses
-   (table, filters, detail drawer, create/edit dialog), Servers, Groups, Settings, Audit log, login.
+   (table, filters, detail drawer, create/edit dialog), Servers, **Products** (drag-and-drop jar upload, product cards
+   with download URL + copy, counts, enable/disable, replace file, delete), Groups, Settings, Audit log, login.
 
 ## Direction
 - Dark-first, restrained, high contrast, one confident accent (currently violet to sky gradient). Light theme optional.

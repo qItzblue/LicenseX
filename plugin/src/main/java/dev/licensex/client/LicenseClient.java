@@ -1,6 +1,7 @@
 package dev.licensex.client;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -32,6 +33,30 @@ public final class LicenseClient {
     public LicenseClient(String baseUrl, Path dataDir) {
         this.baseUrl = baseUrl.replaceAll("/+$", "");
         this.dataDir = dataDir;
+    }
+
+    /** The license details LicenseX stamps into the jar at download time (resource /licensex.json). */
+    public record Embedded(String url, String key, String product) {}
+
+    /**
+     * Reads /licensex.json from the jar, written by LicenseX when the buyer downloaded this exact copy.
+     * When present, the plugin is licensed out of the box with no config and no separate claim call.
+     */
+    public static Optional<Embedded> embedded() {
+        try (InputStream in = LicenseClient.class.getResourceAsStream("/licensex.json")) {
+            if (in == null) return Optional.empty();
+            String json = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+            String key = field(json, "key");
+            return key.isEmpty() ? Optional.empty() : Optional.of(new Embedded(field(json, "url"), key, field(json, "product")));
+        } catch (IOException e) { return Optional.empty(); }
+    }
+
+    /** Persist a key supplied out of band (stamped into the jar) so it becomes this install's permanent license. */
+    public Optional<String> useKey(String key) throws IOException {
+        if (key == null || key.isBlank()) return Optional.empty();
+        Files.createDirectories(dataDir);
+        Files.writeString(dataDir.resolve("license.key"), key.trim());
+        return Optional.of(key.trim());
     }
 
     /** The stored license, if this install already has one. */
