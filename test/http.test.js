@@ -24,7 +24,7 @@ test('end to end: claim -> plugin -> portal -> admin', async () => {
 
   const { body: c } = await call('POST', '/api/v1/claim', { nonce: 'dl-1', user: 'steve' });
   const key = c.key;
-  assert.equal((await call('POST', '/api/v1/claim', { nonce: 'dl-1' })).body.key, key);
+  assert.equal((await call('POST', '/api/v1/claim', { nonce: 'dl-1-redownload', user: 'steve' })).body.key, key);
 
   assert.equal((await call('POST', '/api/v1/validate', { key, instanceId: 'srv-1', name: 'Lobby', port: 25565 })).status, 200);
   assert.equal((await call('POST', '/api/v1/validate', { key, instanceId: 'srv-2', name: 'Pirate' })).body.code, 'LIMIT_REACHED');
@@ -54,7 +54,7 @@ test('products: upload a jar, download stamps a license per download nonce', asy
 
   const p = (await call('POST', '/api/admin/products', { name: 'My Plugin' }, cookie)).body;
   assert.equal(p.slug, 'my-plugin');
-  assert.match(p.builtbybit_url, /nonce=%%__NONCE__%%/);
+  assert.match(p.builtbybit_url, /user=%%__USER__%%.*nonce=%%__NONCE__%%/);
 
   // raw binary upload (not JSON)
   const up = await fetch(base + `/api/admin/products/${p.id}/file`, { method: 'POST', headers: { Cookie: cookie, 'X-Filename': 'MyPlugin.jar' }, body: emptyZip });
@@ -71,6 +71,7 @@ test('products: upload a jar, download stamps a license per download nonce', asy
 
   const countFor = async () => (await call('GET', '/api/admin/licenses', null, cookie)).body.filter(l => l.product === 'My Plugin').length;
   await dl(`token=${token}&nonce=buyer-1&user=bob`); // same buyer, same download -> no new license
+  await dl(`token=${token}&nonce=buyer-1-again&user=bob`); // same buyer, brand new download -> still no new license
   assert.equal(await countFor(), 1);
   await dl(`token=${token}&nonce=buyer-2&user=sue`); // different buyer -> new license
   assert.equal(await countFor(), 2);

@@ -99,7 +99,7 @@ const route = (method, path, handler, opts = {}) =>
 route('POST', '/api/v1/claim', async ctx => {
   if (!rateLimit('claim:' + ctx.ip, 20, 60e3)) throw new HttpError(429, 'Too many requests');
   const b = await body(ctx.req);
-  const r = core.claim({ nonce: b.nonce, user: b.user, product: b.product, ip: ctx.ip, device: b.device ? hash(b.device) : hash(ctx.ip + ctx.req.headers['user-agent']) });
+  const r = core.claim({ nonce: b.nonce, user: b.user, name: b.name, product: b.product, ip: ctx.ip, device: b.device ? hash(b.device) : hash(ctx.ip + ctx.req.headers['user-agent']) });
   return [r.ok ? 200 : 403, r];
 });
 route('POST', '/api/v1/validate', async ctx => {
@@ -246,7 +246,7 @@ const downloadUrlFor = (req, p) => {
 };
 const productRow = (req, p) => ({ ...p, download_url: downloadUrlFor(req, p),
   // BuiltByBit replaces these placeholders per download, so each buyer's download gets its own license.
-  builtbybit_url: `${downloadUrlFor(req, p)}&nonce=%%__NONCE__%%&user=%%__USERNAME__%%` });
+  builtbybit_url: `${downloadUrlFor(req, p)}&user=%%__USER__%%&name=%%__USERNAME__%%&nonce=%%__NONCE__%%` });
 route('GET', '/api/admin/products', async ctx => {
   const rows = db.prepare('SELECT * FROM products ORDER BY id DESC').all();
   return [200, rows.map(p => productRow(ctx.req, p))];
@@ -348,9 +348,11 @@ function handleDownload(req, res, slug, url) {
   if (!p || !p.has_file || !p.enabled) throw new HttpError(404, 'This download is not available.');
   if (!safeEq(url.searchParams.get('token') || '', p.token)) throw new HttpError(403, 'Invalid or missing download token.');
 
-  // No nonce (a human clicking the raw link) => a fresh nonce each time, so each download is its own license.
-  const nonce = str(url.searchParams.get('nonce'), 128).trim() || 'anon-' + randomBytes(12).toString('hex');
-  const r = core.claim({ nonce, user: str(url.searchParams.get('user'), 64), product: p.name, group_id: p.group_id, ip, device: hash(ip + req.headers['user-agent']) });
+  // A known buyer (?user=) always gets the same license. With no buyer id and no (real) nonce - e.g. someone
+  // opening the raw link - there is nothing to match on, so that download gets a fresh license.
+  const nonce = str(url.searchParams.get('nonce'), 128).trim();
+  const r = core.claim({ nonce: nonce.includes('%%') || !nonce ? 'anon-' + randomBytes(12).toString('hex') : nonce,
+    user: str(url.searchParams.get('user'), 64), name: str(url.searchParams.get('name'), 64), product: p.name, group_id: p.group_id, ip, device: hash(ip + req.headers['user-agent']) });
   if (!r.ok) throw new HttpError(403, r.message, r.code);
 
   const stamped = injectFiles(readFileSync(productFile(p.slug)), [{ name: 'licensex.json',

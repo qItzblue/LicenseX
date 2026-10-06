@@ -62,20 +62,27 @@ export function createCore(db) {
   }
 
   /**
-   * Download-time issuing. Every download carries a unique nonce (BuiltByBit's %%__NONCE__%%),
-   * so every download gets its own license - even from the same IP/device - and re-claiming
-   * with the same nonce always returns the same license, so a license never changes.
+   * Download-time issuing. A license belongs to a buyer, not to a download:
+   *  - a known buyer (BuiltByBit's %%__USER__%% id) gets ONE license per product, however many times they
+   *    download, and different buyers get different licenses even from the same IP/device;
+   *  - an unidentified download (no buyer id) can't be matched to anyone, so it gets its own license, stable
+   *    per nonce.
+   * Values still containing an unreplaced %%__PLACEHOLDER%% count as "not provided", otherwise every
+   * such request would share one license.
    */
-  function claim({ nonce, user = '', product = '', group_id = null, ip, device }) {
+  const real = v => { v = String(v ?? '').trim(); return v && !v.includes('%%') ? v : ''; };
+  function claim({ nonce, user = '', name = '', product = '', group_id = null, ip, device }) {
     if (getSetting('claims_enabled') !== '1') return { ok: false, code: 'CLAIMS_DISABLED', message: 'License issuing is currently disabled.' };
-    nonce = String(nonce || '').slice(0, 128);
-    if (!nonce) return { ok: false, code: 'BAD_REQUEST', message: 'Missing nonce.' };
-    let lic = q.licenseByNonce.get(nonce);
+    const uid = real(user).slice(0, 64), label = real(name).slice(0, 64) || uid;
+    // Identity is hashed so long ids/product names can't truncate into a collision.
+    const identity = uid ? 'user:' + hash(String(product) + '\0' + uid) : real(nonce).slice(0, 128);
+    if (!identity) return { ok: false, code: 'BAD_REQUEST', message: 'Missing buyer or nonce.' };
+    let lic = q.licenseByNonce.get(identity);
     let created = false;
     if (!lic) {
-      lic = createLicense({ owner: String(user).slice(0, 64), source: 'claim', product: String(product).slice(0, 64),
-        group_id, nonce, issued_ip: ip, issued_device: device });
-      log('system', 'license.claim', lic.key, `ip=${ip} user=${user} product=${product}`);
+      lic = createLicense({ owner: label, source: 'claim', product: String(product).slice(0, 64),
+        group_id, nonce: identity, issued_ip: ip, issued_device: device });
+      log('system', 'license.claim', lic.key, `ip=${ip} user=${uid || '-'} product=${product}`);
       created = true;
     }
     return { ok: true, key: lic.key, created, product: lic.product };
