@@ -82,6 +82,9 @@ public final class LicenseClient {
         return Optional.of(m.group(1));
     }
 
+    /** Link to this license's own page on the LicenseX website. */
+    public String portalUrl(String key) { return baseUrl + "/?key=" + key; }
+
     /** Register this server with the license, or heartbeat if already registered. */
     public Result validate(String key, String serverName, int port, String version) {
         try {
@@ -91,10 +94,10 @@ public final class LicenseClient {
             String code = field(r.body, "code");
             if ("SERVER_REMOVED".equals(code)) deleteInstanceId(); // next start registers as a fresh server
             String hb = field(r.body, "heartbeat_minutes");
-            int minutes = hb.isEmpty() ? 15 : Math.max(1, Integer.parseInt(hb));
+            int minutes = hb.isEmpty() ? 1 : Math.max(1, Integer.parseInt(hb));
             return new Result(ok, code, field(r.body, "message"), minutes, false);
         } catch (IOException | RuntimeException e) {
-            return new Result(false, "NETWORK", e.getMessage(), 15, true);
+            return new Result(false, "NETWORK", e.getMessage(), 1, true);
         }
     }
 

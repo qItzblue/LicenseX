@@ -50,9 +50,13 @@ the plugin stores it in `license.key`, so it never changes.
 **Server limit** resolution: per-license override > group limit > global default (`-1` = unlimited).
 Each running server is a persistent random instance id, so IP changes don't create duplicate slots.
 
-**Plugin flow:** `POST /api/v1/validate` on start and every N minutes (admin setting). Denial codes:
+**Plugin flow:** `POST /api/v1/validate` on start and every N minutes (admin setting, default **1 minute**). Denial codes:
 `INVALID_KEY`, `LICENSE_BLOCKED`, `LICENSE_EXPIRED`, `LIMIT_REACHED`, `SERVER_DISABLED`, `SERVER_REMOVED`.
 Removals/blocks reach a running server at its next check-in. Short outages are tolerated (72h grace in the example plugin).
+
+**Everyone checks their own license.** Every license is its own key with its own server list. The plugin prints a
+personal link on startup (`<your-url>/?key=LX-...`), and anyone can also enter their key on the home page.
+Nobody can see another person's license without that person's key.
 
 **Rules worth knowing**
 - Admin-disabled servers keep their slot and the owner can't remove them (otherwise a ban is dodged by removing).

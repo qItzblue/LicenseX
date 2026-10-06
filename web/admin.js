@@ -125,10 +125,11 @@ async function licenseDrawer(id, refresh) {
 
 // --- servers ---------------------------------------------------------------
 async function servers() {
+  const hb = Number((await api('GET', '/api/admin/settings')).heartbeat_minutes) || 1;
   const body = h('div', { class: 'card table-card' });
   async function load(q = '') {
     const rows = await api('GET', '/api/admin/servers?q=' + encodeURIComponent(q));
-    const online = Date.now() / 1000 - 40 * 60;
+    const online = Date.now() / 1000 - Math.max(3, hb * 3) * 60; // 3 missed check-ins = idle
     body.replaceChildren(h('table', null, h('thead', null, h('tr', null, ['Server', 'Address', 'License', 'Version', 'Last seen', 'Status', ''].map(t => h('th', null, t)))),
       h('tbody', null, rows.length ? rows.map(s => h('tr', null,
         h('td', null, h('b', null, s.name || 'Unnamed')), h('td', { class: 'keycell' }, `${s.ip}:${s.port ?? '?'}`),

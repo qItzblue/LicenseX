@@ -103,7 +103,7 @@ route('POST', '/api/v1/claim', async ctx => {
   return [r.ok ? 200 : 403, r];
 });
 route('POST', '/api/v1/validate', async ctx => {
-  if (!rateLimit('val:' + ctx.ip, 120, 60e3)) throw new HttpError(429, 'Too many requests');
+  if (!rateLimit('val:' + ctx.ip, 600, 60e3)) throw new HttpError(429, 'Too many requests');
   const b = await body(ctx.req);
   const r = core.validate({ key: b.key, instanceId: b.instanceId, name: b.name, port: b.port, version: b.version, ip: ctx.ip });
   return [r.ok ? 200 : 403, r];

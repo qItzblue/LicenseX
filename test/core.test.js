@@ -75,3 +75,9 @@ test('unlimited (-1) and unknown keys', () => {
   for (const i of 'abcdef') assert.ok(reg(core, lic.key, i).ok);
   assert.equal(reg(core, 'LX-AAAA-AAAA-AAAA-AAAA', 'a').code, 'INVALID_KEY');
 });
+
+test('plugins check in every minute by default', () => {
+  const { core } = fresh();
+  const lic = core.createLicense({});
+  assert.equal(reg(core, lic.key, 'a').heartbeat_minutes, 1);
+});

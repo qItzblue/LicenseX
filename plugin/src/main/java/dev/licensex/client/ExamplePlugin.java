@@ -44,7 +44,7 @@ public final class ExamplePlugin extends JavaPlugin {
 
         LicenseClient.Result r = check();
         if (!r.ok()) { fail(r.message()); return; }
-        getLogger().info("License " + key + " verified.");
+        getLogger().info("License " + key + " verified. Check or manage it at " + client.portalUrl(key));
         Bukkit.getScheduler().runTask(this, this::enableFeatures);
         long ticks = r.heartbeatMinutes() * 60L * 20L;
         heartbeat = Bukkit.getScheduler().runTaskTimerAsynchronously(this, this::beat, ticks, ticks);

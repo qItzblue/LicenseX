@@ -26,7 +26,7 @@ export function createCore(db) {
     audit: db.prepare('INSERT INTO audit(at,actor,action,target,detail) VALUES(?,?,?,?,?)'),
   };
 
-  const defaults = { default_limit: '1', claims_enabled: '1', public_removal: '1', heartbeat_minutes: '15' };
+  const defaults = { default_limit: '1', claims_enabled: '1', public_removal: '1', heartbeat_minutes: '1' };
   const getSetting = k => q.setting.get(k)?.value ?? defaults[k];
   const setSetting = (k, v) => q.putSetting.run(k, String(v));
 

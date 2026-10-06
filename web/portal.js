@@ -48,4 +48,6 @@ async function remove(v, s) {
 }
 
 form.addEventListener('submit', e => { e.preventDefault(); lookup(keyEl.value.trim()); });
-try { const k = sessionStorage.getItem(KEY); if (k) { keyEl.value = k; lookup(k, { silent: true }); } } catch {}
+const linked = new URLSearchParams(location.search).get('key');
+if (linked) { keyEl.value = linked; lookup(linked.trim()); history.replaceState(null, '', location.pathname); }
+else try { const k = sessionStorage.getItem(KEY); if (k) { keyEl.value = k; lookup(k, { silent: true }); } } catch {}
