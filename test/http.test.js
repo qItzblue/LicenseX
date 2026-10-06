@@ -46,3 +46,36 @@ test('end to end: claim -> plugin -> portal -> admin', async () => {
   assert.equal((await call('POST', '/api/v1/validate', { key, instanceId: 'srv-1' })).body.code, 'LICENSE_BLOCKED');
   assert.equal((await call('GET', '/api/admin/stats', null, cookie)).status, 200);
 });
+
+test('products: upload a jar, download stamps a license per download nonce', async () => {
+  const { listEntries } = await import('../server/jarstamp.js');
+  const emptyZip = Buffer.concat([Buffer.from([0x50, 0x4b, 0x05, 0x06]), Buffer.alloc(18)]);
+  const { cookie } = await call('POST', '/api/admin/login', { password: 'secret-pw' });
+
+  const p = (await call('POST', '/api/admin/products', { name: 'My Plugin' }, cookie)).body;
+  assert.equal(p.slug, 'my-plugin');
+  assert.match(p.builtbybit_url, /nonce=%%__NONCE__%%/);
+
+  // raw binary upload (not JSON)
+  const up = await fetch(base + `/api/admin/products/${p.id}/file`, { method: 'POST', headers: { Cookie: cookie, 'X-Filename': 'MyPlugin.jar' }, body: emptyZip });
+  assert.equal((await up.json()).has_file, 1);
+
+  const token = p.token;
+  const dl = (q) => fetch(base + `/download/my-plugin?${q}`).then(async r => ({ status: r.status, type: r.headers.get('content-type'), buf: Buffer.from(await r.arrayBuffer()) }));
+
+  assert.equal((await dl('token=wrong')).status, 403);
+  const d1 = await dl(`token=${token}&nonce=buyer-1&user=bob`);
+  assert.equal(d1.status, 200);
+  assert.equal(d1.type, 'application/java-archive');
+  assert.ok(listEntries(d1.buf).includes('licensex.json'));
+
+  const countFor = async () => (await call('GET', '/api/admin/licenses', null, cookie)).body.filter(l => l.product === 'My Plugin').length;
+  await dl(`token=${token}&nonce=buyer-1&user=bob`); // same buyer, same download -> no new license
+  assert.equal(await countFor(), 1);
+  await dl(`token=${token}&nonce=buyer-2&user=sue`); // different buyer -> new license
+  assert.equal(await countFor(), 2);
+
+  // disabling the product blocks downloads
+  await call('PATCH', `/api/admin/products/${p.id}`, { enabled: false }, cookie);
+  assert.equal((await dl(`token=${token}&nonce=buyer-3`)).status, 404);
+});

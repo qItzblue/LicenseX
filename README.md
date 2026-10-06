@@ -18,8 +18,28 @@ Other env: `PORT`, `LICENSEX_DATA` (data dir), `TRUST_PROXY=1` (read client IP f
 |---|---|
 | `server/` | HTTP API + SQLite. Business rules live in `core.js`. |
 | `web/index.html` | Public page: enter a license key, see servers on it, remove any of them. |
-| `web/admin.html` | Admin: licenses (create/edit/block/delete, per-license limit), servers (disable/remove), groups, global settings, audit log. |
+| `web/admin.html` | Admin: licenses, servers, **products/downloads**, groups, global settings, audit log. |
+| `server/jarstamp.js` | Dependency-free ZIP/JAR editor used to stamp a license into a plugin at download time. |
 | `plugin/` | `LicenseClient` (drop-in, no deps) + an example Bukkit/Paper plugin (`mvn package`). |
+
+## Products & integrated downloads
+
+Drop your plugin **.jar** into the admin **Products** page. LicenseX then hosts a licensed download:
+
+```
+GET /download/<slug>?token=<secret>&nonce=<per-download>&user=<buyer>
+```
+
+On each download LicenseX issues a license for the `nonce` (new per download, stable on repeat), stamps a
+`licensex.json` (`{url, key, product}`) into the jar with `server/jarstamp.js`, and serves it. The embedded
+plugin reads that file on first start (`LicenseClient.embedded()`), persists the key, and runs under it — no
+config, no manual key entry. The `token` is a per-product secret so the jar can't be leeched from the raw URL;
+regenerate it anytime in the admin.
+
+**BuiltByBit:** set the resource's off-site/custom download URL to the **BuiltByBit URL** shown on the product
+card — it already ends with `&nonce=%%__NONCE__%%&user=%%__USERNAME__%%`, which BuiltByBit fills in per buyer,
+so every buyer's download gets its own stable license. A buyer hitting the raw link with no nonce gets a fresh
+license each time. Assign a product to a group to give its buyers that group's server limit.
 
 **One license per download, stable afterwards.** Every download carries a unique nonce (BuiltByBit injects
 `%%__NONCE__%%` and `%%__USER__%%` into the jar). On first start the plugin calls `POST /api/v1/claim` with it.

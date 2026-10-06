@@ -23,15 +23,20 @@ public final class ExamplePlugin extends JavaPlugin {
     @Override
     public void onEnable() {
         saveDefaultConfig();
-        client = new LicenseClient(getConfig().getString("licensex-url", "http://localhost:3000"), getDataFolder().toPath());
+        // A jar downloaded through LicenseX carries its license + server URL stamped in; prefer those.
+        Optional<LicenseClient.Embedded> embedded = LicenseClient.embedded();
+        String url = embedded.map(LicenseClient.Embedded::url).filter(s -> s != null && !s.isBlank())
+                .orElse(getConfig().getString("licensex-url", "http://localhost:3000"));
+        client = new LicenseClient(url, getDataFolder().toPath());
         // Everything network-related runs async; the plugin stays disabled-by-default until a license is confirmed.
-        Bukkit.getScheduler().runTaskAsynchronously(this, this::startup);
+        Bukkit.getScheduler().runTaskAsynchronously(this, () -> startup(embedded));
     }
 
-    private void startup() {
+    private void startup(Optional<LicenseClient.Embedded> embedded) {
         try {
-            Optional<String> k = client.storedKey();
-            if (k.isEmpty() && !BBB_NONCE.startsWith("%%")) k = client.claim(BBB_NONCE, BBB_USER, PRODUCT); // issued once per download
+            Optional<String> k = client.storedKey();                                     // already licensed on this install
+            if (k.isEmpty() && embedded.isPresent()) k = client.useKey(embedded.get().key());   // key stamped into the download
+            if (k.isEmpty() && !BBB_NONCE.startsWith("%%")) k = client.claim(BBB_NONCE, BBB_USER, PRODUCT); // claim per download nonce
             if (k.isEmpty()) k = Optional.ofNullable(getConfig().getString("license-key")).filter(s -> !s.isBlank());
             if (k.isEmpty()) { fail("No license found. Set license-key in config.yml."); return; }
             key = k.get();
