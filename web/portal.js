@@ -92,3 +92,21 @@ const safeUrl = u => { try { return /^https?:$/.test(new URL(u).protocol) ? u : 
   foot.replaceChildren(...[[discord, 'Discord'], [store, 'BuiltByBit'], [web, 'Website'], [mail && 'mailto:' + mail, 'Contact'], ['/admin', 'Admin']].filter(([u]) => u).map(([u, t]) => h('a', { href: u, ...(u.startsWith('mailto') || u === '/admin' ? {} : ext) }, t)));
   document.getElementById('footText').textContent = `© ${new Date().getFullYear()} ${name} · Servers are identified by plugin instance, never by your personal data.`;
 })();
+
+// --- sign in / account chip / Admin button (top right) ---------------------------------
+(async function loadAuth() {
+  const slot = document.getElementById('authNav');
+  let me;
+  try { me = await api('GET', '/api/auth/me'); } catch { return; }
+  if (!me.user) {
+    if (me.providers.length) slot.append(h('a', { href: '/login', class: 'pill' }, 'Sign in'));
+    return;
+  }
+  const u = me.user;
+  slot.append(...[
+    u.isAdmin && h('a', { href: '/admin', class: 'admin' }, 'Admin'),
+    h('span', { class: 'me-chip muted', title: u.email || u.provider, style: { fontSize: '14px', padding: '0 6px' } },
+      u.avatar ? h('img', { src: u.avatar, alt: '', referrerpolicy: 'no-referrer' }) : h('span', { class: 'ph' }, (u.name || '?').charAt(0).toUpperCase()),
+      h('span', { class: 'opt' }, u.name)),
+    h('button', { class: 'linklike', onclick: async () => { await api('POST', '/api/auth/logout'); location.reload(); } }, 'Sign out')].filter(Boolean));
+})();

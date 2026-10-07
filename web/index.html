@@ -36,6 +36,11 @@
     .empty { text-align: center; color: var(--muted); padding: 24px 0 8px; }
     footer { margin-top: 56px; text-align: center; color: var(--faint); font-size: 13px; }
     nav.top { display: flex; gap: 6px; align-items: center; }
+    nav.top .grp { display: flex; gap: 6px; align-items: center; }
+    nav.top a.admin { background: linear-gradient(135deg, var(--accent), #6d4de0); color: #fff; border: 0; box-shadow: 0 6px 18px rgba(139, 92, 246, .35); }
+    nav.top a.admin:hover { filter: brightness(1.1); background: linear-gradient(135deg, var(--accent), #6d4de0); }
+    nav.top button.linklike { font: inherit; font-size: 14px; font-weight: 500; color: var(--muted); background: none; border: 0; cursor: pointer; padding: 7px 10px; border-radius: 99px; }
+    nav.top button.linklike:hover { color: var(--text); background: rgba(255, 255, 255, .05); }
     nav.top a { color: var(--muted); font-size: 14px; font-weight: 500; padding: 7px 12px; border-radius: 99px; transition: .15s; }
     nav.top a:hover { color: var(--text); background: rgba(255, 255, 255, .05); }
     nav.top a.pill { border: 1px solid var(--border-strong); color: var(--text); }
@@ -69,8 +74,9 @@
 <main>
   <header>
     <span class="brand"><span class="brand-mark" id="mark">X</span><span id="siteName">LicenseX</span></span>
-    <nav class="top" id="topnav">
-      <a href="#how" class="opt">How it works</a><a href="#faq" class="opt">FAQ</a>
+    <nav class="top">
+      <span class="grp" id="topnav"><a href="#how" class="opt">How it works</a><a href="#faq" class="opt">FAQ</a></span>
+      <span class="grp" id="authNav"></span>
     </nav>
   </header>
 

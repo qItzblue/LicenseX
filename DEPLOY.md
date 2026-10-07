@@ -33,6 +33,11 @@ Free plans change often. This was last checked in October 2026, so confirm on th
 Why not "always free and asleep" hosts for selling: BuiltByBit asks LicenseX for a key at the moment a buyer
 downloads. If your host is asleep or slow to wake, that buyer gets "Unable to acquire a license key automatically".
 
+## Sign-in with Google / Discord / GitHub
+
+Optional, but it lets you open the admin panel from a button on your site instead of typing the password. See
+**[docs/LOGIN.md](docs/LOGIN.md)** (needs `LICENSEX_PUBLIC_URL` to be your real https address).
+
 ## Render, step by step
 
 Render deploys from GitHub, not from the zip.

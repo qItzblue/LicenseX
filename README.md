@@ -21,6 +21,9 @@ Settings can come from `licensex.config.json` or environment variables (variable
 (data dir), `LICENSEX_PUBLIC_URL`, `LICENSEX_MAX_UPLOAD_MB`, `TRUST_PROXY=1` (read the client IP from
 `X-Forwarded-For` behind a proxy; needed for correct IPs online, and put TLS in front).
 
+**Sign in with Google, Discord or GitHub:** optional; people whose verified email is on your admin list get an **Admin**
+button in the site header. Setup in **[docs/LOGIN.md](docs/LOGIN.md)**.
+
 ## How it works
 
 | Piece | What it does |
@@ -30,6 +33,7 @@ Settings can come from `licensex.config.json` or environment variables (variable
 | `web/admin.html` | Admin: licenses, servers, **products/downloads**, groups, global settings, audit log. |
 | `server/jarstamp.js`, `classfile.js`, `wrapjar.js` | Dependency-free JAR editor, class-file patcher and the plugin wrapper that adds the license check. |
 | `wrapper/` | Source of the precompiled wrapper classes (`wrapper/build.sh`). |
+| `server/auth.js` | Google / Discord / GitHub OAuth sign-in and the verified-email admin check. |
 | `server/backup.js` | Backup / restore (admin -> Settings -> Backup & move) for moving between hosts. |
 | `plugin/` | `LicenseClient` (drop-in, no deps) + an example Bukkit/Paper plugin (`mvn package`). |
 

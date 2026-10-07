@@ -15,19 +15,26 @@
 </head>
 <body>
   <div id="login" hidden>
-    <form class="card login" id="loginForm">
+    <div class="card login">
       <span class="brand"><span class="brand-mark">X</span>LicenseX</span>
       <p class="muted">Admin sign in</p>
-      <div class="field"><input type="password" id="pw" placeholder="Admin password" autocomplete="current-password" required autofocus></div>
-      <div class="err" id="loginErr" hidden></div>
-      <button class="btn primary" style="width:100%;justify-content:center">Sign in</button>
-    </form>
+      <div class="err" id="notAdmin" hidden></div>
+      <div class="oauth" id="oauth" hidden></div>
+      <div class="divider" id="or" hidden>or</div>
+      <form id="loginForm">
+        <div class="field"><input type="password" id="pw" placeholder="Admin password" autocomplete="current-password" required></div>
+        <div class="err" id="loginErr" hidden></div>
+        <button class="btn primary" style="width:100%;justify-content:center">Sign in with password</button>
+      </form>
+      <a class="muted" href="/" style="display:block;text-align:center;margin-top:16px;font-size:14px">&larr; Back to the site</a>
+    </div>
   </div>
   <div id="app" class="shell" hidden>
     <aside>
       <span class="brand"><span class="brand-mark">X</span>LicenseX</span>
       <nav id="nav"></nav>
-      <button class="btn ghost" id="logout" style="margin-top:auto">Sign out</button>
+      <div id="whoami" class="muted" style="margin-top:auto;font-size:13px;padding:0 4px"></div>
+      <button class="btn ghost" id="logout">Sign out</button>
     </aside>
     <main id="view"></main>
   </div>

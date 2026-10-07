@@ -62,3 +62,16 @@ tbody tr.clickable:hover { background: rgba(255, 255, 255, .025); }
 
 dialog { background: var(--surface); color: var(--text); border: 1px solid var(--border-strong); border-radius: var(--radius); padding: 24px; width: min(480px, calc(100vw - 32px)); box-shadow: 0 30px 80px rgba(0, 0, 0, .6); }
 dialog::backdrop { background: rgba(5, 6, 10, .7); backdrop-filter: blur(4px); }
+
+/* sign-in buttons (login page and admin) */
+.oauth { display: grid; gap: 10px; }
+.oauth-btn { display: flex; align-items: center; gap: 12px; width: 100%; padding: 11px 14px; border-radius: var(--radius-sm); border: 1px solid var(--border-strong); background: var(--surface-2); color: var(--text); font: inherit; font-weight: 600; font-size: 15px; cursor: pointer; transition: .15s; text-align: left; }
+.oauth-btn:hover { border-color: var(--accent); background: var(--accent-soft); transform: translateY(-1px); }
+.oauth-btn .logo { width: 26px; height: 26px; border-radius: 7px; display: grid; place-items: center; font-weight: 800; font-size: 14px; color: #fff; flex: none; }
+.oauth-btn .logo.google { background: #fff; color: #4285f4; }
+.oauth-btn .logo.discord { background: #5865f2; }
+.oauth-btn .logo.github { background: #24292f; border: 1px solid #484f58; }
+.divider { display: flex; align-items: center; gap: 12px; color: var(--faint); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; margin: 18px 0; }
+.divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+.me-chip { display: inline-flex; align-items: center; gap: 8px; }
+.me-chip img, .me-chip .ph { width: 24px; height: 24px; border-radius: 50%; background: var(--accent-soft); display: grid; place-items: center; font-size: 12px; font-weight: 700; color: var(--accent); object-fit: cover; }

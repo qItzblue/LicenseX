@@ -27,7 +27,7 @@ export function createCore(db) {
   };
 
   const defaults = { default_limit: '1', claims_enabled: '1', public_removal: '1', heartbeat_minutes: '1',
-    site_name: 'LicenseX', site_tagline: '', discord_url: '', store_url: '', website_url: '', support_email: '', bbb_group_id: '' };
+    admin_emails: '', site_name: 'LicenseX', site_tagline: '', discord_url: '', store_url: '', website_url: '', support_email: '', bbb_group_id: '' };
   const getSetting = k => q.setting.get(k)?.value ?? defaults[k];
   const setSetting = (k, v) => q.putSetting.run(k, String(v));
 

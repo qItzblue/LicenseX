@@ -4,5 +4,11 @@
   "port": 3000,
   "trustProxy": true,
   "dataDir": "",
-  "maxUploadMb": 64
+  "maxUploadMb": 64,
+  "adminEmails": ["you@example.com"],
+  "oauth": {
+    "google":  { "clientId": "", "clientSecret": "" },
+    "discord": { "clientId": "", "clientSecret": "" },
+    "github":  { "clientId": "", "clientSecret": "" }
+  }
 }

@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
 import { openDb, DatabaseSync } from './db.js';
 import { createBackup, restoreBackup, RestoreError } from './backup.js';
+import { providerDefs, authorizeUrl, exchangeCode, fetchProfile, parseEmails, EMAIL_RE } from './auth.js';
 import { createCore, normalizeKey, KEY_RE, hash, now } from './core.js';
 import { injectFiles } from './jarstamp.js';
 import { wrapJar, checkWrappable, WrapError } from './wrapjar.js';
@@ -26,6 +27,22 @@ const PRODUCTS_DIR = join(DATA, 'products');
 const PUBLIC_URL = String(process.env.LICENSEX_PUBLIC_URL || fileConfig.publicUrl || '').replace(/\/+$/, '');
 const MAX_UPLOAD = Number(process.env.LICENSEX_MAX_UPLOAD_MB || fileConfig.maxUploadMb || 64) * 1024 * 1024;
 const TRUST_PROXY = (process.env.TRUST_PROXY ?? String(fileConfig.trustProxy ?? '')) === '1' || fileConfig.trustProxy === true;
+
+// "Sign in with ..." (see docs/LOGIN.md). A provider is on when both its client id and secret are set.
+const PROVIDERS = providerDefs(process.env.LICENSEX_OAUTH_TEST_BASE);
+const oauthConf = {};
+for (const p of Object.keys(PROVIDERS)) {
+  const id = process.env[`LICENSEX_${p.toUpperCase()}_CLIENT_ID`] || fileConfig.oauth?.[p]?.clientId;
+  const secret = process.env[`LICENSEX_${p.toUpperCase()}_CLIENT_SECRET`] || fileConfig.oauth?.[p]?.clientSecret;
+  if (id && secret) oauthConf[p] = { clientId: String(id), clientSecret: String(secret) };
+}
+// Emails that are admins no matter what the database says (so you can never lock yourself out of the settings page).
+const CONFIG_ADMIN_EMAILS = parseEmails(process.env.LICENSEX_ADMIN_EMAILS ?? fileConfig.adminEmails ?? '');
+const DISABLE_PASSWORD_LOGIN = process.env.LICENSEX_DISABLE_PASSWORD_LOGIN === '1' || fileConfig.disablePasswordLogin === true;
+if (DISABLE_PASSWORD_LOGIN && (!Object.keys(oauthConf).length || !CONFIG_ADMIN_EMAILS.length)) {
+  console.error('[LicenseX] disablePasswordLogin needs at least one sign-in provider and one admin email in the config, or nobody could log in.');
+  process.exit(1);
+}
 
 mkdirSync(DATA, { recursive: true });
 mkdirSync(PRODUCTS_DIR, { recursive: true });
@@ -61,11 +78,20 @@ if (!ADMIN_PASSWORD) {
 
 const sign = v => createHmac('sha256', SESSION_SECRET).update(v).digest('base64url');
 const safeEq = (a, b) => { const x = Buffer.from(String(a)), y = Buffer.from(String(b)); return x.length === y.length && timingSafeEqual(x, y); };
+/** Signed, expiring cookie payloads (OAuth state, user sessions). Stateless, so they survive restarts. */
+const signToken = obj => { const p = Buffer.from(JSON.stringify(obj)).toString('base64url'); return `${p}.${sign(p)}`; };
+const readToken = tok => {
+  const [p, sig] = String(tok || '').split('.');
+  if (!p || !sig || !safeEq(sig, sign(p))) return null;
+  try { const o = JSON.parse(Buffer.from(p, 'base64url').toString()); return o.exp > Date.now() ? o : null; } catch { return null; }
+};
 const makeSession = () => { const exp = String(Date.now() + 12 * 3600e3); return `${exp}.${sign(exp)}`; };
 const validSession = tok => { const [exp, sig] = String(tok || '').split('.'); return !!sig && safeEq(sig, sign(exp)) && Number(exp) > Date.now(); };
 
 // --- tiny helpers --------------------------------------------------------
 const clientIp = req => (TRUST_PROXY && req.headers['x-forwarded-for']?.split(',')[0].trim()) || req.socket.remoteAddress?.replace(/^::ffff:/, '') || '';
+const isHttps = req => PUBLIC_URL.startsWith('https://') || String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
+const secure = req => (isHttps(req) ? '; Secure' : '');
 const cookies = req => Object.fromEntries((req.headers.cookie || '').split(/;\s*/).filter(Boolean).map(c => { const i = c.indexOf('='); return [c.slice(0, i), decodeURIComponent(c.slice(i + 1))]; }));
 const buckets = new Map();
 function rateLimit(id, max, windowMs) {
@@ -187,14 +213,73 @@ route('POST', '/api/public/remove', async ctx => {
 
 // Admin auth ------------------------------------------------------------------
 route('POST', '/api/admin/login', async ctx => {
+  if (DISABLE_PASSWORD_LOGIN) throw new HttpError(403, 'Password login is turned off. Sign in with Google, Discord or GitHub.');
   if (!rateLimit('login:' + ctx.ip, 8, 5 * 60e3)) throw new HttpError(429, 'Too many login attempts');
   const b = await body(ctx.req);
   if (!safeEq(hash(b.password ?? ''), hash(ADMIN_PASSWORD))) { core.log('admin', 'login.fail', ctx.ip); throw new HttpError(401, 'Wrong password'); }
   core.log('admin', 'login', ctx.ip);
-  return [200, { ok: true }, { 'Set-Cookie': `lx_admin=${makeSession()}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200` }];
+  return [200, { ok: true }, { 'Set-Cookie': `lx_admin=${makeSession()}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200${secure(ctx.req)}` }];
 });
-route('POST', '/api/admin/logout', async () => [200, { ok: true }, { 'Set-Cookie': 'lx_admin=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0' }]);
-route('GET', '/api/admin/me', async () => [200, { ok: true }], { admin: true });
+const CLEAR_COOKIES = ['lx_admin=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0', 'lx_user=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0'];
+route('POST', '/api/admin/logout', async () => [200, { ok: true }, { 'Set-Cookie': CLEAR_COOKIES }]);
+route('GET', '/api/admin/me', async ctx => [200, { ok: true, via: ctx.admin.via, name: ctx.admin.name, email: ctx.admin.email || '' }], { admin: true });
+
+// Who is signed in with Google/Discord/GitHub, and are they an admin? (public: the site header uses it)
+const adminEmailSet = () => new Set([...CONFIG_ADMIN_EMAILS, ...parseEmails(core.getSetting('admin_emails'))]);
+const sessionUser = req => readToken(cookies(req).lx_user);
+const isAdminUser = u => !!u && Array.isArray(u.emails) && u.emails.some(e => adminEmailSet().has(e)); // checked on every request
+const adminIdentity = req => {
+  if (validSession(cookies(req).lx_admin)) return { via: 'password', name: 'Admin password' };
+  const u = sessionUser(req);
+  return isAdminUser(u) ? { via: u.p, name: u.name, email: u.email } : null;
+};
+route('GET', '/api/auth/me', async ctx => {
+  const u = sessionUser(ctx.req);
+  return [200, {
+    user: u ? { name: u.name, email: u.email, avatar: u.avatar, provider: u.p, isAdmin: isAdminUser(u) } : null,
+    providers: Object.keys(oauthConf).map(id => ({ id, label: PROVIDERS[id].label })),
+    password_login: !DISABLE_PASSWORD_LOGIN,
+  }];
+});
+route('POST', '/api/auth/logout', async () => [200, { ok: true }, { 'Set-Cookie': CLEAR_COOKIES }]);
+
+// OAuth redirect flow: GET /auth/<provider>  ->  provider  ->  GET /auth/<provider>/callback
+const NEXT_OK = new Set(['/', '/admin', '/login']);
+const redirect = (res, to, cookiesOut = []) => { res.writeHead(302, { Location: to, 'Cache-Control': 'no-store', ...(cookiesOut.length ? { 'Set-Cookie': cookiesOut } : {}) }); res.end(); };
+async function handleAuth(req, res, url) {
+  const m = /^\/auth\/(google|discord|github)(\/callback)?$/.exec(url.pathname);
+  if (!m || req.method !== 'GET') throw new HttpError(404, 'Not found');
+  const [, provider, isCallback] = m, conf = oauthConf[provider], def = PROVIDERS[provider], ip = clientIp(req);
+  const fail = code => redirect(res, `/login?error=${code}`, ['lx_oauth=; HttpOnly; SameSite=Lax; Path=/auth; Max-Age=0']);
+  if (!conf) return fail('notconfigured');
+  if (!rateLimit('auth:' + ip, 60, 60e3)) throw new HttpError(429, 'Too many sign-in attempts. Try again in a minute.');
+  const redirectUri = `${publicBase(req)}/auth/${provider}/callback`;
+
+  if (!isCallback) {
+    const state = randomBytes(18).toString('base64url');
+    const next = NEXT_OK.has(url.searchParams.get('next')) ? url.searchParams.get('next') : '/';
+    const cookie = `lx_oauth=${signToken({ s: state, p: provider, n: next, exp: Date.now() + 10 * 60e3 })}; HttpOnly; SameSite=Lax; Path=/auth; Max-Age=600${secure(req)}`;
+    return redirect(res, authorizeUrl(def, { clientId: conf.clientId, redirectUri, state }), [cookie]);
+  }
+
+  const pending = readToken(cookies(req).lx_oauth);
+  const state = url.searchParams.get('state') || '';
+  if (!pending || pending.p !== provider || !safeEq(pending.s, state)) return fail('state'); // CSRF / expired / replayed
+  if (url.searchParams.get('error')) return fail('denied');
+  const code = url.searchParams.get('code');
+  if (!code) return fail('failed');
+  let profile;
+  try { profile = await fetchProfile(provider, def, await exchangeCode(def, { ...conf, redirectUri, code })); }
+  catch (e) { core.log('system', 'login.error', provider, e.message); return fail('failed'); }
+  if (!profile.id) return fail('failed');
+
+  const user = { p: provider, id: profile.id, name: String(profile.name).slice(0, 80), avatar: String(profile.avatar).slice(0, 300),
+    email: profile.email, emails: profile.emails.slice(0, 5), exp: Date.now() + 7 * 86400e3 };
+  core.log('user', isAdminUser(user) ? 'login.admin' : 'login', `${provider}:${profile.email || profile.id}`);
+  redirect(res, pending.n && NEXT_OK.has(pending.n) ? pending.n : '/', [
+    `lx_user=${signToken(user)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${7 * 86400}${secure(req)}`,
+    'lx_oauth=; HttpOnly; SameSite=Lax; Path=/auth; Max-Age=0']);
+}
 
 // Admin: stats ----------------------------------------------------------------
 route('GET', '/api/admin/stats', async () => {
@@ -418,6 +503,8 @@ route('DELETE', '/api/admin/groups/:id', async ctx => {
 // Admin: settings + audit -----------------------------------------------------
 route('GET', '/api/admin/settings', async ctx => [200, {
   ...Object.fromEntries(['default_limit', 'claims_enabled', 'public_removal', 'heartbeat_minutes', 'bbb_group_id', ...SITE_KEYS].map(k => [k, core.getSetting(k)])),
+  admin_emails: parseEmails(core.getSetting('admin_emails')), admin_emails_config: CONFIG_ADMIN_EMAILS, password_login: !DISABLE_PASSWORD_LOGIN,
+  oauth: Object.fromEntries(Object.keys(PROVIDERS).map(p => [p, { label: PROVIDERS[p].label, configured: !!oauthConf[p], callback_url: `${publicBase(ctx.req)}/auth/${p}/callback` }])),
   bbb_secret: bbbSecret(),
   bbb_callback_url: `${PUBLIC_URL || `${ctx.req.headers['x-forwarded-proto'] || 'http'}://${ctx.req.headers.host}`}/api/v1/builtbybit/license`,
 }], { admin: true });
@@ -447,6 +534,13 @@ route('PUT', '/api/admin/settings', async ctx => {
     const g = b.bbb_group_id ? int(b.bbb_group_id, { min: 1 }) : '';
     if (g && !db.prepare('SELECT 1 FROM license_groups WHERE id=?').get(g)) throw new HttpError(400, 'Unknown group');
     core.setSetting('bbb_group_id', g);
+  }
+  if ('admin_emails' in b) {
+    const list = parseEmails(b.admin_emails);
+    const bad = list.find(e => !EMAIL_RE.test(e));
+    if (bad) throw new HttpError(400, `"${bad}" is not a valid email address`);
+    if (list.length > 100) throw new HttpError(400, 'At most 100 admin emails');
+    core.setSetting('admin_emails', list.join('\n'));
   }
   if (b.regenerate_bbb_secret) core.setSetting('bbb_secret', randomBytes(24).toString('base64url'));
   core.log('admin', 'settings.update', '', JSON.stringify({ ...b, bbb_secret: undefined }));
@@ -501,6 +595,7 @@ const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=u
 function serveStatic(req, res, pathname) {
   if (pathname === '/') pathname = '/index.html';
   if (pathname === '/admin') pathname = '/admin.html';
+  if (pathname === '/login') pathname = '/login.html';
   const file = resolve(WEB, '.' + pathname);
   const rel = relative(WEB, file);
   if (!rel || rel.startsWith('..') || isAbsolute(rel) || !existsSync(file) || !statSync(file).isFile()) return json(res, 404, { ok: false, message: 'Not found' });
@@ -513,13 +608,14 @@ export const server = createServer(async (req, res) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'no-referrer');
-  res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; frame-ancestors 'none'");
+  res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https://lh3.googleusercontent.com https://avatars.githubusercontent.com https://cdn.discordapp.com; frame-ancestors 'none'");
   try {
     const dl = url.pathname.match(/^\/download\/([a-z0-9-]{1,48})$/);
     if (dl) {
       if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'Method not allowed');
       return handleDownload(req, res, dl[1], url);
     }
+    if (url.pathname.startsWith('/auth/')) return await handleAuth(req, res, url);
     if (!url.pathname.startsWith('/api/')) {
       if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'Method not allowed');
       return serveStatic(req, res, decodeURIComponent(url.pathname));
@@ -527,8 +623,9 @@ export const server = createServer(async (req, res) => {
     for (const [method, re, handler, opts] of routes) {
       const m = req.method === method && re.exec(url.pathname);
       if (!m) continue;
-      if (opts.admin && !validSession(cookies(req).lx_admin)) throw new HttpError(401, 'Not signed in');
-      const [status, payload, headers] = await handler({ req, url, params: m.groups || {}, ip: clientIp(req) });
+      const admin = adminIdentity(req);
+      if (opts.admin && !admin) throw new HttpError(401, 'Not signed in');
+      const [status, payload, headers] = await handler({ req, url, params: m.groups || {}, ip: clientIp(req), admin });
       return json(res, status, payload, headers);
     }
     throw new HttpError(404, 'Not found');

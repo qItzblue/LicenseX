@@ -7,16 +7,35 @@ const PAGES = { overview: 'Overview', licenses: 'Licenses', servers: 'Servers', 
 
 // --- auth ------------------------------------------------------------------
 async function boot() {
-  try { await api('GET', '/api/admin/me'); showApp(); } catch { $('login').hidden = false; $('app').hidden = true; }
+  try { const me = await api('GET', '/api/admin/me'); window.__me = me; showApp(); }
+  catch { await showLogin(); }
+}
+async function showLogin() {
+  $('login').hidden = false; $('app').hidden = true;
+  let auth = { providers: [], password_login: true, user: null };
+  try { auth = await api('GET', '/api/auth/me'); } catch {}
+  $('oauth').replaceChildren(...auth.providers.map(p => h('a', { class: 'oauth-btn', href: `/auth/${p.id}?next=/admin` },
+    h('span', { class: `logo ${p.id}` }, p.label.charAt(0)), `Continue with ${p.label}`)));
+  $('oauth').hidden = !auth.providers.length;
+  $('loginForm').hidden = !auth.password_login;
+  $('or').hidden = !(auth.providers.length && auth.password_login);
+  if (auth.user && !auth.user.isAdmin) {
+    $('notAdmin').textContent = auth.user.email
+      ? `${auth.user.email} is signed in but is not on the admin list.`
+      : `${auth.user.name} is signed in with ${auth.user.provider}, which shared no verified email, so it can't be an admin.`;
+    $('notAdmin').hidden = false;
+  }
 }
 $('loginForm').addEventListener('submit', async e => {
   e.preventDefault();
   try { await api('POST', '/api/admin/login', { password: $('pw').value }); $('login').hidden = true; showApp(); }
   catch (err) { $('loginErr').textContent = err.message; $('loginErr').hidden = false; }
 });
-$('logout').addEventListener('click', async () => { await api('POST', '/api/admin/logout'); location.reload(); });
+$('logout').addEventListener('click', async () => { await api('POST', '/api/auth/logout'); location.href = '/'; });
 function showApp() {
   $('app').hidden = false;
+  const me = window.__me;
+  if (me) $('whoami').textContent = me.email ? `${me.name} (${me.email})` : me.name;
   $('nav').replaceChildren(...Object.entries(PAGES).map(([k, label]) => h('a', { 'data-page': k, onclick: () => (location.hash = k) }, label)));
   route();
 }
@@ -310,7 +329,24 @@ async function settings() {
     h('div', { class: 'row wrap' }, h('a', { class: 'btn primary', href: '/api/admin/backup', download: '' }, '⬇ Download backup'),
       h('button', { class: 'btn', onclick: () => restoreInput.click() }, 'Restore from backup'), restoreInput));
 
-  view.replaceChildren(head('Settings'), bbb, brand, backup, h('div', { class: 'card', style: { maxWidth: '680px' } },
+  const emailsBox = h('textarea', { id: 's-admin-emails', rows: 4, placeholder: 'you@example.com\nteammate@example.com', style: { fontFamily: 'var(--mono)', fontSize: '13px' } }, (s.admin_emails || []).join('\n'));
+  const access = h('div', { class: 'card', style: { maxWidth: '680px', marginBottom: '16px' } },
+    h('h3', { style: { marginBottom: '4px' } }, 'Sign-in & admin access'),
+    h('p', { class: 'muted', style: { marginTop: 0, fontSize: '14px' } }, 'Visitors can sign in with Google, Discord or GitHub. Anyone whose verified email is on this list gets an Admin button in the site header and can open this panel.'),
+    h('div', { class: 'field' }, h('label', null, 'Admin emails (one per line)'), emailsBox,
+      h('div', { class: 'hint' }, 'Takes effect immediately, and removing an address cuts access on its very next click. Only emails the provider has verified count.')),
+    (s.admin_emails_config || []).length ? h('div', { class: 'field' }, h('label', null, 'Always admins (set in the server config, cannot be removed here)'),
+      h('div', { class: 'row wrap' }, s.admin_emails_config.map(e => h('span', { class: 'tag' }, e)))) : null,
+    h('button', { class: 'btn primary', onclick: () => save({ admin_emails: emailsBox.value }) }, 'Save admins'),
+    h('div', { class: 'divider' }, 'Sign-in providers'),
+    ...Object.entries(s.oauth || {}).map(([id, p]) => h('div', { class: 'field' },
+      h('div', { class: 'row spread', style: { marginBottom: '6px' } }, h('b', null, p.label), h('span', { class: 'chip ' + (p.configured ? 'active' : 'idle') }, p.configured ? 'Ready' : 'Not set up')),
+      h('label', null, 'Redirect / callback URL to give ' + p.label),
+      h('div', { class: 'url-row' }, h('input', { class: 'mono', readonly: true, value: p.callback_url, onclick: e => e.target.select() }), h('button', { class: 'btn sm', onclick: () => copy(p.callback_url) }, 'Copy')),
+      !p.configured && h('div', { class: 'hint' }, `Create the app, then set LICENSEX_${id.toUpperCase()}_CLIENT_ID and LICENSEX_${id.toUpperCase()}_CLIENT_SECRET (or the config file). Steps: docs/LOGIN.md`))),
+    s.password_login === false ? h('div', { class: 'hint' }, 'Password login is turned off in the server config.') : h('div', { class: 'hint' }, 'The admin password still works as a backup way in.'));
+
+  view.replaceChildren(head('Settings'), access, bbb, brand, backup, h('div', { class: 'card', style: { maxWidth: '680px' } },
     num('default_limit', 'Default server limit', 'Applies to licenses with no group and no override. -1 = unlimited.', -1),
     num('heartbeat_minutes', 'Plugin check-in interval (minutes)', 'How often running plugins re-validate. Removals and blocks take effect within this window.', 1),
     toggle('claims_enabled', 'Issue licenses on download', 'When off, new downloads cannot claim a license (existing licenses keep working).'),
