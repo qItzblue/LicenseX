@@ -51,8 +51,8 @@ Optional, but it lets you open the admin panel from a button on your site instea
 
 Render deploys from GitHub, not from the zip.
 
-1. Put the project in a GitHub repo you control (this one is `qItzblue/LicenseX`, branch `claude/dreamy-cori-gp73ku`;
-   merge it to `main` or choose that branch on Render). Private repos work once you connect GitHub to Render.
+1. Put the project in a GitHub repo you control. This one is `qItzblue/LicenseX`: pick the **`deploy`** branch, which holds
+   only the files needed to run LicenseX (no tests or plugin sources). Private repos work once you connect GitHub to Render.
 2. On [render.com](https://render.com): **New + -> Blueprint**, pick the repo and branch. Render reads `render.yaml`.
    (No Blueprint? **New + -> Web Service**, pick the repo, **Language: Docker**, Instance type **Free**.)
 3. Enter the two values it asks for: `LICENSEX_ADMIN_PASSWORD` (long and random) and `LICENSEX_PUBLIC_URL`. You only
