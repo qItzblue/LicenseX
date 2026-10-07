@@ -11,7 +11,8 @@
     "test": "node --test test/*.test.js",
     "test:paper": "node test/paper-e2e.mjs",
     "test:build": "node test/build-e2e.mjs",
-    "bundle": "node scripts/bundle.mjs"
+    "bundle": "node scripts/bundle.mjs",
+    "deploy-branch": "node scripts/deploy-branch.mjs"
   },
   "license": "Unlicense"
 }
