@@ -41,7 +41,7 @@ async function showLogin() {
 }
 $('loginForm').addEventListener('submit', async e => {
   e.preventDefault();
-  try { await api('POST', '/api/admin/login', { password: $('pw').value }); $('login').hidden = true; showApp(); }
+  try { await api('POST', '/api/admin/login', { password: $('pw').value }); $('login').hidden = true; await boot(); }
   catch (err) { $('loginErr').textContent = err.message; $('loginErr').hidden = false; }
 });
 $('logout').addEventListener('click', async () => { await api('POST', '/api/auth/logout'); location.href = '/'; });
