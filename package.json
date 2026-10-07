@@ -11,6 +11,7 @@
     "test": "node --test test/*.test.js",
     "test:paper": "node test/paper-e2e.mjs",
     "test:build": "node test/build-e2e.mjs",
+    "test:ui": "node test/ui-smoke.mjs",
     "bundle": "node scripts/bundle.mjs",
     "deploy-branch": "node scripts/deploy-branch.mjs"
   },
