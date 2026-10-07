@@ -1,31 +1,24 @@
-# 1. Start with your app's base environment (Assuming Node.js here)
-FROM node:18-bullseye
+# Base Node image
+FROM node:20-bookworm
 
-# 2. Install Java (JDK 17) and Maven
+# Install JDK 17, Maven, Gradle, and required dependencies
 RUN apt-get update && \
-    apt-get install -y openjdk-17-jdk maven wget unzip && \
+    apt-get install -y openjdk-17-jdk maven gradle wget unzip git && \
     rm -rf /var/lib/apt/lists/*
 
-# 3. Set the JAVA_HOME environment variable
+# Set Environment Variables for Java
 ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 ENV PATH="$JAVA_HOME/bin:${PATH}"
 
-# 4. Install Gradle (Version 8.5)
-ENV GRADLE_VERSION=8.5
-RUN wget -q https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip -P /tmp && \
-    unzip -q -d /opt/gradle /tmp/gradle-${GRADLE_VERSION}-bin.zip && \
-    ln -s /opt/gradle/gradle-${GRADLE_VERSION}/bin/gradle /usr/local/bin/gradle && \
-    rm /tmp/gradle-${GRADLE_VERSION}-bin.zip
-
-# 5. Set up your application directory
 WORKDIR /app
 
-# 6. Copy all your files into the container
-COPY . .
-
-# 7. Install your app's dependencies (e.g., npm install)
+# Install app dependencies
+COPY package*.json ./
 RUN npm install
 
-# 8. Start your application
-# (Change this if your app starts differently, like "node index.js")
+# Copy source code
+COPY . .
+
+# Expose port and start application
+EXPOSE 3000
 CMD ["npm", "start"]
