@@ -29,6 +29,8 @@ const PRODUCTS_DIR = join(DATA, 'products');
 const PUBLIC_URL = String(process.env.LICENSEX_PUBLIC_URL || fileConfig.publicUrl || '').replace(/\/+$/, '');
 const MAX_UPLOAD = Number(process.env.LICENSEX_MAX_UPLOAD_MB || fileConfig.maxUploadMb || 64) * 1024 * 1024;
 const TRUST_PROXY = (process.env.TRUST_PROXY ?? String(fileConfig.trustProxy ?? '')) === '1' || fileConfig.trustProxy === true;
+// How many reverse proxies sit in front of this server (Render = 1; Cloudflare in front of Render = 2). Only used with TRUST_PROXY.
+const PROXY_HOPS = Math.max(1, Math.floor(Number(process.env.LICENSEX_PROXY_HOPS || fileConfig.proxyHops || 1)) || 1);
 
 // "Sign in with ..." (see docs/LOGIN.md). A provider is on when both its client id and secret are set.
 const PROVIDERS = providerDefs(process.env.LICENSEX_OAUTH_TEST_BASE);
@@ -100,10 +102,33 @@ const makeSession = () => { const exp = String(Date.now() + 12 * 3600e3); return
 const validSession = tok => { const [exp, sig] = String(tok || '').split('.'); return !!sig && safeEq(sig, sign(exp)) && Number(exp) > Date.now(); };
 
 // --- tiny helpers --------------------------------------------------------
-const clientIp = req => (TRUST_PROXY && req.headers['x-forwarded-for']?.split(',')[0].trim()) || req.socket.remoteAddress?.replace(/^::ffff:/, '') || '';
-const isHttps = req => PUBLIC_URL.startsWith('https://') || String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
+/**
+ * The caller's address. Behind a proxy every hop APPENDS the address it saw to X-Forwarded-For, so the entries the
+ * client could have forged are on the left; the trustworthy one is `PROXY_HOPS` places from the right.
+ */
+const clientIp = req => {
+  const direct = req.socket.remoteAddress?.replace(/^::ffff:/, '') || '';
+  if (!TRUST_PROXY) return direct;
+  const chain = String(req.headers['x-forwarded-for'] || '').split(',').map(x => x.trim()).filter(Boolean);
+  const ip = chain[Math.max(0, chain.length - PROXY_HOPS)];
+  return (ip && ip.length <= 64 ? ip.replace(/^::ffff:/, '') : '') || direct;
+};
+/** The first X-Forwarded-Proto value, if it is something sane. */
+const forwardedProto = req => { const v = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase(); return v === 'https' || v === 'http' ? v : ''; };
+const isHttps = req => PUBLIC_URL.startsWith('https://') || forwardedProto(req) === 'https';
 const secure = req => (isHttps(req) ? '; Secure' : '');
-const cookies = req => Object.fromEntries((req.headers.cookie || '').split(/;\s*/).filter(Boolean).map(c => { const i = c.indexOf('='); return [c.slice(0, i), decodeURIComponent(c.slice(i + 1))]; }));
+/** Cookies are attacker-controlled input: a malformed one must never turn into a 500 on every route. */
+const cookies = req => {
+  const out = {};
+  for (const c of String(req.headers.cookie || '').split(/;\s*/)) {
+    const i = c.indexOf('=');
+    if (i < 1) continue;
+    let v = c.slice(i + 1);
+    try { v = decodeURIComponent(v); } catch { /* keep the raw value; it just won't verify */ }
+    out[c.slice(0, i)] = v;
+  }
+  return out;
+};
 const buckets = new Map();
 function rateLimit(id, max, windowMs) {
   const t = Date.now(), b = (buckets.get(id) || []).filter(x => t - x < windowMs);
@@ -143,14 +168,19 @@ const slugify = s => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace
 async function saveUpload(req, destPath) {
   const tmp = destPath + '.tmp-' + randomBytes(4).toString('hex');
   const out = createWriteStream(tmp);
-  let size = 0;
+  let size = 0, failure = null;
+  out.on('error', e => { failure = e; }); // a full or read-only disk must fail this request, not crash the process
+  const check = () => { if (failure) throw new HttpError(500, `Could not write the upload to disk (${failure.code || failure.message})`); };
   try {
     for await (const c of req) {
       size += c.length;
       if (size > MAX_UPLOAD) throw new HttpError(413, `File too large (max ${Math.round(MAX_UPLOAD / 1048576)} MB)`);
-      if (!out.write(c)) await new Promise(r => out.once('drain', r));
+      check();
+      if (!out.write(c)) { await new Promise(r => { out.once('drain', r); out.once('error', r); }); check(); }
     }
-    await new Promise((res, rej) => out.end(err => err ? rej(err) : res()));
+    check();
+    await new Promise(r => out.end(r));
+    check();
   } catch (e) { out.destroy(); try { rmSync(tmp, { force: true }); } catch {} throw e; }
   if (size === 0) { try { rmSync(tmp, { force: true }); } catch {} throw new HttpError(400, 'Empty upload'); }
   renameSync(tmp, destPath);
@@ -306,7 +336,7 @@ async function handleAuth(req, res, url) {
   if (!profile.id) return fail('failed');
 
   const user = { p: provider, id: profile.id, name: String(profile.name).slice(0, 80), avatar: String(profile.avatar).slice(0, 300),
-    email: profile.email, emails: profile.emails.slice(0, 5), exp: Date.now() + 7 * 86400e3 };
+    email: profile.email, emails: profile.emails.slice(0, 20), exp: Date.now() + 7 * 86400e3 };
   core.log('user', isAdminUser(user) ? 'login.admin' : 'login', `${provider}:${profile.email || profile.id}`);
   redirect(res, pending.n && NEXT_OK.has(pending.n) ? pending.n : '/', [
     `lx_user=${signToken(user)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${7 * 86400}${secure(req)}`,
@@ -415,16 +445,22 @@ route('DELETE', '/api/admin/servers/:id', async ctx => {
 
 // Admin: products (plugin downloads) ------------------------------------------
 const productFile = slug => join(PRODUCTS_DIR, slug + '.bin');
-const downloadUrlFor = (req, p) => {
-  const origin = PUBLIC_URL || `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers.host || 'localhost:' + PORT}`;
-  return `${origin}/download/${p.slug}?token=${p.token}`;
+/**
+ * The address buyers and OAuth providers should use for this server. Set LICENSEX_PUBLIC_URL: without it we have to
+ * guess from the request, and the Host header is whatever the caller typed (only a plain host[:port] is accepted).
+ */
+const HOST_RE = /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*|\[[0-9a-f:.]+\])(?::\d{1,5})?$/i;
+const publicBase = req => {
+  if (PUBLIC_URL) return PUBLIC_URL;
+  const host = String(req.headers.host || '');
+  return `${(TRUST_PROXY && forwardedProto(req)) || 'http'}://${HOST_RE.test(host) ? host : 'localhost:' + PORT}`;
 };
+const downloadUrlFor = (req, p) => `${publicBase(req)}/download/${p.slug}?token=${p.token}`;
 const productRow = (req, p) => {
   const { wrap_ok, wrap_code, wrap_message, main_class, ...rest } = p;
   return { ...rest, download_url: downloadUrlFor(req, p),
     integration: !p.has_file ? null : { ok: !!wrap_ok, integrated: wrap_code === 'ALREADY_INTEGRATED', code: wrap_code, message: wrap_message, main: main_class } };
 };
-const publicBase = req => PUBLIC_URL || `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers.host}`;
 route('GET', '/api/admin/products', async ctx => {
   const rows = db.prepare('SELECT * FROM products WHERE workspace_id=? ORDER BY id DESC').all(ctx.wsId);
   return [200, rows.map(p => productRow(ctx.req, p))];
@@ -444,25 +480,25 @@ route('POST', '/api/admin/products', async ctx => {
 /** Stores `buf` as the plugin file of product `p` and records whether it can be wrapped. */
 function setProductFile(ctx, p, buf, filename) {
   try { injectFiles(buf, [{ name: '.licensex-probe', content: '1' }]); }
-  catch { throw new HttpError(400, 'That file is not a valid .jar archive.'); }
-  writeFileSync(productFile(p.slug), buf);
+  catch { throw new HttpError(400, 'That file is not a valid .jar/.zip archive.'); }
   const w = checkWrappable(buf);
+  const tmp = productFile(p.slug) + '.new-' + randomBytes(4).toString('hex');
+  writeFileSync(tmp, buf);
+  renameSync(tmp, productFile(p.slug));
   db.prepare('UPDATE products SET filename=?, size=?, has_file=1, wrap_ok=?, wrap_code=?, wrap_message=?, main_class=? WHERE id=?')
     .run(filename, buf.length, w.ok ? 1 : 0, w.code, w.message, w.main || '', p.id);
   wl(ctx, 'product.upload', p.slug, `${filename} ${buf.length}B ${w.ok ? 'integrated:' + w.main : w.code}`);
 }
-// Raw binary upload (the plugin jar). Streamed to disk, not parsed as JSON.
+// Raw binary upload (the plugin jar). Streamed to a temp file and only swapped in once it checks out, so a bad
+// upload can never replace (or delete) the jar that buyers are currently downloading.
 route('POST', '/api/admin/products/:id/file', async ctx => {
   const p = ownProduct(ctx, ctx.params.id);
   const filename = str(ctx.req.headers['x-filename'] || 'plugin.jar', 80);
-  const size = await saveUpload(ctx.req, productFile(p.slug));
-  // Reject anything that isn't a readable zip/jar, so download-time stamping can't fail later.
-  try { injectFiles(readFileSync(productFile(p.slug)), [{ name: '.licensex-probe', content: '1' }]); }
-  catch { rmSync(productFile(p.slug), { force: true }); throw new HttpError(400, 'That file is not a valid .jar/.zip archive.'); }
-  const w = checkWrappable(readFileSync(productFile(p.slug)));
-  db.prepare('UPDATE products SET filename=?, size=?, has_file=1, wrap_ok=?, wrap_code=?, wrap_message=?, main_class=? WHERE id=?')
-    .run(filename, size, w.ok ? 1 : 0, w.code, w.message, w.main || '', p.id);
-  wl(ctx, 'product.upload', p.slug, `${filename} ${size}B ${w.ok ? 'integrated:' + w.main : w.code}`);
+  const tmp = join(DATA, '.product-upload-' + randomBytes(4).toString('hex'));
+  try {
+    await saveUpload(ctx.req, tmp);
+    setProductFile(ctx, p, readFileSync(tmp), filename);
+  } finally { rmSync(tmp, { force: true }); }
   return [200, productRow(ctx.req, db.prepare('SELECT * FROM products WHERE id=?').get(p.id))];
 }, { admin: true });
 // The jar to upload to BuiltByBit: wrapped, but with no key. BuiltByBit overwrites %%__BBB_LICENSE__%% per buyer.
@@ -605,6 +641,7 @@ route('GET', '/api/admin/settings', async ctx => {
     ...Object.fromEntries(WS_SETTING_KEYS.map(k => [k, core.getSetting(k, w)])),
     bbb_secret: bbbSecretOf(w),
     bbb_callback_url: `${publicBase(ctx.req)}/api/v1/builtbybit/license`,
+    public_url_set: !!PUBLIC_URL,
   };
   if (ctx.admin.role === 'platform') Object.assign(out, {
     ...Object.fromEntries(SITE_KEYS.map(k => [k, core.getSetting(k)])),
@@ -847,6 +884,10 @@ function handleDownload(req, res, slug, url) {
   const p = db.prepare('SELECT * FROM products WHERE slug=?').get(slug);
   if (!p || !p.has_file || !p.enabled) throw new HttpError(404, 'This download is not available.');
   if (!safeEq(url.searchParams.get('token') || '', p.token)) throw new HttpError(403, 'Invalid or missing download token.');
+  if (req.method === 'HEAD') { // link checkers and previews: answer, but never mint a license or count a download
+    res.writeHead(200, { 'Content-Type': 'application/java-archive', 'Cache-Control': 'no-store' });
+    return res.end();
+  }
 
   // A known buyer (?user=) always gets the same license. With no buyer id and no (real) nonce - e.g. someone
   // opening the raw link - there is nothing to match on, so that download gets a fresh license.
@@ -880,12 +921,13 @@ function serveStatic(req, res, pathname) {
 }
 
 export const server = createServer(async (req, res) => {
-  const url = new URL(req.url, 'http://x');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https://lh3.googleusercontent.com https://avatars.githubusercontent.com https://cdn.discordapp.com; frame-ancestors 'none'");
   try {
+    let url;
+    try { url = new URL(req.url, 'http://x'); } catch { throw new HttpError(400, 'Bad request'); }
     const dl = url.pathname.match(/^\/download\/([a-z0-9-]{1,48})$/);
     if (dl) {
       if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'Method not allowed');
@@ -894,7 +936,9 @@ export const server = createServer(async (req, res) => {
     if (url.pathname.startsWith('/auth/')) return await handleAuth(req, res, url);
     if (!url.pathname.startsWith('/api/')) {
       if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'Method not allowed');
-      return serveStatic(req, res, decodeURIComponent(url.pathname));
+      let path;
+      try { path = decodeURIComponent(url.pathname); } catch { throw new HttpError(400, 'Bad request'); }
+      return serveStatic(req, res, path);
     }
     for (const [method, re, handler, opts] of routes) {
       const m = req.method === method && re.exec(url.pathname);
@@ -925,5 +969,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     console.error(`[LicenseX] Port ${PORT} is already in use (probably an old LicenseX still running). Close it or start on another port, e.g. PORT=3001 npm start (PowerShell: $env:PORT=3001; npm start).`);
     process.exit(1);
   });
-  server.listen(PORT, () => console.log(`[LicenseX] listening on http://localhost:${PORT}  (admin: /admin)`));
+  server.listen(PORT, () => {
+    console.log(`[LicenseX] listening on http://localhost:${PORT}  (admin: /admin)`);
+    if (!PUBLIC_URL && (TRUST_PROXY || process.env.NODE_ENV === 'production'))
+      console.warn('[LicenseX] LICENSEX_PUBLIC_URL is not set. Download links, the license address baked into plugins and sign-in redirects are guessed from each request, which can be wrong behind a proxy. Set it to your real https address.');
+  });
 }

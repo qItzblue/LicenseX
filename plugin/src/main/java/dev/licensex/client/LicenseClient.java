@@ -67,6 +67,20 @@ public final class LicenseClient {
         } catch (IOException e) { return Optional.empty(); }
     }
 
+    /** Remember that the server confirmed this license just now (lets a restart ride out a short outage). */
+    public void markVerified() {
+        try { Files.createDirectories(dataDir); Files.writeString(dataDir.resolve(".last-ok"), Long.toString(System.currentTimeMillis())); }
+        catch (IOException ignored) {}
+    }
+
+    /** True if the server confirmed this license within the last {@code graceMillis}. */
+    public boolean verifiedWithin(long graceMillis) {
+        try {
+            Path f = dataDir.resolve(".last-ok");
+            return Files.exists(f) && System.currentTimeMillis() - Long.parseLong(Files.readString(f).trim()) < graceMillis;
+        } catch (IOException | RuntimeException e) { return false; }
+    }
+
     /** Link to this license's own page on the LicenseX website. */
     public String portalUrl(String key) { return baseUrl + "/?key=" + key; }
 

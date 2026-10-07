@@ -76,8 +76,9 @@ export async function fetchProfile(provider, def, token) {
   }
   if (provider === 'github') {
     const u = await get(def.userUrl, 'GitHub profile');
-    let list = [];
-    try { list = await get(def.emailsUrl, 'GitHub emails'); } catch { /* no user:email scope or none: treated as no verified email */ }
+    // If this fails we must fail the sign-in: carrying on would issue a session with no emails, silently locking an
+    // admin out (and replacing their working session) over a transient GitHub error.
+    const list = await get(def.emailsUrl, 'GitHub emails');
     const verified = (Array.isArray(list) ? list : []).filter(e => e && e.verified === true && e.email);
     const primary = verified.find(e => e.primary) || verified[0];
     return { id: String(u.id || ''), name: u.name || u.login || 'GitHub user', avatar: u.avatar_url || '',

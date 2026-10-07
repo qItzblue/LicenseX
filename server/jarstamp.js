@@ -19,9 +19,14 @@ const DOS_TIME = 0, DOS_DATE = 0x5221; // fixed 2021-01-01 so output is reproduc
 
 function findEocd(buf) {
   const min = Math.max(0, buf.length - (22 + 0xFFFF));
+  let loose = -1;
   for (let i = buf.length - 22; i >= min; i--) {
-    if (buf.readUInt32LE(i) === EOCD_SIG) return i;
+    if (buf.readUInt32LE(i) !== EOCD_SIG) continue;
+    const end = i + 22 + buf.readUInt16LE(i + 20); // the record's comment must run exactly to the end of the file
+    if (end === buf.length) return i;
+    if (loose < 0 && end < buf.length) loose = i;   // junk after the comment: tolerated only if nothing fits exactly
   }
+  if (loose >= 0) return loose;
   throw new Error('Not a valid zip/jar (no end-of-central-directory record found)');
 }
 
@@ -91,7 +96,8 @@ export function injectFiles(buf, files, { remove = () => false } = {}) {
   const centralOffset = buf.readUInt32LE(eocd + 16);
   const centralSize = buf.readUInt32LE(eocd + 12);
   const totalEntries = buf.readUInt16LE(eocd + 10);
-  if (centralOffset === 0xFFFFFFFF || totalEntries === 0xFFFF)
+  // ZIP64 is signalled by a locator record right before the EOCD (65535 entries on its own is an ordinary archive)
+  if (centralOffset === 0xFFFFFFFF || centralSize === 0xFFFFFFFF || (eocd >= 20 && buf.readUInt32LE(eocd - 20) === 0x07064b50))
     throw new Error('ZIP64 archives are not supported');
 
   const inject = files.map(f => {

@@ -42,8 +42,14 @@ public final class ExamplePlugin extends JavaPlugin {
         } catch (Exception e) { fail("Could not reach the license server: " + e.getMessage()); return; }
 
         LicenseClient.Result r = check();
-        if (!r.ok()) { fail(r.message()); return; }
-        getLogger().info("License " + key + " verified. Check or manage it at " + client.portalUrl(key));
+        if (r.denied()) { fail(r.message()); return; }   // the server said no: stop
+        if (r.network()) {                              // the server is unreachable: only keep going if it confirmed us recently
+            if (!client.verifiedWithin(OFFLINE_GRACE_MILLIS)) { fail("Could not reach the license server: " + r.message()); return; }
+            getLogger().warning("License server unreachable; continuing on the last successful check.");
+        } else {
+            client.markVerified();
+            getLogger().info("License " + key + " verified. Check or manage it at " + client.portalUrl(key));
+        }
         Bukkit.getScheduler().runTask(this, this::enableFeatures);
         long ticks = r.heartbeatMinutes() * 60L * 20L;
         heartbeat = Bukkit.getScheduler().runTaskTimerAsynchronously(this, this::beat, ticks, ticks);
@@ -55,7 +61,7 @@ public final class ExamplePlugin extends JavaPlugin {
 
     private void beat() {
         LicenseClient.Result r = check();
-        if (r.ok()) { lastGoodMillis = System.currentTimeMillis(); return; }
+        if (r.ok()) { lastGoodMillis = System.currentTimeMillis(); client.markVerified(); return; }
         if (r.network()) { // tolerate outages, but not forever
             if (System.currentTimeMillis() - lastGoodMillis > OFFLINE_GRACE_MILLIS) fail("License server unreachable for too long.");
             return;

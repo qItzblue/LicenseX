@@ -19,7 +19,8 @@ between hosts. Static/PHP-only hosts such as InfinityFree can't run it. Rebuild 
 
 Settings can come from `licensex.config.json` or environment variables (variables win): `PORT`, `LICENSEX_DATA`
 (data dir), `LICENSEX_PUBLIC_URL`, `LICENSEX_MAX_UPLOAD_MB`, `TRUST_PROXY=1` (read the client IP from
-`X-Forwarded-For` behind a proxy; needed for correct IPs online, and put TLS in front).
+`X-Forwarded-For` behind a proxy; needed for correct IPs online, and put TLS in front), `LICENSEX_PROXY_HOPS` (how many
+proxies are in front; default 1, use 2 for Cloudflare in front of Render).
 
 **Run it as a paid service:** other plugin developers sign up for a private workspace (their own plugins, licenses and
 settings), pick a plan on **/pricing**, and pay with Stripe or get a plan from you. You edit the plans, see every

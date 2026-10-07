@@ -15,7 +15,10 @@ files or PHP (InfinityFree, GitHub Pages, ...) cannot run it.
 `licensex.config.json` keys: `adminPassword`, `publicUrl` (the public https address), `port`, `trustProxy`
 (true when a proxy or the host sits in front, which is the normal case online), `dataDir`, `maxUploadMb`.
 Environment variables override the file: `LICENSEX_ADMIN_PASSWORD`, `LICENSEX_PUBLIC_URL`, `PORT`, `TRUST_PROXY=1`,
-`LICENSEX_DATA`, `LICENSEX_MAX_UPLOAD_MB`.
+`LICENSEX_DATA`, `LICENSEX_MAX_UPLOAD_MB`, `LICENSEX_PROXY_HOPS` (number of proxies in front of LicenseX, default 1; the real
+visitor address is read that many places from the right of `X-Forwarded-For`, so a forged header can't dodge the login and
+download rate limits). **Always set `LICENSEX_PUBLIC_URL`** online: download links, the address baked into plugins and the
+sign-in callbacks all use it.
 
 ## Offering it to other developers (optional)
 
