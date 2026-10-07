@@ -9,10 +9,9 @@ import java.util.Optional;
 /** Example of wiring LicenseX into a plugin. Copy LicenseClient plus the lifecycle below into yours. */
 public final class ExamplePlugin extends JavaPlugin {
 
-    // BuiltByBit replaces these literals in the downloaded jar. Each download has a unique nonce.
-    private static final String BBB_USER = "%%__USER__%%";
-    private static final String BBB_NONCE = "%%__NONCE__%%";
-    private static final String PRODUCT = "example-plugin";
+    // BuiltByBit overwrites this literal inside the jar at download time with the buyer's license key
+    // (placeholder type "External license key" pointing at LicenseX). Unmodified builds still contain "%%...".
+    private static final String BBB_LICENSE = "%%__BBB_LICENSE__%%";
 
     private LicenseClient client;
     private String key;
@@ -26,7 +25,7 @@ public final class ExamplePlugin extends JavaPlugin {
         // A jar downloaded through LicenseX carries its license + server URL stamped in; prefer those.
         Optional<LicenseClient.Embedded> embedded = LicenseClient.embedded();
         String url = embedded.map(LicenseClient.Embedded::url).filter(s -> s != null && !s.isBlank())
-                .orElse(getConfig().getString("licensex-url", "http://localhost:3000"));
+                .orElse(getConfig().getString("licensex-url", "https://licenses.example.com"));
         client = new LicenseClient(url, getDataFolder().toPath());
         // Everything network-related runs async; the plugin stays disabled-by-default until a license is confirmed.
         Bukkit.getScheduler().runTaskAsynchronously(this, () -> startup(embedded));
@@ -35,8 +34,8 @@ public final class ExamplePlugin extends JavaPlugin {
     private void startup(Optional<LicenseClient.Embedded> embedded) {
         try {
             Optional<String> k = client.storedKey();                                     // already licensed on this install
-            if (k.isEmpty() && embedded.isPresent()) k = client.useKey(embedded.get().key());   // key stamped into the download
-            if (k.isEmpty() && !BBB_NONCE.startsWith("%%")) k = client.claim(BBB_NONCE, BBB_USER, PRODUCT); // claim per download nonce
+            if (k.isEmpty() && embedded.isPresent()) k = client.useKey(embedded.get().key());   // key stamped by a LicenseX download
+            if (k.isEmpty() && BBB_LICENSE.startsWith("LX-")) k = client.useKey(BBB_LICENSE);  // key injected by BuiltByBit
             if (k.isEmpty()) k = Optional.ofNullable(getConfig().getString("license-key")).filter(s -> !s.isBlank());
             if (k.isEmpty()) { fail("No license found. Set license-key in config.yml."); return; }
             key = k.get();

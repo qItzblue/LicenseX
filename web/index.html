@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>LicenseX — Manage your license</title>
+  <title>Manage your license</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap">
   <link rel="stylesheet" href="/app.css">
@@ -30,19 +30,48 @@
     .srv .meta { color: var(--muted); font-size: 13px; margin-top: 2px; }
     .empty { text-align: center; color: var(--muted); padding: 24px 0 8px; }
     footer { margin-top: 56px; text-align: center; color: var(--faint); font-size: 13px; }
+    nav.top { display: flex; gap: 6px; align-items: center; }
+    nav.top a { color: var(--muted); font-size: 14px; font-weight: 500; padding: 7px 12px; border-radius: 99px; transition: .15s; }
+    nav.top a:hover { color: var(--text); background: rgba(255, 255, 255, .05); }
+    nav.top a.pill { border: 1px solid var(--border-strong); color: var(--text); }
+    nav.top a.pill:hover { border-color: var(--accent); background: var(--accent-soft); }
+    section.block { margin-top: 72px; }
+    section.block > h2 { font-size: 26px; text-align: center; }
+    section.block > p.sub { text-align: center; color: var(--muted); margin: 8px auto 28px; max-width: 520px; }
+    .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+    .step .num { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 14px; background: var(--accent-soft); color: var(--accent); margin-bottom: 12px; }
+    .step h3 { font-size: 16px; margin-bottom: 6px; } .step p { margin: 0; color: var(--muted); font-size: 14px; }
+    details.faq { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); margin-bottom: 8px; transition: .15s; }
+    details.faq[open] { border-color: var(--border-strong); }
+    details.faq summary { cursor: pointer; padding: 14px 18px; font-weight: 600; list-style: none; display: flex; justify-content: space-between; gap: 12px; }
+    details.faq summary::-webkit-details-marker { display: none; }
+    details.faq summary::after { content: '+'; color: var(--accent); font-size: 20px; line-height: 1; }
+    details.faq[open] summary::after { content: '–'; }
+    details.faq p { margin: 0; padding: 0 18px 16px; color: var(--muted); font-size: 14.5px; }
+    .contact { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px; }
+    a.cc { display: block; color: inherit; transition: .15s; }
+    a.cc:hover { border-color: var(--accent); transform: translateY(-2px); box-shadow: 0 14px 40px rgba(139, 92, 246, .15); }
+    a.cc .ico { width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); margin-bottom: 14px; }
+    a.cc .ico svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+    a.cc b { display: block; } a.cc span { color: var(--muted); font-size: 14px; word-break: break-word; }
+    .foot-links { display: flex; justify-content: center; gap: 18px; flex-wrap: wrap; margin-bottom: 12px; }
+    .foot-links a { color: var(--muted); font-size: 14px; } .foot-links a:hover { color: var(--text); }
+    @media (max-width: 720px) { .steps { grid-template-columns: 1fr; } nav.top a.opt { display: none; } }
     @media (max-width: 520px) { .summary { grid-template-columns: 1fr; justify-items: center; text-align: center; } form.lookup { flex-direction: column; } }
   </style>
 </head>
 <body>
 <main>
   <header>
-    <span class="brand"><span class="brand-mark">X</span>LicenseX</span>
-    <a href="/admin" class="muted" style="font-size:13px">Admin</a>
+    <span class="brand"><span class="brand-mark" id="mark">X</span><span id="siteName">LicenseX</span></span>
+    <nav class="top" id="topnav">
+      <a href="#how" class="opt">How it works</a><a href="#faq" class="opt">FAQ</a>
+    </nav>
   </header>
 
   <section class="hero">
     <h1>Your license,<br>under your control.</h1>
-    <p>Enter your license key to see which servers are using it and remove any you no longer run.</p>
+    <p id="tagline">Enter your license key to see which servers are using it and remove any you no longer run.</p>
   </section>
 
   <form class="lookup" id="form" autocomplete="off">
@@ -53,7 +82,37 @@
 
   <div id="result" hidden></div>
 
-  <footer>LicenseX · Servers are identified by plugin instance, never by your personal data.</footer>
+  <section class="block" id="how">
+    <h2>How it works</h2>
+    <p class="sub">Your license is created automatically when you download the plugin. Nothing to copy or activate.</p>
+    <div class="steps">
+      <div class="card step"><div class="num">1</div><h3>Download</h3><p>Get the plugin from the store. Your personal license is built in and never changes, even if you download again.</p></div>
+      <div class="card step"><div class="num">2</div><h3>Start your server</h3><p>The plugin registers the server with your license and prints your personal link in the console.</p></div>
+      <div class="card step"><div class="num">3</div><h3>Manage it here</h3><p>See every server on your license and remove the ones you no longer use to free up a slot.</p></div>
+    </div>
+  </section>
+
+  <section class="block" id="faq">
+    <h2>Questions</h2>
+    <p class="sub" style="margin-bottom:22px">The quick answers. Anything else, ask us below.</p>
+    <details class="faq"><summary>Where do I find my license key?</summary><p>In your server console when the plugin starts: it prints your key and a personal link. The key looks like <code>LX-XXXX-XXXX-XXXX-XXXX</code>.</p></details>
+    <details class="faq"><summary>How many servers can I use it on?</summary><p>The limit is shown on your license above. Each running server uses one slot.</p></details>
+    <details class="faq"><summary>I moved my server. How do I free the old slot?</summary><p>Enter your key, press Remove next to the old server, then start the new one. The old server stops working the next time it checks in, about a minute later.</p></details>
+    <details class="faq"><summary>Will I get a new key if I download the plugin again?</summary><p>No. Your license belongs to your account, so every download carries the same key.</p></details>
+    <details class="faq"><summary>Who can see my license?</summary><p>Only someone who has your key. Treat it like a password and don't post your console log publicly.</p></details>
+    <details class="faq"><summary>My license says blocked or expired.</summary><p>Contact us using the links below with your key and we'll sort it out.</p></details>
+  </section>
+
+  <section class="block" id="contact" hidden>
+    <h2>Need a hand?</h2>
+    <p class="sub">Reach us wherever is easiest. We usually reply quickly.</p>
+    <div class="contact" id="contactCards"></div>
+  </section>
+
+  <footer>
+    <div class="foot-links" id="footLinks"></div>
+    <div id="footText"></div>
+  </footer>
 </main>
 <script type="module" src="/portal.js"></script>
 </body>

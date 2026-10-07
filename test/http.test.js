@@ -54,7 +54,7 @@ test('products: upload a jar, download stamps a license per download nonce', asy
 
   const p = (await call('POST', '/api/admin/products', { name: 'My Plugin' }, cookie)).body;
   assert.equal(p.slug, 'my-plugin');
-  assert.match(p.builtbybit_url, /user=%%__USER__%%.*nonce=%%__NONCE__%%/);
+  assert.match(p.download_url, /\/download\/my-plugin\?token=/);
 
   // raw binary upload (not JSON)
   const up = await fetch(base + `/api/admin/products/${p.id}/file`, { method: 'POST', headers: { Cookie: cookie, 'X-Filename': 'MyPlugin.jar' }, body: emptyZip });
@@ -79,4 +79,51 @@ test('products: upload a jar, download stamps a license per download nonce', asy
   // disabling the product blocks downloads
   await call('PATCH', `/api/admin/products/${p.id}`, { enabled: false }, cookie);
   assert.equal((await dl(`token=${token}&nonce=buyer-3`)).status, 404);
+});
+
+test('BuiltByBit external-license-key callback: secret checked, same buyer = same license', async () => {
+  const { cookie } = await call('POST', '/api/admin/login', { password: 'secret-pw' });
+  const s = (await call('GET', '/api/admin/settings', null, cookie)).body;
+  assert.match(s.bbb_callback_url, /\/api\/v1\/builtbybit\/license$/);
+  assert.ok(s.bbb_secret.length >= 20);
+
+  const post = fields => fetch(base + '/api/v1/builtbybit/license', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(fields) })
+    .then(async r => ({ status: r.status, type: r.headers.get('content-type'), text: await r.text() }));
+  assert.equal((await post({ secret: 'wrong', user_id: '42', resource_id: '7' })).status, 403);
+  assert.equal((await post({ user_id: '42', resource_id: '7' })).status, 403);
+
+  const a = await post({ secret: s.bbb_secret, user_id: '42', resource_id: '7', version_id: '1', builtbybit: 'true' });
+  assert.equal(a.status, 200);
+  assert.match(a.type, /text\/plain/);
+  assert.match(a.text, /^LX-[A-Z2-9]{4}(-[A-Z2-9]{4}){3}$/);       // bare key, nothing else
+  assert.equal((await post({ secret: s.bbb_secret, user_id: '42', resource_id: '7', version_id: '2' })).text, a.text);   // re-download / new version
+  assert.notEqual((await post({ secret: s.bbb_secret, user_id: '43', resource_id: '7' })).text, a.text);                // another buyer
+  assert.equal((await post({ secret: s.bbb_secret, user_id: 'abc', resource_id: '7' })).status, 400);
+
+  // the key works for a plugin and lands in the BuiltByBit group once one is chosen
+  const grp = await call('POST', '/api/admin/groups', { name: 'BBB', max_servers: 2, color: '#112233' }, cookie);
+  assert.equal(grp.status, 201);
+  const gid = (await call('GET', '/api/admin/groups', null, cookie)).body.find(g => g.name === 'BBB').id;
+  assert.equal((await call('PUT', '/api/admin/settings', { bbb_group_id: gid }, cookie)).status, 200);
+  const g = await post({ secret: s.bbb_secret, user_id: '99', resource_id: '7' });
+  assert.equal((await call('POST', '/api/public/lookup', { key: g.text })).body.limit, 2);
+
+  // rotating the secret locks the old one out
+  await call('PUT', '/api/admin/settings', { regenerate_bbb_secret: true }, cookie);
+  assert.equal((await post({ secret: s.bbb_secret, user_id: '42', resource_id: '7' })).status, 403);
+});
+
+test('site links: validated, public, and never leak secrets', async () => {
+  const { cookie } = await call('POST', '/api/admin/login', { password: 'secret-pw' });
+  assert.equal((await call('PUT', '/api/admin/settings', { discord_url: 'javascript:alert(1)' }, cookie)).status, 400);
+  assert.equal((await call('PUT', '/api/admin/settings', { store_url: 'not a link' }, cookie)).status, 400);
+  assert.equal((await call('PUT', '/api/admin/settings', { support_email: 'nope' }, cookie)).status, 400);
+  const ok = await call('PUT', '/api/admin/settings', { site_name: 'Acme Plugins', discord_url: 'https://discord.gg/acme', store_url: 'https://builtbybit.com/creators/acme.1/', support_email: 'help@acme.dev' }, cookie);
+  assert.equal(ok.status, 200);
+  const site = (await call('GET', '/api/public/site')).body;       // no cookie: public
+  assert.equal(site.site_name, 'Acme Plugins');
+  assert.equal(site.discord_url, 'https://discord.gg/acme');
+  assert.equal(site.support_email, 'help@acme.dev');
+  assert.equal(JSON.stringify(site).includes('secret'), false);
+  assert.equal('bbb_secret' in site, false);
 });

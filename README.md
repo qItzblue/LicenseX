@@ -36,12 +36,13 @@ plugin reads that file on first start (`LicenseClient.embedded()`), persists the
 config, no manual key entry. The `token` is a per-product secret so the jar can't be leeched from the raw URL;
 regenerate it anytime in the admin.
 
-**BuiltByBit:** set the resource's off-site/custom download URL to the **BuiltByBit URL** shown on the product
-card — it already contains `user=%%__USER__%%&name=%%__USERNAME__%%&nonce=%%__NONCE__%%`, which BuiltByBit fills
-in per buyer, so every buyer keeps one license across downloads. Opening the raw link with no buyer id gets a fresh
-license each time. Assign a product to a group to give its buyers that group's server limit.
+**Selling on BuiltByBit?** Don't use this link. Use BuiltByBit's external-license-key placeholder instead, which
+calls `POST /api/v1/builtbybit/license` on LicenseX: **[docs/BUILTBYBIT.md](docs/BUILTBYBIT.md)** has the full
+step-by-step. The Products download is for distributing outside BuiltByBit (Discord, your own site). Pass
+`?user=<buyer id>` on that link to keep one license per buyer. Assign a product to a group to give its buyers that
+group's server limit.
 
-**One license per buyer, stable forever.** BuiltByBit fills in `%%__USER__%%` (the buyer's id) on every download.
+**One license per buyer, stable forever.** BuiltByBit sends the buyer's id (`user_id`) on every download.
 LicenseX keys the license on *buyer + product*: user 1 gets the same license (and the same `/?key=` link) no
 matter how many times they download, and user 2 gets their own, even from the same IP or device. IP and a device
 hash are still recorded and shown in the admin ("other licenses from this IP"). A download with no buyer id (for
@@ -69,4 +70,4 @@ Nobody can see another person's license without that person's key.
 - Single admin password, in-memory rate limits, no HTTPS in-process, no email/OAuth.
 - The BuiltByBit placeholder step is untested against a real BBB resource.
 
-See `DESIGN_BRIEF.md` for the visual design handoff.
+See `DESIGN_BRIEF.md` for the visual design handoff and `docs/BUILTBYBIT.md` for going live on BuiltByBit.
