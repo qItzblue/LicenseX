@@ -21,6 +21,9 @@ Settings can come from `licensex.config.json` or environment variables (variable
 (data dir), `LICENSEX_PUBLIC_URL`, `LICENSEX_MAX_UPLOAD_MB`, `TRUST_PROXY=1` (read the client IP from
 `X-Forwarded-For` behind a proxy; needed for correct IPs online, and put TLS in front).
 
+**Build from source:** upload a Maven/Gradle project as a zip, get the compiled jar (after an inspection report), and turn it
+into a product in one click. Needs a JDK and Maven on the server. See **[docs/BUILD.md](docs/BUILD.md)**.
+
 **Sign in with Google, Discord or GitHub:** optional; people whose verified email is on your admin list get an **Admin**
 button in the site header. Setup in **[docs/LOGIN.md](docs/LOGIN.md)**.
 
@@ -34,6 +37,7 @@ button in the site header. Setup in **[docs/LOGIN.md](docs/LOGIN.md)**.
 | `server/jarstamp.js`, `classfile.js`, `wrapjar.js` | Dependency-free JAR editor, class-file patcher and the plugin wrapper that adds the license check. |
 | `wrapper/` | Source of the precompiled wrapper classes (`wrapper/build.sh`). |
 | `server/auth.js` | Google / Discord / GitHub OAuth sign-in and the verified-email admin check. |
+| `server/builder.js`, `zipx.js` | Source inspection (risk scan) and the Maven/Gradle build runner; safe zip extraction. |
 | `server/backup.js` | Backup / restore (admin -> Settings -> Backup & move) for moving between hosts. |
 | `plugin/` | `LicenseClient` (drop-in, no deps) + an example Bukkit/Paper plugin (`mvn package`). |
 

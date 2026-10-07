@@ -75,3 +75,6 @@ dialog::backdrop { background: rgba(5, 6, 10, .7); backdrop-filter: blur(4px); }
 .divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
 .me-chip { display: inline-flex; align-items: center; gap: 8px; }
 .me-chip img, .me-chip .ph { width: 24px; height: 24px; border-radius: 50%; background: var(--accent-soft); display: grid; place-items: center; font-size: 12px; font-weight: 700; color: var(--accent); object-fit: cover; }
+
+input[type=checkbox], input[type=radio] { width: auto; accent-color: var(--accent); }
+label.trustbox { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--text); font-size: 13px; max-width: 380px; }

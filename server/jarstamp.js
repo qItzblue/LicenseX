@@ -40,6 +40,25 @@ export function listEntries(buf) {
   return names;
 }
 
+/** Central-directory records: name, method, sizes, flags and unix mode (for symlink detection). */
+export function readCentral(buf) {
+  const eocd = findEocd(buf);
+  let p = buf.readUInt32LE(eocd + 16);
+  const count = buf.readUInt16LE(eocd + 10);
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    if (buf.readUInt32LE(p) !== CEN_SIG) throw new Error('Corrupt zip (bad central directory)');
+    const n = buf.readUInt16LE(p + 28), m = buf.readUInt16LE(p + 30), k = buf.readUInt16LE(p + 32);
+    out.push({
+      name: buf.toString('utf8', p + 46, p + 46 + n), flags: buf.readUInt16LE(p + 8), method: buf.readUInt16LE(p + 10),
+      csize: buf.readUInt32LE(p + 20), usize: buf.readUInt32LE(p + 24), madeBy: buf.readUInt16LE(p + 4),
+      mode: (buf.readUInt32LE(p + 38) >>> 16) & 0xFFFF, offset: buf.readUInt32LE(p + 42),
+    });
+    p += 46 + n + m + k;
+  }
+  return out;
+}
+
 /** Returns the (decompressed) bytes of one entry, or null if it isn't there. */
 export function readEntry(buf, wanted) {
   const eocd = findEocd(buf);

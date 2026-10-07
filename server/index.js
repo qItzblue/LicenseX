@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
 import { openDb, DatabaseSync } from './db.js';
 import { createBackup, restoreBackup, RestoreError } from './backup.js';
+import { createBuildService, BuildError } from './builder.js';
 import { providerDefs, authorizeUrl, exchangeCode, fetchProfile, parseEmails, EMAIL_RE } from './auth.js';
 import { createCore, normalizeKey, KEY_RE, hash, now } from './core.js';
 import { injectFiles } from './jarstamp.js';
@@ -407,6 +408,16 @@ route('POST', '/api/admin/products', async ctx => {
   core.log('admin', 'product.create', slug, name);
   return [201, productRow(ctx.req, db.prepare('SELECT * FROM products WHERE id=?').get(r.lastInsertRowid))];
 }, { admin: true });
+/** Stores `buf` as the plugin file of product `p` and records whether it can be wrapped. */
+function setProductFile(p, buf, filename) {
+  try { injectFiles(buf, [{ name: '.licensex-probe', content: '1' }]); }
+  catch { throw new HttpError(400, 'That file is not a valid .jar archive.'); }
+  writeFileSync(productFile(p.slug), buf);
+  const w = checkWrappable(buf);
+  db.prepare('UPDATE products SET filename=?, size=?, has_file=1, wrap_ok=?, wrap_code=?, wrap_message=?, main_class=? WHERE id=?')
+    .run(filename, buf.length, w.ok ? 1 : 0, w.code, w.message, w.main || '', p.id);
+  core.log('admin', 'product.upload', p.slug, `${filename} ${buf.length}B ${w.ok ? 'integrated:' + w.main : w.code}`);
+}
 // Raw binary upload (the plugin jar). Streamed to disk, not parsed as JSON.
 route('POST', '/api/admin/products/:id/file', async ctx => {
   const p = db.prepare('SELECT * FROM products WHERE id=?').get(ctx.params.id);
@@ -450,6 +461,57 @@ route('DELETE', '/api/admin/products/:id', async ctx => {
   core.log('admin', 'product.delete', p.slug, p.name);
   return [200, { ok: true }];
 }, { admin: true });
+
+// Admin: build from source ---------------------------------------------------------
+// Upload a Maven/Gradle project as a zip -> inspection report -> build -> jar (optionally straight into a product).
+// See docs/BUILD.md for what this does and does not protect against.
+const builds = createBuildService({ baseDir: join(DATA, 'builds') });
+setInterval(() => builds.sweep(), 3600e3).unref();
+const asHttp = fn => { try { return fn(); } catch (e) { if (e instanceof BuildError) throw new HttpError(e.status, e.message); throw e; } };
+route('GET', '/api/admin/builds/tools', async () => [200, builds.tools()], { admin: true });
+route('GET', '/api/admin/builds', async () => [200, builds.list()], { admin: true });
+route('POST', '/api/admin/builds', async ctx => {
+  const tmp = join(DATA, '.build-upload-' + randomBytes(4).toString('hex'));
+  const filename = str(ctx.req.headers['x-filename'] || 'source.zip', 80);
+  try {
+    await saveUpload(ctx.req, tmp);
+    const job = asHttp(() => builds.create(readFileSync(tmp), filename));
+    core.log('admin', 'build.upload', job.id, `${filename} ${job.report.kind} findings=${job.report.findings.length}`);
+    return [201, job];
+  } finally { rmSync(tmp, { force: true }); }
+}, { admin: true });
+route('GET', '/api/admin/builds/:id', async ctx => { const j = builds.get(ctx.params.id); if (!j) throw new HttpError(404, 'Build not found'); return [200, j]; }, { admin: true });
+route('POST', '/api/admin/builds/:id/build', async ctx => {
+  const b = await body(ctx.req);
+  const job = asHttp(() => builds.start(ctx.params.id, { trust: b.trust === true }));
+  core.log('admin', 'build.start', job.id, `${job.filename} trusted=${job.trusted}`);
+  return [202, job];
+}, { admin: true });
+route('GET', '/api/admin/builds/:id/jar', async ctx => {
+  const f = builds.jarFile(ctx.params.id);
+  if (!f) throw new HttpError(404, 'No jar for this build');
+  return [200, readFileSync(f.path), { 'Content-Type': 'application/java-archive', 'Content-Disposition': `attachment; filename="${f.name.replace(/[^\w.\-]/g, '_')}"` }];
+}, { admin: true });
+// Put the built jar into a product: replace an existing product's file, or create a new product from it.
+route('POST', '/api/admin/builds/:id/product', async ctx => {
+  const b = await body(ctx.req);
+  const f = builds.jarFile(ctx.params.id);
+  if (!f) throw new HttpError(404, 'No jar for this build');
+  let p;
+  if (b.productId) { p = db.prepare('SELECT * FROM products WHERE id=?').get(int(b.productId, { min: 1 })); if (!p) throw new HttpError(404, 'Product not found'); }
+  else {
+    const name = str(b.name, 60).trim();
+    if (!name) throw new HttpError(400, 'Give the new product a name, or pick an existing product.');
+    let slug = slugify(name), base = slug, i = 2;
+    while (db.prepare('SELECT 1 FROM products WHERE slug=?').get(slug)) slug = `${base}-${i++}`;
+    const r = db.prepare('INSERT INTO products(slug,name,token,created_at) VALUES(?,?,?,?)').run(slug, name, randomBytes(12).toString('base64url'), now());
+    p = db.prepare('SELECT * FROM products WHERE id=?').get(r.lastInsertRowid);
+    core.log('admin', 'product.create', slug, name);
+  }
+  setProductFile(p, readFileSync(f.path), f.name);
+  return [200, productRow(ctx.req, db.prepare('SELECT * FROM products WHERE id=?').get(p.id))];
+}, { admin: true });
+route('DELETE', '/api/admin/builds/:id', async ctx => { asHttp(() => builds.remove(ctx.params.id)); return [200, { ok: true }]; }, { admin: true });
 
 // Admin: backup / restore ---------------------------------------------------------
 // Everything (licenses, servers, groups, settings, uploaded plugins) in one zip. Contains every license key and the

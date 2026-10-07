@@ -3,7 +3,7 @@ import { h, api, toast, confirmDialog, ago, date, limitText, copy } from '/lib.j
 const $ = id => document.getElementById(id);
 const view = $('view');
 let groups = [];
-const PAGES = { overview: 'Overview', licenses: 'Licenses', servers: 'Servers', products: 'Products', groups: 'Groups', settings: 'Settings', audit: 'Audit log' };
+const PAGES = { overview: 'Overview', licenses: 'Licenses', servers: 'Servers', products: 'Products', build: 'Build', groups: 'Groups', settings: 'Settings', audit: 'Audit log' };
 
 // --- auth ------------------------------------------------------------------
 async function boot() {
@@ -41,11 +41,13 @@ function showApp() {
 }
 window.addEventListener('hashchange', () => !$('app').hidden && route());
 
+let buildTimer;
 async function route() {
+  clearInterval(buildTimer);
   const page = location.hash.slice(1) in PAGES ? location.hash.slice(1) : 'overview';
   document.querySelectorAll('nav a').forEach(a => a.classList.toggle('on', a.dataset.page === page));
   groups = await api('GET', '/api/admin/groups');
-  try { await { overview, licenses, servers, products, groups: groupsPage, settings, audit }[page](); }
+  try { await { overview, licenses, servers, products, build: buildPage, groups: groupsPage, settings, audit }[page](); }
   catch (e) { if (e.status === 401) return location.reload(); toast(e.message, true); }
 }
 const head = (title, ...actions) => h('div', { class: 'page-head' }, h('h1', null, title), h('div', { class: 'row' }, actions));
@@ -255,6 +257,105 @@ function productEdit(p) {
         catch (e) { toast(e.message, true); }
       } }, 'Save')));
   dlg.addEventListener('close', () => dlg.remove()); document.body.append(dlg); dlg.showModal();
+}
+
+// --- build from source ------------------------------------------------------
+const SEV = { high: ['blocked', 'High'], medium: ['idle', 'Medium'], info: ['', 'Info'] };
+
+async function buildPage() {
+  const tools = await api('GET', '/api/admin/builds/tools').catch(() => ({}));
+  const list = h('div', { class: 'build-list' });
+  const products = await api('GET', '/api/admin/products');
+  const toolChip = (label, v) => h('span', { class: 'chip ' + (v ? 'active' : 'blocked') }, v ? `${label} ${v}` : `${label} not installed`);
+
+  const drop = h('div', { class: 'dropzone', tabindex: 0 },
+    h('input', { type: 'file', accept: '.zip', hidden: true }),
+    h('div', { class: 'dz-icon' }, '⬆'),
+    h('div', null, h('b', null, 'Drop your plugin source here (.zip)'), h('div', { class: 'muted' }, 'A Maven or Gradle project. LicenseX inspects it first, and nothing is built until you press Build.')));
+  const fileEl = drop.querySelector('input');
+  drop.addEventListener('click', e => { if (e.target !== fileEl) fileEl.click(); });
+  drop.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileEl.click(); } });
+  ['dragover', 'dragenter'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); if (ev !== 'drop') drop.classList.remove('over'); }));
+  drop.addEventListener('drop', e => e.dataTransfer.files[0] && send(e.dataTransfer.files[0]));
+  fileEl.addEventListener('change', () => fileEl.files[0] && send(fileEl.files[0]));
+
+  async function send(file) {
+    if (!/\.zip$/i.test(file.name)) return toast('Please choose a .zip of your project', true);
+    drop.classList.add('busy'); drop.classList.remove('over');
+    try {
+      const r = await fetch('/api/admin/builds', { method: 'POST', headers: { 'X-Filename': file.name }, body: file });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.message || 'Upload failed');
+      toast('Inspected ' + file.name); await refresh();
+    } catch (e) { toast(e.message, true); }
+    drop.classList.remove('busy');
+  }
+
+  async function refresh() {
+    const jobs = await api('GET', '/api/admin/builds');
+    list.replaceChildren(...(jobs.length ? jobs.map(j => jobCard(j, products, refresh)) : [h('div', { class: 'muted', style: { padding: '8px' } }, 'Nothing here yet. Drop a source zip above.')]));
+    if (jobs.some(j => j.status === 'building')) { clearInterval(buildTimer); buildTimer = setInterval(refresh, 2000); }
+    else clearInterval(buildTimer);
+  }
+
+  view.replaceChildren(head('Build from source'),
+    h('p', { class: 'muted', style: { marginTop: '-12px' } }, 'Upload your plugin\'s source and get the compiled jar back, ready to use as a product. Jars are kept for 24 hours.'),
+    h('div', { class: 'row wrap', style: { marginBottom: '14px' } }, toolChip('Java', tools.java), toolChip('Maven', tools.maven), toolChip('Gradle', tools.gradle),
+      !tools.java && h('span', { class: 'muted', style: { fontSize: '13px' } }, 'This server cannot compile yet. Setup: docs/BUILD.md')),
+    h('div', { class: 'integ bad', style: { marginTop: 0, marginBottom: '16px' } }, h('b', null, 'Only build code you trust'),
+      h('span', null, 'Building runs Maven or Gradle on this server, and a project can run its own code while it builds. LicenseX shows what it finds and asks you to confirm anything risky, but it is not a sandbox. Do not build strangers\' code on a server that also holds your licenses.')),
+    drop, list);
+  await refresh();
+}
+
+function jobCard(j, products, refresh) {
+  const r = j.report || {};
+  const statusChip = { inspected: ['idle', 'Ready to build'], building: ['online', 'Building…'], done: ['active', 'Built'], failed: ['blocked', 'Failed'] }[j.status] || ['', j.status];
+  const kv = (k, v) => v ? h('div', { class: 'kv' }, h('span', null, k), h('b', null, v)) : null;
+  const trust = h('input', { type: 'checkbox', id: 'trust-' + j.id });
+  const findings = r.findings || [];
+  const call = async (method, path, body, msg) => { try { await api(method, path, body); if (msg) toast(msg); await refresh(); } catch (e) { toast(e.message, true); } };
+
+  const card = h('div', { class: 'card build' },
+    h('div', { class: 'row spread wrap' },
+      h('div', null, h('b', { style: { fontSize: '16px' } }, r.plugin?.name || j.filename), h('div', { class: 'muted', style: { fontSize: '13px' } }, `${j.filename} · ${ago(Math.floor(j.createdAt / 1000))}`)),
+      h('span', { class: 'chip ' + statusChip[0] }, statusChip[1])),
+    h('div', { class: 'kvs' },
+      kv('Project', r.kind === 'none' ? 'not buildable' : `${r.kind}${r.java ? ' · Java ' + r.java : ''}`),
+      kv('Plugin', r.plugin ? `${r.plugin.name || '?'} ${r.plugin.version || ''}`.trim() : 'no plugin.yml'),
+      kv('Main class', r.plugin?.main ? `${r.plugin.main}${r.mainFound === false ? ' (not found!)' : ''}` : ''),
+      kv('API', [r.plugin?.apiVersion && `api ${r.plugin.apiVersion}`, (r.deps || []).join(', ')].filter(Boolean).join(' · ')),
+      kv('Size', `${r.javaFiles} source files · ${r.lines.toLocaleString()} lines`)),
+    (r.warnings || []).map(w => h('div', { class: 'integ bad' }, h('span', null, w))),
+    findings.length ? h('details', { class: 'findings', open: findings.some(f => f.sev === 'high') },
+      h('summary', null, `${findings.length} thing${findings.length === 1 ? '' : 's'} worth a look`, ` (${findings.filter(f => f.sev === 'high').length} high, ${findings.filter(f => f.sev === 'medium').length} medium)`),
+      h('div', { class: 'muted', style: { fontSize: '12px', margin: '6px 0' } }, 'Automatic scan for risky calls. A clean scan does not prove the code is safe, and a finding is not proof it is malicious: read the code.'),
+      findings.map(f => h('div', { class: 'finding' },
+        h('span', { class: 'chip ' + SEV[f.sev][0] }, SEV[f.sev][1]),
+        h('div', null, h('b', null, f.title), h('div', { class: 'mono muted', style: { fontSize: '12px', wordBreak: 'break-all' } }, `${f.file}:${f.line}`), h('code', { class: 'snip' }, f.snippet))))) : h('div', { class: 'muted', style: { fontSize: '13px', margin: '10px 0' } }, 'No risky calls found by the automatic scan.'),
+    (r.network || []).length ? h('div', { class: 'muted', style: { fontSize: '13px', marginBottom: '10px' } }, 'Contacts these addresses: ', (r.network || []).map(n => h('span', { class: 'tag', style: { marginRight: '4px' } }, n))) : null,
+    j.log ? h('pre', { class: 'logbox', id: 'log-' + j.id }, j.log) : null,
+    j.error ? h('div', { class: 'integ bad' }, h('b', null, 'Build failed'), h('span', null, j.error)) : null);
+
+  const actions = h('div', { class: 'row wrap', style: { marginTop: '12px', gap: '8px' } });
+  if (j.status === 'inspected' || j.status === 'failed') {
+    if (r.needsTrust) actions.append(h('label', { class: 'trustbox' }, trust, 'I have read the findings and trust this code'));
+    actions.append(h('button', { class: 'btn primary', disabled: r.kind === 'none', onclick: () => { if (r.needsTrust && !trust.checked) return toast('Tick the box to confirm you trust this code', true); call('POST', `/api/admin/builds/${j.id}/build`, { trust: r.needsTrust && trust.checked }); } }, j.status === 'failed' ? 'Build again' : 'Build jar'));
+  }
+  if (j.status === 'building') actions.append(h('span', { class: 'muted' }, 'Building… the first build downloads dependencies and can take a few minutes.'));
+  if (j.status === 'done' && j.jar) {
+    const sel = h('select', { style: { width: 'auto' } }, h('option', { value: '' }, 'New product…'), products.map(p => h('option', { value: p.id }, `Replace the file of "${p.name}"`)));
+    const nameIn = h('input', { placeholder: 'Product name', value: r.plugin?.name || '', style: { width: '170px' } });
+    sel.addEventListener('change', () => { nameIn.hidden = !!sel.value; });
+    card.append(h('div', { class: 'integ ok' }, h('b', null, `Built ${j.jar.name}`), h('span', null, `${(j.jar.size / 1024).toFixed(0)} KB${j.jar.plugin?.main ? ' · main ' + j.jar.plugin.main : ' · no plugin.yml in this jar'}`)));
+    actions.append(h('a', { class: 'btn primary', href: `/api/admin/builds/${j.id}/jar` }, '⬇ Download jar'), sel, nameIn,
+      h('button', { class: 'btn', onclick: () => call('POST', `/api/admin/builds/${j.id}/product`, sel.value ? { productId: Number(sel.value) } : { name: nameIn.value }, 'Saved to Products. Open the Products page to get download links.') }, 'Use as product'));
+  }
+  if (j.status !== 'building') actions.append(h('button', { class: 'btn ghost danger', onclick: () => call('DELETE', `/api/admin/builds/${j.id}`, null, 'Removed') }, 'Remove'));
+  card.append(actions);
+  queueMicrotask(() => { const l = document.getElementById('log-' + j.id); if (l) l.scrollTop = l.scrollHeight; });
+  return card;
 }
 
 // --- groups ----------------------------------------------------------------
