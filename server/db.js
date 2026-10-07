@@ -79,5 +79,10 @@ export function openDb(path) {
     CREATE INDEX IF NOT EXISTS idx_servers_license ON servers(license_id);
     CREATE INDEX IF NOT EXISTS idx_audit_at ON audit(at DESC);
   `);
+  // Columns added after the first release: keep existing databases working.
+  const cols = db.prepare('PRAGMA table_info(products)').all().map(c => c.name);
+  for (const [name, def] of [['wrap_ok', 'INTEGER NOT NULL DEFAULT 0'], ['wrap_code', "TEXT NOT NULL DEFAULT ''"],
+                             ['wrap_message', "TEXT NOT NULL DEFAULT ''"], ['main_class', "TEXT NOT NULL DEFAULT ''"]])
+    if (!cols.includes(name)) db.exec(`ALTER TABLE products ADD COLUMN ${name} ${def}`);
   return db;
 }

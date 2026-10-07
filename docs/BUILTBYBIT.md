@@ -3,12 +3,15 @@
 How a buyer ends up with their own license, from purchase to the license page.
 
 ```
+you upload your finished plugin jar to LicenseX (no code changes)
+   -> LicenseX wraps it: the plugin now checks its license before it starts
+you upload that "BuiltByBit build" to your BuiltByBit resource
 buyer downloads on BuiltByBit
    -> BuiltByBit POSTs the buyer's id + your secret to LicenseX
    -> LicenseX returns that buyer's license key (same key every time for the same buyer)
    -> BuiltByBit writes the key into the jar where %%__BBB_LICENSE__%% is
 buyer starts the server
-   -> plugin reads its key, registers the server, prints a personal link
+   -> the wrapper verifies the license with LicenseX, then starts your plugin, and prints a personal link
 buyer opens the link / the home page and manages their servers
 ```
 
@@ -64,21 +67,25 @@ LicenseX checks the secret, finds or creates that buyer's license, and answers w
 If LicenseX can't answer, BuiltByBit writes "Unable to acquire a license key automatically, please contact the
 creator directly." into the jar, so watch the **Audit log** while testing.
 
-## 4. Build your plugin with LicenseX inside
+## 4. Upload your plugin to LicenseX
 
-Copy `plugin/src/main/java/dev/licensex/client/LicenseClient.java` into your plugin and follow
-`ExamplePlugin.java`:
+Admin -> **Products** -> drop your finished plugin `.jar` as it is. You do **not** add any LicenseX code to it.
 
-- a constant `"%%__BBB_LICENSE__%%"` that BuiltByBit overwrites with the key;
-- on enable, if it starts with `LX-`, save it with `client.useKey(...)`, then `validate(...)`;
-- re-validate on the interval the server returns (default 1 minute) and disable the plugin if it is denied;
-- set the default LicenseX address in your code/config to your real domain.
+LicenseX reads the jar and shows one of:
 
-Build it (`mvn package` for the example) and keep the placeholder text in the jar you upload.
+- **Auto-integrated**: it wraps your main class with a license check (details below). Good to go.
+- **Already integrated**: your plugin contains the LicenseX client itself (like `plugin/` in this repo), so it is used as is.
+- **Cannot be integrated**: the reason is shown (for example your main class is `final`, or you use `paper-plugin.yml`).
+  Downloads are blocked until you fix it, because LicenseX will never hand out a jar that doesn't enforce the license.
 
-## 5. Upload and publish
+## 5. Download the BuiltByBit build and upload it to BuiltByBit
 
-Upload the built jar as your resource file on BuiltByBit as usual. Do not edit the placeholder text.
+On the product card press **BuiltByBit build**. That jar has the license check inside and the
+`%%__BBB_LICENSE__%%` text where BuiltByBit will write each buyer's key. Upload **that** jar as your resource
+file on BuiltByBit (not your original one), and don't edit it afterwards.
+
+Every time you ship a new plugin version: upload the new original jar with **Replace file**, press
+**BuiltByBit build** again, and upload the result to BuiltByBit.
 
 ## 6. Add the link to your resource page
 
@@ -88,10 +95,11 @@ https://licenses.yourdomain.com". The plugin also prints each buyer's personal l
 ## 7. Test it like a customer
 
 1. Download your own resource from BuiltByBit.
-2. Open the jar (it is a zip) and confirm the placeholder was replaced by a key like `LX-XXXX-XXXX-XXXX-XXXX`
-   (search the class file in a text editor, or just run it).
+2. Start a test server with it. If the key was delivered, the console shows
+   `[LicenseX] License LX-... verified` and then your plugin's normal startup. If BuiltByBit did not replace the
+   placeholder you get `No license key is built into this copy of the plugin`.
 3. Admin -> **Licenses**: a new license with owner "BuiltByBit #<your user id>" should exist.
-4. Start a test server with the plugin. Admin -> **Servers** shows it; the console prints your link.
+4. Admin -> **Servers** shows the server; the console printed the buyer's personal link.
 5. Download again: the **same** key comes back and no extra license is created.
 
 If something is off: Admin -> **Audit log** shows `bbb.denied` (wrong secret) and each issued license.
@@ -106,6 +114,5 @@ If something is off: Admin -> **Audit log** shows `bbb.denied` (wrong secret) an
 
 ## Not on BuiltByBit?
 
-Use the **Products** page to upload a jar and share its direct download link anywhere (Discord, your own site).
-LicenseX stamps the buyer's license into the file on every download. Pass `?user=<buyer id>` to keep one license per
-buyer; without it each download gets a new license.
+Use the product's **Direct download URL** anywhere (Discord, your own site). Each download is wrapped and has the
+buyer's license built in. Add `&user=<buyer id>` to keep one license per buyer; without it each download gets a new license.

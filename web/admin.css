@@ -37,3 +37,8 @@ main { padding: 32px 36px 80px; max-width: 1180px; width: 100%; }
 .url-row input { font-size: 12px; }
 @media (max-width: 520px) { .product-grid { grid-template-columns: 1fr; } }
 @media (max-width: 860px) { .shell { grid-template-columns: 1fr; } aside { position: static; height: auto; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 12px; } nav { display: flex; flex-wrap: wrap; } main { padding: 20px 16px; } .cols { grid-template-columns: 1fr; } }
+
+.integ { display: grid; gap: 2px; margin-top: 12px; padding: 10px 12px; border-radius: var(--radius-sm); font-size: 13px; border: 1px solid var(--border); }
+.integ b { font-size: 13px; } .integ span { color: var(--muted); }
+.integ.ok { border-color: rgba(52, 211, 153, .3); background: rgba(52, 211, 153, .06); } .integ.ok b { color: var(--ok); }
+.integ.bad { border-color: rgba(248, 113, 113, .35); background: rgba(248, 113, 113, .07); } .integ.bad b { color: var(--bad); }

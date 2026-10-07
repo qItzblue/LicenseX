@@ -6,6 +6,7 @@ import { randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
 import { openDb } from './db.js';
 import { createCore, normalizeKey, KEY_RE, hash, now } from './core.js';
 import { injectFiles } from './jarstamp.js';
+import { wrapJar, checkWrappable, WrapError } from './wrapjar.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const WEB = join(ROOT, 'web');
@@ -20,6 +21,14 @@ mkdirSync(DATA, { recursive: true });
 mkdirSync(PRODUCTS_DIR, { recursive: true });
 const db = openDb(process.env.LICENSEX_DB || join(DATA, 'licensex.db'));
 const core = createCore(db);
+
+// Products uploaded before integration checks existed (or with an older wrapper) get analysed on startup.
+for (const p of db.prepare("SELECT * FROM products WHERE has_file=1 AND wrap_ok=0 AND wrap_code=''").all()) {
+  try {
+    const w = checkWrappable(readFileSync(join(PRODUCTS_DIR, p.slug + '.bin')));
+    db.prepare('UPDATE products SET wrap_ok=?, wrap_code=?, wrap_message=?, main_class=? WHERE id=?').run(w.ok ? 1 : 0, w.code, w.message, w.main || '', p.id);
+  } catch (e) { console.error(`[LicenseX] could not analyse product ${p.slug}: ${e.message}`); }
+}
 
 // --- secrets -------------------------------------------------------------
 function loadSecret(name, make) {
@@ -54,6 +63,10 @@ setInterval(() => { const t = Date.now(); for (const [k, v] of buckets) if (!v.s
 
 class HttpError extends Error { constructor(status, message, code) { super(message); this.status = status; this.code = code; } }
 const json = (res, status, body, headers = {}) => {
+  if (Buffer.isBuffer(body)) { // binary download (headers carry the content type)
+    res.writeHead(status, { 'Cache-Control': 'no-store', 'Content-Length': body.length, ...headers });
+    return res.end(body);
+  }
   const text = typeof body === 'string'; // plain-text responses (BuiltByBit expects the bare key)
   res.writeHead(status, { 'Content-Type': text ? 'text/plain; charset=utf-8' : 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
   res.end(text ? body : JSON.stringify(body));
@@ -273,7 +286,12 @@ const downloadUrlFor = (req, p) => {
   const origin = PUBLIC_URL || `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers.host || 'localhost:' + PORT}`;
   return `${origin}/download/${p.slug}?token=${p.token}`;
 };
-const productRow = (req, p) => ({ ...p, download_url: downloadUrlFor(req, p) });
+const productRow = (req, p) => {
+  const { wrap_ok, wrap_code, wrap_message, main_class, ...rest } = p;
+  return { ...rest, download_url: downloadUrlFor(req, p),
+    integration: !p.has_file ? null : { ok: !!wrap_ok, integrated: wrap_code === 'ALREADY_INTEGRATED', code: wrap_code, message: wrap_message, main: main_class } };
+};
+const publicBase = req => PUBLIC_URL || `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers.host}`;
 route('GET', '/api/admin/products', async ctx => {
   const rows = db.prepare('SELECT * FROM products ORDER BY id DESC').all();
   return [200, rows.map(p => productRow(ctx.req, p))];
@@ -299,9 +317,18 @@ route('POST', '/api/admin/products/:id/file', async ctx => {
   // Reject anything that isn't a readable zip/jar, so download-time stamping can't fail later.
   try { injectFiles(readFileSync(productFile(p.slug)), [{ name: '.licensex-probe', content: '1' }]); }
   catch { rmSync(productFile(p.slug), { force: true }); throw new HttpError(400, 'That file is not a valid .jar/.zip archive.'); }
-  db.prepare('UPDATE products SET filename=?, size=?, has_file=1 WHERE id=?').run(filename, size, p.id);
-  core.log('admin', 'product.upload', p.slug, `${filename} ${size}B`);
+  const w = checkWrappable(readFileSync(productFile(p.slug)));
+  db.prepare('UPDATE products SET filename=?, size=?, has_file=1, wrap_ok=?, wrap_code=?, wrap_message=?, main_class=? WHERE id=?')
+    .run(filename, size, w.ok ? 1 : 0, w.code, w.message, w.main || '', p.id);
+  core.log('admin', 'product.upload', p.slug, `${filename} ${size}B ${w.ok ? 'integrated:' + w.main : w.code}`);
   return [200, productRow(ctx.req, db.prepare('SELECT * FROM products WHERE id=?').get(p.id))];
+}, { admin: true });
+// The jar to upload to BuiltByBit: wrapped, but with no key. BuiltByBit overwrites %%__BBB_LICENSE__%% per buyer.
+route('GET', '/api/admin/products/:id/bbb-build', async ctx => {
+  const p = db.prepare('SELECT * FROM products WHERE id=?').get(ctx.params.id);
+  if (!p || !p.has_file) throw new HttpError(404, 'Upload a plugin file first.');
+  const stem = (p.filename || p.slug + '.jar').replace(/\.(jar|zip)$/i, '').replace(/[^\w.\-]/g, '_');
+  return [200, licensedJar(ctx.req, p, ''), { 'Content-Type': 'application/java-archive', 'Content-Disposition': `attachment; filename="${stem}-builtbybit.jar"` }];
 }, { admin: true });
 route('PATCH', '/api/admin/products/:id', async ctx => {
   const p = db.prepare('SELECT * FROM products WHERE id=?').get(ctx.params.id);
@@ -392,6 +419,21 @@ route('PUT', '/api/admin/settings', async ctx => {
 }, { admin: true });
 route('GET', '/api/admin/audit', async ctx => [200, db.prepare('SELECT * FROM audit ORDER BY id DESC LIMIT ?').all(Math.min(Number(ctx.url.searchParams.get('limit')) || 100, 500))], { admin: true });
 
+// --- licensed jar builder ---------------------------------------------------
+// Wraps the uploaded plugin so it checks its license before starting. A plugin that already contains the LicenseX
+// client only needs its licensex.json. Anything else that can't be wrapped is refused rather than served
+// unprotected: a license system must never silently hand out a jar that doesn't enforce the license.
+function licensedJar(req, p, key) {
+  const jar = readFileSync(productFile(p.slug));
+  const cfg = { url: publicBase(req), key, product: p.name };
+  try { return wrapJar(jar, cfg).jar; }
+  catch (e) {
+    if (!(e instanceof WrapError)) throw e;
+    if (e.code === 'ALREADY_INTEGRATED') return injectFiles(jar, [{ name: 'licensex.json', content: JSON.stringify({ ...cfg, issued: now() }) }]);
+    throw new HttpError(503, `This download is unavailable: ${e.message}`, e.code);
+  }
+}
+
 // --- public download (BuiltByBit points here) ------------------------------
 // GET /download/:slug?token=...&nonce=...&user=...
 // Issues a license for the nonce (new per nonce, stable on repeat), stamps the key into the jar and serves it.
@@ -409,8 +451,7 @@ function handleDownload(req, res, slug, url) {
     user: str(url.searchParams.get('user'), 64), name: str(url.searchParams.get('name'), 64), product: p.name, group_id: p.group_id, ip, device: hash(ip + req.headers['user-agent']) });
   if (!r.ok) throw new HttpError(403, r.message, r.code);
 
-  const stamped = injectFiles(readFileSync(productFile(p.slug)), [{ name: 'licensex.json',
-    content: JSON.stringify({ url: PUBLIC_URL || `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers.host}`, key: r.key, product: p.name, issued: now() }) }]);
+  const stamped = licensedJar(req, p, r.key);
   db.prepare('UPDATE products SET downloads = downloads + 1 WHERE id=?').run(p.id);
   core.log('system', 'product.download', p.slug, `${r.key} ip=${ip}`);
 

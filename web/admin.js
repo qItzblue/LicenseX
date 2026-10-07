@@ -159,7 +159,7 @@ async function products() {
   const drop = h('div', { class: 'dropzone', tabindex: 0 },
     h('input', { type: 'file', id: 'file', accept: '.jar,.zip', hidden: true }),
     h('div', { class: 'dz-icon' }, '⬆'),
-    h('div', null, h('b', null, 'Drop your plugin .jar here'), h('div', { class: 'muted' }, 'or click to browse · LicenseX stamps a license into every download')));
+    h('div', null, h('b', null, 'Drop your plugin .jar here'), h('div', { class: 'muted' }, 'or click to browse · LicenseX adds the license check for you, no code changes needed')));
   const fileEl = drop.querySelector('#file');
   const pick = () => fileEl.click();
   drop.addEventListener('click', e => { if (e.target !== fileEl) pick(); });
@@ -182,7 +182,7 @@ async function products() {
 
   grid.replaceChildren(...(list.length ? list.map(productCard) : [h('div', { class: 'muted', style: { padding: '8px' } }, 'No products yet. Drop a plugin jar above to create your first licensed download.')]));
   view.replaceChildren(head('Products'),
-    h('p', { class: 'muted', style: { marginTop: '-12px' } }, 'Upload a plugin jar. LicenseX serves it as a download that issues a license per buyer and bakes the key into the file, so the plugin runs under it automatically.'),
+    h('p', { class: 'muted', style: { marginTop: '-12px' } }, 'Upload your finished plugin jar as it is. LicenseX wraps it so it checks its buyer\'s license before starting, and hands each buyer their own copy with the license built in. For BuiltByBit, use the BuiltByBit build button.'),
     drop, grid);
 }
 
@@ -196,21 +196,33 @@ function productCard(p) {
         h('div', null, h('b', { style: { fontSize: '16px' } }, p.name),
           h('div', { class: 'muted', style: { fontSize: '13px' } }, p.has_file ? `${p.filename} · ${fmtSize(p.size)}` : 'No file uploaded yet'))),
       h('div', { class: 'row wrap', style: { gap: '6px', justifyContent: 'flex-end' } },
-        h('span', { class: 'chip ' + (p.enabled && p.has_file ? 'active' : 'disabled') }, p.enabled ? (p.has_file ? 'Live' : 'No file') : 'Disabled'),
+        (() => { const blocked = p.integration && !p.integration.ok && !p.integration.integrated;
+          return h('span', { class: 'chip ' + (p.enabled && p.has_file && !blocked ? 'active' : 'disabled') }, !p.enabled ? 'Disabled' : !p.has_file ? 'No file' : blocked ? 'Blocked' : 'Live'); })(),
         p.group_id && groupTag(p.group_id))),
+    integrationNote(p),
     h('div', { class: 'row wrap', style: { gap: '18px', margin: '14px 0', color: 'var(--muted)', fontSize: '13px' } },
       h('span', null, h('b', { style: { color: 'var(--text)', fontSize: '18px' } }, p.downloads), ' downloads'),
       h('span', null, 'Licenses issued per download · ', p.group_id ? 'assigned to group' : 'default limit')),
-    h('label', { style: { marginTop: '4px' } }, 'Direct download URL (for your own site, Discord or store; each buyer id keeps one license)'),
+    h('label', { style: { marginTop: '4px' } }, 'Direct download URL (your own site or Discord; add &user=<buyer id> to keep one license per buyer)'),
     h('div', { class: 'url-row' }, h('input', { class: 'mono', readonly: true, value: p.download_url, onclick: e => e.target.select() }),
       h('button', { class: 'btn sm', onclick: () => copy(p.download_url) }, 'Copy')),
     h('div', { class: 'row wrap', style: { marginTop: '14px', gap: '8px' } },
       h('a', { class: 'btn sm primary', href: p.download_url, target: '_blank' }, '⬇ Test download'),
+      p.has_file && p.integration && (p.integration.ok || p.integration.integrated) && h('a', { class: 'btn sm', href: `/api/admin/products/${p.id}/bbb-build`, title: 'The jar to upload to BuiltByBit. BuiltByBit fills in each buyer\'s key.' }, '⬇ BuiltByBit build'),
       h('button', { class: 'btn sm', onclick: () => replaceInput.click() }, p.has_file ? 'Replace file' : 'Upload file'), replaceInput,
       h('button', { class: 'btn sm', onclick: () => productEdit(p) }, 'Edit'),
       h('button', { class: 'btn sm', onclick: patch({ enabled: !p.enabled }, p.enabled ? 'Disabled' : 'Enabled') }, p.enabled ? 'Disable' : 'Enable'),
       h('button', { class: 'btn sm', onclick: async () => { if (await confirmDialog('Regenerate download token?', 'The old BuiltByBit URL stops working immediately. Update your resource with the new URL.', 'Regenerate', false)) patch({ regenerate_token: true }, 'New token generated')(); } }, 'New token'),
       h('button', { class: 'btn sm danger', onclick: async () => { if (await confirmDialog('Delete product?', `"${p.name}" and its uploaded file are removed. Issued licenses are not affected.`, 'Delete')) { await api('DELETE', `/api/admin/products/${p.id}`); toast('Deleted'); refresh(); } } }, 'Delete')));
+}
+
+function integrationNote(p) {
+  const i = p.integration;
+  if (!i) return null;
+  const box = (cls, title, text) => h('div', { class: 'integ ' + cls }, h('b', null, title), h('span', null, text));
+  if (i.integrated) return box('ok', 'Already integrated', 'This plugin contains the LicenseX client, so it is served as is with the buyer\'s license file.');
+  if (i.ok) return box('ok', 'Auto-integrated', `The license check is added around ${i.main} automatically. The plugin itself is not modified.`);
+  return box('bad', 'Cannot be integrated, so downloads are blocked', i.message || 'This jar can\'t be wrapped.');
 }
 
 function productEdit(p) {

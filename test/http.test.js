@@ -49,6 +49,8 @@ test('end to end: claim -> plugin -> portal -> admin', async () => {
 
 test('products: upload a jar, download stamps a license per download nonce', async () => {
   const { listEntries } = await import('../server/jarstamp.js');
+  const { readFileSync } = await import('node:fs');
+  const plugin = readFileSync(new URL('./fixtures/hello/hello-plugin.jar', import.meta.url));
   const emptyZip = Buffer.concat([Buffer.from([0x50, 0x4b, 0x05, 0x06]), Buffer.alloc(18)]);
   const { cookie } = await call('POST', '/api/admin/login', { password: 'secret-pw' });
 
@@ -57,8 +59,11 @@ test('products: upload a jar, download stamps a license per download nonce', asy
   assert.match(p.download_url, /\/download\/my-plugin\?token=/);
 
   // raw binary upload (not JSON)
-  const up = await fetch(base + `/api/admin/products/${p.id}/file`, { method: 'POST', headers: { Cookie: cookie, 'X-Filename': 'MyPlugin.jar' }, body: emptyZip });
-  assert.equal((await up.json()).has_file, 1);
+  const up = await fetch(base + `/api/admin/products/${p.id}/file`, { method: 'POST', headers: { Cookie: cookie, 'X-Filename': 'MyPlugin.jar' }, body: plugin });
+  const upBody = await up.json();
+  assert.equal(upBody.has_file, 1);
+  assert.equal(upBody.integration.ok, true);
+  assert.equal(upBody.integration.main, 'com.acme.hello.HelloPlugin');
 
   const token = p.token;
   const dl = (q) => fetch(base + `/download/my-plugin?${q}`).then(async r => ({ status: r.status, type: r.headers.get('content-type'), buf: Buffer.from(await r.arrayBuffer()) }));
@@ -68,6 +73,7 @@ test('products: upload a jar, download stamps a license per download nonce', asy
   assert.equal(d1.status, 200);
   assert.equal(d1.type, 'application/java-archive');
   assert.ok(listEntries(d1.buf).includes('licensex.json'));
+  assert.ok(listEntries(d1.buf).some(n => /^dev\/licensex\/w[0-9a-f]{8}\/Wrapper\.class$/.test(n)), 'plugin is wrapped, not just stamped');
 
   const countFor = async () => (await call('GET', '/api/admin/licenses', null, cookie)).body.filter(l => l.product === 'My Plugin').length;
   await dl(`token=${token}&nonce=buyer-1&user=bob`); // same buyer, same download -> no new license
@@ -75,6 +81,14 @@ test('products: upload a jar, download stamps a license per download nonce', asy
   assert.equal(await countFor(), 1);
   await dl(`token=${token}&nonce=buyer-2&user=sue`); // different buyer -> new license
   assert.equal(await countFor(), 2);
+
+  // a jar that can't be wrapped (not a plugin) is refused instead of being served unprotected
+  const bad = (await call('POST', '/api/admin/products', { name: 'Not A Plugin' }, cookie)).body;
+  const badUp = await fetch(base + `/api/admin/products/${bad.id}/file`, { method: 'POST', headers: { Cookie: cookie, 'X-Filename': 'x.jar' }, body: emptyZip });
+  assert.equal((await badUp.json()).integration.ok, false);
+  const refused = await fetch(base + `/download/not-a-plugin?token=${bad.token}&user=1`);
+  assert.equal(refused.status, 503);
+  assert.match((await refused.json()).message, /plugin\.yml/);
 
   // disabling the product blocks downloads
   await call('PATCH', `/api/admin/products/${p.id}`, { enabled: false }, cookie);

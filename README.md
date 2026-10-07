@@ -19,26 +19,33 @@ Other env: `PORT`, `LICENSEX_DATA` (data dir), `TRUST_PROXY=1` (read client IP f
 | `server/` | HTTP API + SQLite. Business rules live in `core.js`. |
 | `web/index.html` | Public page: enter a license key, see servers on it, remove any of them. |
 | `web/admin.html` | Admin: licenses, servers, **products/downloads**, groups, global settings, audit log. |
-| `server/jarstamp.js` | Dependency-free ZIP/JAR editor used to stamp a license into a plugin at download time. |
+| `server/jarstamp.js`, `classfile.js`, `wrapjar.js` | Dependency-free JAR editor, class-file patcher and the plugin wrapper that adds the license check. |
+| `wrapper/` | Source of the precompiled wrapper classes (`wrapper/build.sh`). |
 | `plugin/` | `LicenseClient` (drop-in, no deps) + an example Bukkit/Paper plugin (`mvn package`). |
 
 ## Products & integrated downloads
 
-Drop your plugin **.jar** into the admin **Products** page. LicenseX then hosts a licensed download:
+Drop your finished plugin **.jar** into the admin **Products** page. You don't change your plugin's code: LicenseX
+**wraps** it so it checks its license before it starts (see `server/wrapjar.js`). On each download it looks up the
+buyer's license (creating it on their first download), builds that buyer's copy, and serves it:
 
 ```
 GET /download/<slug>?token=<secret>&user=<buyer id>&name=<buyer name>&nonce=<per-download>
 ```
 
-On each download LicenseX looks up the buyer's license (creating it on their first download), stamps a
-`licensex.json` (`{url, key, product}`) into the jar with `server/jarstamp.js`, and serves it. The embedded
-plugin reads that file on first start (`LicenseClient.embedded()`), persists the key, and runs under it — no
-config, no manual key entry. The `token` is a per-product secret so the jar can't be leeched from the raw URL;
-regenerate it anytime in the admin.
+How the wrapping works: `plugin.yml`'s `main:` is pointed at a small precompiled `Wrapper` class that **extends your
+real main class**. `Wrapper.onEnable()` asks the LicenseX server whether the license and server are allowed and only then
+runs your original `onEnable()`; a background check every minute disables the plugin if the license is revoked. The
+wrapper classes are Java 8 bytecode in `server/wrapper/` (built from `wrapper/src` with `wrapper/build.sh`), so LicenseX
+itself still needs only Node. Jars that can't be wrapped (final main class, `paper-plugin.yml`, no `plugin.yml`) are
+reported on upload and their downloads are blocked rather than served unprotected. A plugin that already contains
+`LicenseClient` (like `plugin/`) is served as is with its license file. `test/paper-e2e.mjs` proves the whole thing on a
+real Paper server.
 
-**Selling on BuiltByBit?** Don't use this link. Use BuiltByBit's external-license-key placeholder instead, which
-calls `POST /api/v1/builtbybit/license` on LicenseX: **[docs/BUILTBYBIT.md](docs/BUILTBYBIT.md)** has the full
-step-by-step. The Products download is for distributing outside BuiltByBit (Discord, your own site). Pass
+**Selling on BuiltByBit?** Don't use this link. Press **BuiltByBit build** on the product, upload that jar to
+BuiltByBit, and let BuiltByBit's external-license-key placeholder (`POST /api/v1/builtbybit/license`) deliver each
+buyer's key: **[docs/BUILTBYBIT.md](docs/BUILTBYBIT.md)** has the full step-by-step. The direct link is for
+distributing outside BuiltByBit (Discord, your own site). Pass
 `?user=<buyer id>` on that link to keep one license per buyer. Assign a product to a group to give its buyers that
 group's server limit.
 
