@@ -1,26 +1,25 @@
+# Dockerfile.builder
 FROM node:22-bookworm
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        openjdk-21-jdk \
-        maven \
-        gradle \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    openjdk-21-jdk-headless \
+    maven \
+    gradle \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-COPY package*.json ./
+COPY package.json yarn.lock* ./
 
-RUN npm ci
+RUN yarn install
 
 COPY . .
 
 ENV NODE_ENV=production
+ENV PORT=10000
 
-RUN echo "Java:" && java -version \
-    && echo "Maven:" && mvn -version \
-    && echo "Gradle:" && gradle -version
+RUN java -version && mvn -version && gradle -version
 
 EXPOSE 10000
 
-CMD ["npm", "start"]
+CMD ["yarn", "start"]
