@@ -3,7 +3,7 @@
 Upload your plugin's source as a zip; LicenseX inspects it, compiles it, and gives you the jar. One click then turns that
 jar into a product with licensed downloads.
 
-Admin panel -> **Build**.
+Admin panel -> **Build**. This is **owner-only**: customers of a paid LicenseX never see it, because it runs build tools on the server.
 
 ## The flow
 

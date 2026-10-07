@@ -10,6 +10,13 @@ functional first pass and should be redesigned to look **modern, sleek and polis
    (table, filters, detail drawer, create/edit dialog), Servers, **Products** (drag-and-drop jar upload, product cards
    with download URL + copy, counts, enable/disable, replace file, delete), Groups, Settings, Audit log, login.
 
+3. **Pricing page** (`pricing.html`, `pricing.js`): hero, plan cards (one highlighted), feature grid, comparison table, FAQ, final CTA.
+   Plans come from the API, so layouts must cope with 2-5 plans and long feature lists.
+4. **Customer dashboard** (same `admin.html`, role-aware): Overview with plan usage meters, **Billing** (current plan, usage bars,
+   change plan), and for the owner **Customers** and **Plans** pages plus a workspace switcher and a "viewing someone else's
+   workspace" banner.
+5. **Login page** (`login.html`): Google / Discord / GitHub buttons (currently letter badges: swap in the real logos).
+
 ## Direction
 - Dark-first, restrained, high contrast, one confident accent (currently violet to sky gradient). Light theme optional.
 - Linear / Vercel / Stripe dashboard quality: tight type scale, generous spacing, subtle borders and glow, smooth micro-interactions.

@@ -6,6 +6,8 @@
   "dataDir": "",
   "maxUploadMb": 64,
   "adminEmails": ["you@example.com"],
+  "signups": "open",
+  "stripe": { "secretKey": "", "webhookSecret": "" },
   "oauth": {
     "google":  { "clientId": "", "clientSecret": "" },
     "discord": { "clientId": "", "clientSecret": "" },

@@ -104,7 +104,7 @@ const safeUrl = u => { try { return /^https?:$/.test(new URL(u).protocol) ? u : 
   }
   const u = me.user;
   slot.append(...[
-    u.isAdmin && h('a', { href: '/admin', class: 'admin' }, 'Admin'),
+    u.isAdmin ? h('a', { href: '/admin', class: 'admin' }, 'Admin') : u.workspace ? h('a', { href: '/dashboard', class: 'admin' }, 'Dashboard') : null,
     h('span', { class: 'me-chip muted', title: u.email || u.provider, style: { fontSize: '14px', padding: '0 6px' } },
       u.avatar ? h('img', { src: u.avatar, alt: '', referrerpolicy: 'no-referrer' }) : h('span', { class: 'ph' }, (u.name || '?').charAt(0).toUpperCase()),
       h('span', { class: 'opt' }, u.name)),

@@ -129,7 +129,7 @@ test('a product download token only ever issues licenses in the product\'s own w
 test('customers cannot reach owner-only features, or pick another workspace', async () => {
   for (const [m, path, body] of [['GET', '/api/admin/customers'], ['GET', '/api/admin/plans'], ['POST', '/api/admin/plans', { key: 'x1', name: 'X' }],
     ['GET', '/api/admin/builds'], ['GET', '/api/admin/builds/tools'], ['GET', '/api/admin/backup'], ['POST', '/api/admin/restore', {}],
-    ['POST', '/api/admin/customers/2/plan', { plan_key: 'pro' }], ['POST', '/api/admin/customers/2/suspend', { suspended: true }], ['DELETE', '/api/admin/customers/2']])
+    ['POST', '/api/admin/customers', { email: 'x@y.zz' }], ['POST', '/api/admin/customers/2/plan', { plan_key: 'pro' }], ['POST', '/api/admin/customers/2/suspend', { suspended: true }], ['DELETE', '/api/admin/customers/2']])
     assert.equal((await call(m, path, body, alice)).status, 403, `${m} ${path}`);
   assert.equal((await call('PUT', '/api/admin/settings', { site_name: 'Pwned' }, alice)).status, 403);
   assert.equal((await call('PUT', '/api/admin/settings', { admin_emails: 'alice@devs.io' }, alice)).status, 403);

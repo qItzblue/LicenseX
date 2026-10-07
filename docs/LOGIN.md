@@ -1,6 +1,6 @@
 # Sign in with Google, Discord or GitHub
 
-Visitors can sign in from the site header. People whose **verified email** is on your admin list get an **Admin**
+Visitors can sign in from the site header. Plugin developers who sign up from the pricing page use the same sign-in to get their own workspace (see [BILLING.md](BILLING.md)); only addresses on your admin list get the owner's Admin panel. People whose **verified email** is on your admin list get an **Admin**
 button there, which opens the admin panel. The admin password keeps working as a backup way in.
 
 You need to create a small "app" at each provider you want to offer (free, a few minutes each). Use only the ones

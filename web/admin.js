@@ -1,9 +1,15 @@
-import { h, api, toast, confirmDialog, ago, date, limitText, copy } from '/lib.js';
+import { h, api, toast, confirmDialog, ago, date, limitText, copy, currentWs, setWs, wsHeaders, wsq } from '/lib.js';
 
 const $ = id => document.getElementById(id);
 const view = $('view');
+/** Like replaceChildren, but skips null/false (the native one would print them as text). */
+const render = (...nodes) => view.replaceChildren(...nodes.flat().filter(n => n != null && n !== false));
 let groups = [];
-const PAGES = { overview: 'Overview', licenses: 'Licenses', servers: 'Servers', products: 'Products', build: 'Build', groups: 'Groups', settings: 'Settings', audit: 'Audit log' };
+const PAGES_PLATFORM = { overview: 'Overview', licenses: 'Licenses', servers: 'Servers', products: 'Products', build: 'Build', groups: 'Groups', customers: 'Customers', plans: 'Plans', settings: 'Settings', audit: 'Audit log' };
+const PAGES_TENANT = { overview: 'Overview', licenses: 'Licenses', servers: 'Servers', products: 'Products', groups: 'Groups', billing: 'Billing', settings: 'Settings', audit: 'Audit log' };
+let PAGES = PAGES_TENANT;
+const isDash = location.pathname === '/dashboard';
+let WS = null;   // the workspace being shown (refreshed on every page change)
 
 // --- auth ------------------------------------------------------------------
 async function boot() {
@@ -14,12 +20,19 @@ async function showLogin() {
   $('login').hidden = false; $('app').hidden = true;
   let auth = { providers: [], password_login: true, user: null };
   try { auth = await api('GET', '/api/auth/me'); } catch {}
-  $('oauth').replaceChildren(...auth.providers.map(p => h('a', { class: 'oauth-btn', href: `/auth/${p.id}?next=/admin` },
+  // a signed-in customer opening the dashboard for the first time gets their free account straight away
+  if (isDash && auth.user && !auth.user.isAdmin && !auth.user.workspace && auth.user.email) {
+    try { await api('POST', '/api/workspace/ensure'); return location.reload(); } catch (e) { $('notAdmin').textContent = e.message; $('notAdmin').hidden = false; }
+  }
+  $('loginTitle').textContent = isDash ? 'Sign in to your dashboard' : 'Admin sign in';
+  $('oauth').replaceChildren(...auth.providers.map(p => h('a', { class: 'oauth-btn', href: `/auth/${p.id}?next=${isDash ? '/dashboard' : '/admin'}` },
     h('span', { class: `logo ${p.id}` }, p.label.charAt(0)), `Continue with ${p.label}`)));
   $('oauth').hidden = !auth.providers.length;
-  $('loginForm').hidden = !auth.password_login;
-  $('or').hidden = !(auth.providers.length && auth.password_login);
-  if (auth.user && !auth.user.isAdmin) {
+  const showPw = auth.password_login && !isDash;
+  $('loginForm').hidden = !showPw;
+  $('or').hidden = !(auth.providers.length && showPw);
+  if (isDash && !auth.user) { $('hintNew').hidden = false; }
+  if (auth.user && !auth.user.isAdmin && !isDash) {
     $('notAdmin').textContent = auth.user.email
       ? `${auth.user.email} is signed in but is not on the admin list.`
       : `${auth.user.name} is signed in with ${auth.user.provider}, which shared no verified email, so it can't be an admin.`;
@@ -35,20 +48,49 @@ $('logout').addEventListener('click', async () => { await api('POST', '/api/auth
 function showApp() {
   $('app').hidden = false;
   const me = window.__me;
+  PAGES = me.role === 'platform' ? PAGES_PLATFORM : PAGES_TENANT;
+  document.title = me.role === 'platform' ? 'Admin' : 'Dashboard';
   if (me) $('whoami').textContent = me.email ? `${me.name} (${me.email})` : me.name;
   $('nav').replaceChildren(...Object.entries(PAGES).map(([k, label]) => h('a', { 'data-page': k, onclick: () => (location.hash = k) }, label)));
+  if (me.role === 'platform') workspaceSwitcher();
   route();
 }
 window.addEventListener('hashchange', () => !$('app').hidden && route());
+
+/** The owner can open any customer's workspace (to help them, or to check an issue). */
+async function workspaceSwitcher() {
+  const box = $('wsSwitch');
+  let customers = [];
+  try { customers = (await api('GET', '/api/admin/customers')).filter(c => !c.house); } catch { return; }
+  if (!customers.length) { box.hidden = true; return; }
+  const sel = h('select', { style: { fontSize: '13px' }, onchange: e => { setWs(e.target.value); location.hash = 'overview'; location.reload(); } },
+    h('option', { value: '' }, 'My workspace'), customers.map(c => h('option', { value: c.id, selected: String(c.id) === currentWs() }, `${c.name} · ${c.owner_email}`)));
+  box.replaceChildren(h('label', { style: { fontSize: '12px', marginBottom: '4px' } }, 'Workspace'), sel);
+  box.hidden = false;
+}
 
 let buildTimer;
 async function route() {
   clearInterval(buildTimer);
   const page = location.hash.slice(1) in PAGES ? location.hash.slice(1) : 'overview';
   document.querySelectorAll('nav a').forEach(a => a.classList.toggle('on', a.dataset.page === page));
-  groups = await api('GET', '/api/admin/groups');
-  try { await { overview, licenses, servers, products, build: buildPage, groups: groupsPage, settings, audit }[page](); }
-  catch (e) { if (e.status === 401) return location.reload(); toast(e.message, true); }
+  try {
+    WS = await api('GET', '/api/workspace');
+    window.__me.workspace = { ...window.__me.workspace, ...WS };
+    banner();
+    groups = await api('GET', '/api/admin/groups');
+    await { overview, licenses, servers, products, build: buildPage, groups: groupsPage, customers: customersPage, plans: plansPage, billing: billingPage, settings, audit }[page]();
+  } catch (e) { if (e.status === 401) return location.reload(); toast(e.message, true); }
+}
+
+/** Notices that apply to every page: viewing someone else's workspace, suspension, a lapsed plan. */
+function banner() {
+  const me = window.__me, box = $('banner'), items = [];
+  if (me.role === 'platform' && !WS.house) items.push(['warn', h('span', null, h('b', null, `Viewing ${WS.name}'s workspace`), ` (${WS.owner_email}) as the site owner. What you change here changes their account. `), h('button', { class: 'btn sm', onclick: () => { setWs(''); location.hash = 'overview'; location.reload(); } }, 'Back to my workspace')]);
+  if (WS.suspended) items.push(['bad', h('span', null, h('b', null, 'This account is suspended. '), WS.suspended_reason || 'Contact support.', ' You can look around, but nothing can be changed and its licenses are blocked.')]);
+  else if (WS.lapsed) items.push(['warn', h('span', null, h('b', null, 'Your paid plan has ended. '), 'Existing licenses keep working, but you cannot add more than the Free plan allows. '), h('a', { class: 'btn sm primary', href: '#billing' }, 'Renew')]);
+  else if (WS.plan_status === 'past_due') items.push(['warn', h('span', null, h('b', null, 'Your last payment failed. '), 'Update your card before the period ends to keep your plan. '), WS.billing.can_portal ? h('a', { class: 'btn sm primary', href: '#billing' }, 'Fix billing') : null]);
+  box.replaceChildren(...items.map(([kind, ...kids]) => h('div', { class: 'notice ' + kind }, ...kids)));
 }
 const head = (title, ...actions) => h('div', { class: 'page-head' }, h('h1', null, title), h('div', { class: 'row' }, actions));
 const groupTag = id => { const g = groups.find(x => x.id === id); return g ? h('span', { class: 'tag', style: { '--c': g.color } }, g.name) : h('span', { class: 'faint' }, '—'); };
@@ -59,7 +101,7 @@ async function overview() {
   const s = await api('GET', '/api/admin/stats');
   const stat = (n, l) => h('div', { class: 'card stat' }, h('div', { class: 'n' }, n), h('div', { class: 'l' }, l));
   const max = Math.max(1, ...s.per_day.map(d => d.n));
-  view.replaceChildren(head('Overview'),
+  render(head('Overview'), WS.house ? null : planCard(),
     h('div', { class: 'stats' }, stat(s.licenses, 'Licenses'), stat(s.servers, 'Active servers'), stat(s.online, 'Online now'), stat(s.disabled, 'Disabled servers'), stat(s.blocked, 'Blocked licenses'), stat(s.issued_24h, 'Issued last 24h')),
     h('div', { class: 'cols' },
       h('div', { class: 'card' }, h('h3', null, 'Licenses issued · 14 days'), h('div', { class: 'bars' }, s.per_day.length ? s.per_day.map(d => h('div', { title: `${d.d}: ${d.n}`, style: { height: d.n / max * 100 + '%' } })) : h('span', { class: 'muted' }, 'No data yet'))),
@@ -84,7 +126,7 @@ async function licenses() {
   const search = h('input', { placeholder: 'Search key, owner, note, IP…', oninput: debounce(e => { filters.q = e.target.value; load(); }) });
   const status = h('select', { onchange: e => { filters.status = e.target.value; load(); } }, h('option', { value: '' }, 'All statuses'), h('option', { value: 'active' }, 'Active'), h('option', { value: 'blocked' }, 'Blocked'));
   const grp = h('select', { onchange: e => { filters.group = e.target.value; load(); } }, h('option', { value: '' }, 'All groups'), groups.map(g => h('option', { value: g.id }, g.name)));
-  view.replaceChildren(head('Licenses', h('button', { class: 'btn primary', onclick: () => licenseForm(null, load) }, '+ New license')), h('div', { class: 'toolbar' }, search, status, grp), body);
+  render(head('Licenses', h('button', { class: 'btn primary', onclick: () => licenseForm(null, load) }, '+ New license')), h('div', { class: 'toolbar' }, search, status, grp), body);
   await load();
 }
 const debounce = (fn, ms = 250) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
@@ -160,13 +202,13 @@ async function servers() {
           h('button', { class: 'btn sm', onclick: async () => { await api('PATCH', `/api/admin/servers/${s.id}`, { status: s.status === 'disabled' ? 'active' : 'disabled' }); load(q); } }, s.status === 'disabled' ? 'Enable' : 'Disable'),
           h('button', { class: 'btn sm danger', onclick: async () => { if (await confirmDialog('Remove server?', 'It will be shut down at its next check-in and the slot freed.', 'Remove')) { await api('DELETE', `/api/admin/servers/${s.id}`); load(q); } } }, 'Remove'))))) : h('tr', null, h('td', { colspan: 7, class: 'muted' }, 'No servers yet')))));
   }
-  view.replaceChildren(head('Servers'), h('div', { class: 'toolbar' }, h('input', { placeholder: 'Search name, IP, license, owner…', oninput: debounce(e => load(e.target.value)) })), body);
+  render(head('Servers'), h('div', { class: 'toolbar' }, h('input', { placeholder: 'Search name, IP, license, owner…', oninput: debounce(e => load(e.target.value)) })), body);
   await load();
 }
 
 // --- products (plugin downloads) -------------------------------------------
 async function uploadFile(id, file) {
-  const r = await fetch(`/api/admin/products/${id}/file`, { method: 'POST', headers: { 'X-Filename': file.name }, body: file });
+  const r = await fetch(`/api/admin/products/${id}/file`, { method: 'POST', headers: { 'X-Filename': file.name, ...wsHeaders() }, body: file });
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw Object.assign(new Error(data.message || 'Upload failed'), { status: r.status });
   return data;
@@ -202,7 +244,7 @@ async function products() {
   }
 
   grid.replaceChildren(...(list.length ? list.map(productCard) : [h('div', { class: 'muted', style: { padding: '8px' } }, 'No products yet. Drop a plugin jar above to create your first licensed download.')]));
-  view.replaceChildren(head('Products'),
+  render(head('Products'),
     h('p', { class: 'muted', style: { marginTop: '-12px' } }, 'Upload your finished plugin jar as it is. LicenseX wraps it so it checks its buyer\'s license before starting, and hands each buyer their own copy with the license built in. For BuiltByBit, use the BuiltByBit build button.'),
     drop, grid);
 }
@@ -229,7 +271,7 @@ function productCard(p) {
       h('button', { class: 'btn sm', onclick: () => copy(p.download_url) }, 'Copy')),
     h('div', { class: 'row wrap', style: { marginTop: '14px', gap: '8px' } },
       h('a', { class: 'btn sm primary', href: p.download_url, target: '_blank' }, '⬇ Test download'),
-      p.has_file && p.integration && (p.integration.ok || p.integration.integrated) && h('a', { class: 'btn sm', href: `/api/admin/products/${p.id}/bbb-build`, title: 'The jar to upload to BuiltByBit. BuiltByBit fills in each buyer\'s key.' }, '⬇ BuiltByBit build'),
+      p.has_file && p.integration && (p.integration.ok || p.integration.integrated) && h('a', { class: 'btn sm', href: wsq(`/api/admin/products/${p.id}/bbb-build`), title: 'The jar to upload to BuiltByBit. BuiltByBit fills in each buyer\'s key.' }, '⬇ BuiltByBit build'),
       h('button', { class: 'btn sm', onclick: () => replaceInput.click() }, p.has_file ? 'Replace file' : 'Upload file'), replaceInput,
       h('button', { class: 'btn sm', onclick: () => productEdit(p) }, 'Edit'),
       h('button', { class: 'btn sm', onclick: patch({ enabled: !p.enabled }, p.enabled ? 'Disabled' : 'Enabled') }, p.enabled ? 'Disable' : 'Enable'),
@@ -284,7 +326,7 @@ async function buildPage() {
     if (!/\.zip$/i.test(file.name)) return toast('Please choose a .zip of your project', true);
     drop.classList.add('busy'); drop.classList.remove('over');
     try {
-      const r = await fetch('/api/admin/builds', { method: 'POST', headers: { 'X-Filename': file.name }, body: file });
+      const r = await fetch('/api/admin/builds', { method: 'POST', headers: { 'X-Filename': file.name, ...wsHeaders() }, body: file });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.message || 'Upload failed');
       toast('Inspected ' + file.name); await refresh();
@@ -299,7 +341,7 @@ async function buildPage() {
     else clearInterval(buildTimer);
   }
 
-  view.replaceChildren(head('Build from source'),
+  render(head('Build from source'),
     h('p', { class: 'muted', style: { marginTop: '-12px' } }, 'Upload your plugin\'s source and get the compiled jar back, ready to use as a product. Jars are kept for 24 hours.'),
     h('div', { class: 'row wrap', style: { marginBottom: '14px' } }, toolChip('Java', tools.java), toolChip('Maven', tools.maven), toolChip('Gradle', tools.gradle),
       !tools.java && h('span', { class: 'muted', style: { fontSize: '13px' } }, 'This server cannot compile yet. Setup: docs/BUILD.md')),
@@ -358,6 +400,159 @@ function jobCard(j, products, refresh) {
   return card;
 }
 
+// --- plans, usage and billing -----------------------------------------------
+const money = p => (p.price_cents ? new Intl.NumberFormat(undefined, { style: 'currency', currency: p.currency.toUpperCase(), minimumFractionDigits: p.price_cents % 100 ? 2 : 0 }).format(p.price_cents / 100) + ({ month: ' / month', year: ' / year', once: ' once' }[p.interval] || '') : 'Free');
+const cap = n => (n === -1 ? 'unlimited' : n.toLocaleString('en-US'));
+const plugins = n => `${cap(n)} plugin${n === 1 ? '' : 's'}`;
+const meter = (label, used, max) => {
+  const pct = max === -1 ? 0 : Math.min(100, Math.round(used / Math.max(max, 1) * 100));
+  return h('div', { class: 'meter' }, h('div', { class: 'row spread' }, h('span', null, label), h('b', null, `${used.toLocaleString('en-US')} of ${cap(max)}`)), h('div', { class: 'bar' + (pct >= 90 ? ' hot' : '') }, h('i', { style: { width: pct + '%' } })));
+};
+function planCard() {
+  const w = WS;
+  return h('div', { class: 'card', style: { marginBottom: '16px' } },
+    h('div', { class: 'row spread wrap' }, h('div', null, h('b', { style: { fontSize: '16px' } }, `${w.plan.name} plan`), ' ', h('span', { class: 'muted' }, money(w.plan))), h('a', { class: 'btn sm', href: '#billing' }, 'Plan & billing')),
+    h('div', { class: 'meters' }, meter('Plugins', w.usage.products, w.plan.max_products), meter('Licenses', w.usage.licenses, w.plan.max_licenses)));
+}
+const untilText = w => {
+  const d = w.plan_until ? date(w.plan_until) : '';
+  if (w.plan_key === 'free') return 'Free plan';
+  if (w.lapsed) return `Ended ${d}. Free plan limits apply.`;
+  if (w.plan_source === 'manual') return w.plan_until ? `Granted by the site owner until ${d}` : 'Granted by the site owner, no end date';
+  if (w.plan_status === 'canceled') return `Canceled. You keep this plan until ${d}`;
+  if (w.plan_status === 'past_due') return `Payment failed. Plan active until ${d}`;
+  return w.plan_until ? `Paid through ${d}` : 'Paid once, no end date';
+};
+
+async function billingPage() {
+  const pricing = await api('GET', '/api/public/pricing');
+  const w = WS, paid = new URLSearchParams(location.search).get('paid') === '1';
+  const go = async (path, body) => { try { const r = await api('POST', path, body); location.href = r.url; } catch (e) { toast(e.message, true); } };
+  const site = pricing.site;
+  const contact = p => site.discord_url ? h('a', { class: 'btn sm primary', href: site.discord_url, target: '_blank', rel: 'noopener noreferrer' }, 'Buy on Discord')
+    : site.support_email ? h('a', { class: 'btn sm primary', href: `mailto:${site.support_email}?subject=${encodeURIComponent(p.name + ' plan')}` }, 'Contact us to buy') : h('span', { class: 'muted' }, 'Coming soon');
+
+  if (paid && w.plan_key === 'free') {            // the payment webhook can take a few seconds to arrive
+    let tries = 0;
+    buildTimer = setInterval(async () => { tries++; try { const n = await api('GET', '/api/workspace'); if (n.plan_key !== 'free' || tries > 12) { clearInterval(buildTimer); history.replaceState(null, '', '/dashboard#billing'); WS = n; billingPage(); } } catch { clearInterval(buildTimer); } }, 2000);
+  }
+  const statusChip = w.lapsed ? ['blocked', 'Ended'] : w.plan_status === 'past_due' ? ['idle', 'Payment failed'] : w.plan_status === 'canceled' ? ['idle', 'Canceled'] : ['active', 'Active'];
+  render(head('Billing'),
+    paid ? h('div', { class: 'notice ok' }, h('b', null, w.plan_key === 'free' ? 'Payment received. ' : 'Thank you! '), w.plan_key === 'free' ? 'Your plan is being activated, this takes a few seconds…' : `Your ${w.plan.name} plan is active.`) : null,
+    h('div', { class: 'card', style: { marginBottom: '16px' } },
+      h('div', { class: 'row spread wrap' },
+        h('div', null, h('div', { class: 'muted', style: { fontSize: '12px', textTransform: 'uppercase', letterSpacing: '.06em' } }, 'Current plan'),
+          h('div', { style: { fontSize: '26px', fontWeight: 700, letterSpacing: '-.02em' } }, w.plan.name, ' ', h('span', { class: 'muted', style: { fontSize: '15px', fontWeight: 500 } }, money(w.plan))),
+          h('div', { class: 'muted', style: { marginTop: '4px' } }, untilText(w))),
+        h('div', { class: 'row wrap' }, w.plan_key !== 'free' ? h('span', { class: 'chip ' + statusChip[0] }, statusChip[1]) : null,
+          w.billing.can_portal ? h('button', { class: 'btn primary', onclick: () => go('/api/billing/portal') }, 'Manage billing') : null)),
+      h('div', { class: 'meters' }, meter('Plugins', w.usage.products, w.plan.max_products), meter('Licenses', w.usage.licenses, w.plan.max_licenses))),
+    h('h3', { style: { margin: '24px 0 10px' } }, 'Plans'),
+    h('div', { class: 'plan-rows' }, pricing.plans.map(p => h('div', { class: 'card plan-row' + (p.key === w.plan.key ? ' current' : '') },
+      h('div', null, h('b', null, p.name), p.highlight ? h('span', { class: 'tag', style: { marginLeft: '8px' } }, 'Popular') : null, h('div', { class: 'muted', style: { fontSize: '13px' } }, `${plugins(p.max_products)} · ${cap(p.max_licenses)} licenses`)),
+      h('div', { style: { fontWeight: 600 } }, money(p)),
+      p.key === w.plan.key ? h('span', { class: 'chip active' }, 'Current')
+        : p.price_cents === 0 ? h('span', { class: 'muted', style: { fontSize: '13px' } }, w.billing.can_portal ? 'Cancel in billing' : '')
+        : pricing.payments ? h('button', { class: 'btn sm primary', onclick: () => go('/api/billing/checkout', { plan: p.key }) }, p.interval === 'once' ? 'Buy' : 'Choose') : contact(p)))),
+    h('p', { class: 'muted', style: { fontSize: '13px', marginTop: '14px' } }, 'If your plan ends, existing licenses keep working. You just cannot add more than the Free plan allows.'));
+}
+
+// --- customers (owner) ----------------------------------------------------------
+async function customersPage() {
+  const [list, plans] = await Promise.all([api('GET', '/api/admin/customers'), api('GET', '/api/admin/plans')]);
+  const reload = () => customersPage();
+  const call = async (method, path, body, msg) => { try { await api(method, path, body); if (msg) toast(msg); reload(); } catch (e) { toast(e.message, true); } };
+  const rows = list.filter(c => !c.house);
+  const statusOf = c => c.suspended ? ['blocked', 'Suspended'] : c.lapsed ? ['idle', 'Lapsed'] : c.plan_status === 'past_due' ? ['idle', 'Past due'] : c.plan_status === 'canceled' ? ['idle', 'Canceled'] : ['active', 'Active'];
+
+  const invite = () => {
+    const dlg = h('dialog', null, h('h3', { style: { marginBottom: '4px' } }, 'Invite a customer'),
+      h('p', { class: 'muted', style: { marginTop: 0, fontSize: '14px' } }, 'Creates their account now. They sign in with this email (Google, Discord or GitHub, verified) and it is theirs. Works even when signups are closed.'),
+      h('div', { class: 'field' }, h('label', null, 'Email'), h('input', { id: 'i-email', type: 'email', placeholder: 'dev@example.com' })),
+      h('div', { class: 'field' }, h('label', null, 'Name (optional)'), h('input', { id: 'i-name' })),
+      h('div', { class: 'field' }, h('label', null, 'Plan'), h('select', { id: 'i-plan' }, plans.map(p => h('option', { value: p.key }, `${p.name} · ${money(p)}`)))),
+      h('div', { class: 'row', style: { 'justify-content': 'flex-end', marginTop: '14px' } }, h('button', { class: 'btn', onclick: () => dlg.close() }, 'Cancel'),
+        h('button', { class: 'btn primary', onclick: async () => { await call('POST', '/api/admin/customers', { email: dlg.querySelector('#i-email').value, name: dlg.querySelector('#i-name').value, plan_key: dlg.querySelector('#i-plan').value, until: null }, 'Customer created'); dlg.close(); } }, 'Create')));
+    dlg.addEventListener('close', () => dlg.remove()); document.body.append(dlg); dlg.showModal();
+  };
+  const grant = c => {
+    const dlg = h('dialog', null, h('h3', { style: { marginBottom: '4px' } }, 'Give a plan'), h('p', { class: 'muted', style: { marginTop: 0, fontSize: '14px' } }, c.owner_email),
+      h('div', { class: 'field' }, h('label', null, 'Plan'), h('select', { id: 'g-plan' }, plans.map(p => h('option', { value: p.key, selected: p.key === c.plan_key }, `${p.name}${p.active ? '' : ' (hidden)'} · ${money(p)}`)))),
+      h('div', { class: 'field' }, h('label', { class: 'trustbox' }, h('input', { type: 'checkbox', id: 'g-forever', checked: !c.plan_until }), 'No end date')),
+      h('div', { class: 'field', id: 'g-until-box', hidden: !c.plan_until }, h('label', null, 'Until'), h('input', { type: 'date', id: 'g-until', value: new Date((c.plan_until || Date.now() / 1000 + 30 * 86400) * 1000).toISOString().slice(0, 10) })),
+      h('div', { class: 'hint' }, 'A hand-given plan is never changed by Stripe events. Choosing Free ends it.'),
+      h('div', { class: 'row', style: { 'justify-content': 'flex-end', marginTop: '14px' } }, h('button', { class: 'btn', onclick: () => dlg.close() }, 'Cancel'),
+        h('button', { class: 'btn primary', onclick: async () => {
+          const forever = dlg.querySelector('#g-forever').checked, d = dlg.querySelector('#g-until').value;
+          await call('POST', `/api/admin/customers/${c.id}/plan`, { plan_key: dlg.querySelector('#g-plan').value, until: forever || !d ? null : Math.floor(new Date(d + 'T23:59:59Z') / 1000) }, 'Plan updated'); dlg.close();
+        } }, 'Save')));
+    dlg.querySelector('#g-forever').addEventListener('change', e => { dlg.querySelector('#g-until-box').hidden = e.target.checked; });
+    dlg.addEventListener('close', () => dlg.remove()); document.body.append(dlg); dlg.showModal();
+  };
+
+  render(head('Customers', h('button', { class: 'btn primary', onclick: invite }, '+ Invite customer')),
+    h('p', { class: 'muted', style: { marginTop: '-12px' } }, 'Everyone who signed up for a workspace. "Open" lets you look at their account the way they see it.'),
+    h('div', { class: 'card table-card' }, h('table', null,
+      h('thead', null, h('tr', null, ['Customer', 'Plan', 'Status', 'Plugins', 'Licenses', 'Joined', ''].map(t => h('th', null, t)))),
+      h('tbody', null, rows.length ? rows.map(c => h('tr', null,
+        h('td', null, h('b', null, c.name), h('div', { class: 'muted keycell' }, c.owner_email)),
+        h('td', null, h('b', null, c.plan.name), h('div', { class: 'faint', style: { fontSize: '12px' } }, c.plan_source === 'manual' ? 'given by you' : c.plan_source === 'stripe' ? 'Stripe' : '')),
+        h('td', null, h('span', { class: 'chip ' + statusOf(c)[0] }, statusOf(c)[1])),
+        h('td', { class: 'muted' }, `${c.products} / ${cap(c.plan.max_products)}`), h('td', { class: 'muted' }, `${c.licenses} / ${cap(c.plan.max_licenses)}`), h('td', { class: 'muted' }, date(c.created_at)),
+        h('td', null, h('div', { class: 'row', style: { 'justify-content': 'flex-end', flexWrap: 'wrap' } },
+          h('button', { class: 'btn sm', onclick: () => { setWs(c.id); location.hash = 'overview'; location.reload(); } }, 'Open'),
+          h('button', { class: 'btn sm', onclick: () => grant(c) }, 'Plan'),
+          c.suspended ? h('button', { class: 'btn sm', onclick: () => call('POST', `/api/admin/customers/${c.id}/suspend`, { suspended: false }, 'Unsuspended') }, 'Unsuspend')
+            : h('button', { class: 'btn sm danger', onclick: () => { const r = prompt('Reason (shown to their buyers\' plugins):', 'Terms violation'); if (r !== null) call('POST', `/api/admin/customers/${c.id}/suspend`, { suspended: true, reason: r }, 'Suspended'); } }, 'Suspend'),
+          h('button', { class: 'btn sm danger', onclick: async () => { if (await confirmDialog('Delete this customer?', `${c.owner_email}: all of their licenses, products, files and servers are removed permanently, and their buyers' plugins stop working. This does not cancel a Stripe subscription.`, 'Delete everything')) call('DELETE', `/api/admin/customers/${c.id}`, null, 'Deleted'); } }, 'Delete'))))) : h('tr', null, h('td', { colspan: 7, class: 'muted' }, 'No customers yet. They appear here when someone signs up from the pricing page.'))))));
+}
+
+// --- plans (owner) ----------------------------------------------------------------
+async function plansPage() {
+  const [plans, s] = await Promise.all([api('GET', '/api/admin/plans'), api('GET', '/api/admin/settings')]);
+  const st = s.stripe || {};
+  const edit = p => {
+    const isNew = !p, f = id => dlg.querySelector('#' + id);
+    const dlg = h('dialog', { style: { width: 'min(560px, calc(100vw - 32px))' } }, h('h3', { style: { marginBottom: '14px' } }, isNew ? 'New plan' : `Edit ${p.name}`),
+      isNew ? h('div', { class: 'field' }, h('label', null, 'Key (permanent, used internally)'), h('input', { id: 'p-key', placeholder: 'team' })) : null,
+      h('div', { class: 'grid2' },
+        h('div', { class: 'field' }, h('label', null, 'Name'), h('input', { id: 'p-name', value: p?.name || '' })),
+        h('div', { class: 'field' }, h('label', null, 'Billing'), h('select', { id: 'p-interval', disabled: p?.key === 'free' }, [['free', 'Free'], ['month', 'Monthly'], ['year', 'Yearly'], ['once', 'One-time']].map(([v, l]) => h('option', { value: v, selected: (p?.interval || 'month') === v }, l))))),
+      h('div', { class: 'grid2' },
+        h('div', { class: 'field' }, h('label', null, 'Price'), h('input', { id: 'p-price', type: 'number', min: 0, step: '0.01', value: p ? (p.price_cents / 100).toString() : '9', disabled: p?.key === 'free' })),
+        h('div', { class: 'field' }, h('label', null, 'Currency'), h('input', { id: 'p-cur', value: p?.currency || 'usd', maxlength: 3 }))),
+      h('div', { class: 'field' }, h('label', null, 'Short description'), h('input', { id: 'p-desc', value: p?.description || '' })),
+      h('div', { class: 'grid2' },
+        h('div', { class: 'field' }, h('label', null, 'Plugins allowed'), h('input', { id: 'p-prod', type: 'number', min: -1, value: p?.max_products ?? 5 }), h('div', { class: 'hint' }, '-1 = unlimited')),
+        h('div', { class: 'field' }, h('label', null, 'Licenses allowed'), h('input', { id: 'p-lic', type: 'number', min: -1, value: p?.max_licenses ?? 1000 }))),
+      h('div', { class: 'field' }, h('label', null, 'Feature bullets (one per line)'), h('textarea', { id: 'p-feat', rows: 5 }, p?.features || '')),
+      h('div', { class: 'row wrap' },
+        h('label', { class: 'trustbox' }, h('input', { type: 'checkbox', id: 'p-hot', checked: !!p?.highlight }), 'Mark as "Most popular"'),
+        p?.key === 'free' ? null : h('label', { class: 'trustbox' }, h('input', { type: 'checkbox', id: 'p-active', checked: p ? !!p.active : true }), 'For sale (shown on the pricing page)')),
+      h('div', { class: 'field', style: { marginTop: '12px' } }, h('label', null, 'Sort order'), h('input', { id: 'p-sort', type: 'number', min: 0, value: p?.sort ?? plans.length, style: { width: '110px' } })),
+      h('div', { class: 'row', style: { 'justify-content': 'flex-end', marginTop: '10px' } }, h('button', { class: 'btn', onclick: () => dlg.close() }, 'Cancel'),
+        h('button', { class: 'btn primary', onclick: async () => {
+          const body = { name: f('p-name').value, description: f('p-desc').value, interval: f('p-interval').value, price_cents: Math.round(Number(f('p-price').value) * 100), currency: f('p-cur').value,
+            max_products: Number(f('p-prod').value), max_licenses: Number(f('p-lic').value), features: f('p-feat').value, highlight: f('p-hot').checked, active: f('p-active') ? f('p-active').checked : true, sort: Number(f('p-sort').value) };
+          try { isNew ? await api('POST', '/api/admin/plans', { ...body, key: f('p-key').value }) : await api('PATCH', `/api/admin/plans/${p.key}`, body); dlg.close(); toast('Saved'); plansPage(); } catch (e) { toast(e.message, true); }
+        } }, 'Save')));
+    dlg.addEventListener('close', () => dlg.remove()); document.body.append(dlg); dlg.showModal();
+  };
+  render(head('Plans', h('button', { class: 'btn primary', onclick: () => edit(null) }, '+ New plan')),
+    h('div', { class: 'card', style: { marginBottom: '16px' } },
+      h('div', { class: 'row spread wrap' }, h('h3', null, 'Card payments (Stripe)'), h('span', { class: 'chip ' + (st.configured && st.webhook_configured ? 'active' : st.configured ? 'idle' : 'blocked') }, st.configured && st.webhook_configured ? 'Ready' : st.configured ? 'Add the webhook secret' : 'Not set up')),
+      h('p', { class: 'muted', style: { fontSize: '14px', margin: '6px 0 12px' } }, st.configured ? 'Customers can buy from the pricing page. Plans you give by hand under Customers work either way.' : 'Without Stripe, the pricing page shows a contact button instead of Buy, and you give plans by hand under Customers. Setup steps: docs/BILLING.md'),
+      h('label', null, 'Webhook address to enter in Stripe'), h('div', { class: 'url-row' }, h('input', { class: 'mono', readonly: true, value: st.webhook_url || '', onclick: e => e.target.select() }), h('button', { class: 'btn sm', onclick: () => copy(st.webhook_url) }, 'Copy')),
+      h('div', { class: 'hint' }, 'Events to send: checkout.session.completed, customer.subscription.created, customer.subscription.updated, customer.subscription.deleted, invoice.paid, invoice.payment_failed.')),
+    h('div', { class: 'card table-card' }, h('table', null,
+      h('thead', null, h('tr', null, ['Plan', 'Price', 'Plugins', 'Licenses', 'Customers', ''].map(t => h('th', null, t)))),
+      h('tbody', null, plans.map(p => h('tr', null,
+        h('td', null, h('b', null, p.name), ' ', h('span', { class: 'faint keycell' }, p.key), p.highlight ? h('span', { class: 'tag', style: { marginLeft: '8px' } }, 'Popular') : null, !p.active ? h('span', { class: 'chip idle', style: { marginLeft: '8px' } }, 'Hidden') : null),
+        h('td', null, money(p)), h('td', { class: 'muted' }, cap(p.max_products)), h('td', { class: 'muted' }, cap(p.max_licenses)), h('td', { class: 'muted' }, p.customers),
+        h('td', null, h('div', { class: 'row', style: { 'justify-content': 'flex-end' } }, h('button', { class: 'btn sm', onclick: () => edit(p) }, 'Edit'),
+          p.key === 'free' ? null : h('button', { class: 'btn sm danger', onclick: async () => { if (await confirmDialog('Delete this plan?', `"${p.name}" is removed. Plans customers are on cannot be deleted: hide them instead.`, 'Delete')) { try { await api('DELETE', `/api/admin/plans/${p.key}`); toast('Deleted'); plansPage(); } catch (e) { toast(e.message, true); } } } }, 'Delete')))))))));
+}
+
 // --- groups ----------------------------------------------------------------
 async function groupsPage() {
   const edit = g => {
@@ -373,7 +568,7 @@ async function groupsPage() {
         } }, 'Save')));
     dlg.addEventListener('close', () => dlg.remove()); document.body.append(dlg); dlg.showModal();
   };
-  view.replaceChildren(head('Groups', h('button', { class: 'btn primary', onclick: () => edit(null) }, '+ New group')),
+  render(head('Groups', h('button', { class: 'btn primary', onclick: () => edit(null) }, '+ New group')),
     h('p', { class: 'muted', style: { marginTop: '-12px' } }, 'Groups set a shared server limit. A limit set directly on a license always wins.'),
     h('div', { class: 'card table-card' }, h('table', null, h('thead', null, h('tr', null, ['Group', 'Server limit', 'Licenses', ''].map(t => h('th', null, t)))),
       h('tbody', null, groups.length ? groups.map(g => h('tr', null, h('td', null, h('span', { class: 'tag', style: { '--c': g.color } }, g.name)), h('td', null, limitText(g.max_servers)), h('td', { class: 'muted' }, g.licenses),
@@ -418,7 +613,7 @@ async function settings() {
     if (!file) return;
     if (!await confirmDialog('Restore this backup?', `Everything currently in LicenseX (licenses, servers, groups, settings, plugin files) is replaced with the contents of ${file.name}.`, 'Restore')) return;
     try {
-      const r = await fetch('/api/admin/restore', { method: 'POST', body: file });
+      const r = await fetch('/api/admin/restore', { method: 'POST', headers: wsHeaders(), body: file });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.message || 'Restore failed');
       toast('Backup restored'); settings();
@@ -447,7 +642,8 @@ async function settings() {
       !p.configured && h('div', { class: 'hint' }, `Create the app, then set LICENSEX_${id.toUpperCase()}_CLIENT_ID and LICENSEX_${id.toUpperCase()}_CLIENT_SECRET (or the config file). Steps: docs/LOGIN.md`))),
     s.password_login === false ? h('div', { class: 'hint' }, 'Password login is turned off in the server config.') : h('div', { class: 'hint' }, 'The admin password still works as a backup way in.'));
 
-  view.replaceChildren(head('Settings'), access, bbb, brand, backup, h('div', { class: 'card', style: { maxWidth: '680px' } },
+  const site = window.__me.role === 'platform' && WS.house;   // site-wide cards are the owner's, in the owner's own workspace
+  render(head('Settings'), site ? h('div', { class: 'notice ok' }, 'Site-wide settings (branding, sign-in, backups) are below the workspace settings. Customers only see the workspace settings.') : null, site ? access : null, bbb, site ? brand : null, site ? backup : null, h('div', { class: 'card', style: { maxWidth: '680px' } },
     num('default_limit', 'Default server limit', 'Applies to licenses with no group and no override. -1 = unlimited.', -1),
     num('heartbeat_minutes', 'Plugin check-in interval (minutes)', 'How often running plugins re-validate. Removals and blocks take effect within this window.', 1),
     toggle('claims_enabled', 'Issue licenses on download', 'When off, new downloads cannot claim a license (existing licenses keep working).'),
@@ -457,7 +653,7 @@ async function settings() {
 // --- audit -----------------------------------------------------------------
 async function audit() {
   const rows = await api('GET', '/api/admin/audit?limit=200');
-  view.replaceChildren(head('Audit log'), h('div', { class: 'card table-card' }, h('table', null, h('thead', null, h('tr', null, ['When', 'Actor', 'Action', 'Target', 'Detail'].map(t => h('th', null, t)))),
+  render(head('Audit log'), h('div', { class: 'card table-card' }, h('table', null, h('thead', null, h('tr', null, ['When', 'Actor', 'Action', 'Target', 'Detail'].map(t => h('th', null, t)))),
     h('tbody', null, rows.map(a => h('tr', null, h('td', { class: 'muted' }, new Date(a.at * 1000).toLocaleString()), h('td', null, a.actor), h('td', null, h('b', null, a.action)), h('td', { class: 'keycell' }, a.target), h('td', { class: 'muted' }, a.detail)))))));
 }
 

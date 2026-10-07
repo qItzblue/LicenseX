@@ -17,6 +17,7 @@ a { color: var(--accent-2); text-decoration: none; }
 code, .mono { font-family: var(--mono); }
 [hidden] { display: none !important; }
 
+a.brand, a.brand:hover { color: var(--text); }
 .brand { display: inline-flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: -.02em; font-size: 18px; }
 .brand-mark { width: 28px; height: 28px; border-radius: 8px; background: linear-gradient(135deg, var(--accent), var(--accent-2)); display: grid; place-items: center; color: #fff; font-size: 15px; font-weight: 800; box-shadow: 0 6px 20px rgba(139, 92, 246, .4); }
 

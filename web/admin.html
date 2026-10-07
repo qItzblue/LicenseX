@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>LicenseX Admin</title>
+  <title>Dashboard</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32">
   <link rel="alternate icon" href="/favicon.ico">
@@ -17,7 +17,8 @@
   <div id="login" hidden>
     <div class="card login">
       <span class="brand"><span class="brand-mark">X</span>LicenseX</span>
-      <p class="muted">Admin sign in</p>
+      <p class="muted" id="loginTitle">Admin sign in</p>
+      <p class="muted" id="hintNew" hidden style="font-size:13px;margin-top:-6px">New here? Signing in creates your free account.</p>
       <div class="err" id="notAdmin" hidden></div>
       <div class="oauth" id="oauth" hidden></div>
       <div class="divider" id="or" hidden>or</div>
@@ -33,10 +34,11 @@
     <aside>
       <span class="brand"><span class="brand-mark">X</span>LicenseX</span>
       <nav id="nav"></nav>
-      <div id="whoami" class="muted" style="margin-top:auto;font-size:13px;padding:0 4px"></div>
+      <div id="wsSwitch" hidden style="margin-top:auto"></div>
+      <div id="whoami" class="muted" style="font-size:13px;padding:0 4px"></div>
       <button class="btn ghost" id="logout">Sign out</button>
     </aside>
-    <main id="view"></main>
+    <main><div id="banner"></div><div id="view"></div></main>
   </div>
   <script type="module" src="/admin.js"></script>
 </body>

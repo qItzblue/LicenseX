@@ -12,8 +12,15 @@ export function h(tag, attrs, ...kids) {
   return el;
 }
 
+/** The owner can look into a customer's workspace; the choice lives in this tab only. Customers' requests ignore it. */
+export const currentWs = () => { try { return sessionStorage.getItem('lx-ws') || ''; } catch { return ''; } };
+export const setWs = id => { try { id ? sessionStorage.setItem('lx-ws', String(id)) : sessionStorage.removeItem('lx-ws'); } catch {} };
+export const wsHeaders = () => (currentWs() ? { 'X-Workspace': currentWs() } : {});
+/** For plain links (downloads) that cannot send headers. */
+export const wsq = path => (currentWs() ? path + (path.includes('?') ? '&' : '?') + 'ws=' + encodeURIComponent(currentWs()) : path);
+
 export async function api(method, path, body) {
-  const r = await fetch(path, { method, headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
+  const r = await fetch(path, { method, headers: { ...(body ? { 'Content-Type': 'application/json' } : {}), ...wsHeaders() }, body: body ? JSON.stringify(body) : undefined });
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw Object.assign(new Error(data.message || `Request failed (${r.status})`), { status: r.status, data });
   return data;

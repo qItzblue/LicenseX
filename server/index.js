@@ -47,6 +47,8 @@ const STRIPE = {
 if (STRIPE.secretKey && !/^(sk|rk)_(test|live)_/.test(STRIPE.secretKey)) console.error('[LicenseX] The Stripe secret key should start with sk_test_ or sk_live_ (a "restricted" rk_ key also works).');
 // Emails that are admins no matter what the database says (so you can never lock yourself out of the settings page).
 const CONFIG_ADMIN_EMAILS = parseEmails(process.env.LICENSEX_ADMIN_EMAILS ?? fileConfig.adminEmails ?? '');
+// 'closed' = only people you give a plan to by hand can have a workspace (no self-service signup)
+const SIGNUPS_OPEN = String(process.env.LICENSEX_SIGNUPS ?? fileConfig.signups ?? 'open').toLowerCase() !== 'closed';
 const DISABLE_PASSWORD_LOGIN = process.env.LICENSEX_DISABLE_PASSWORD_LOGIN === '1' || fileConfig.disablePasswordLogin === true;
 if (DISABLE_PASSWORD_LOGIN && (!Object.keys(oauthConf).length || !CONFIG_ADMIN_EMAILS.length)) {
   console.error('[LicenseX] disablePasswordLogin needs at least one sign-in provider and one admin email in the config, or nobody could log in.');
@@ -264,9 +266,9 @@ function resolveWorkspace(admin, req, url) {
   return Number.isInteger(asked) && db.prepare('SELECT 1 FROM workspaces WHERE id=?').get(asked) ? asked : HOUSE;
 }
 route('GET', '/api/auth/me', async ctx => {
-  const u = sessionUser(ctx.req);
+  const u = sessionUser(ctx.req), w = workspaceOfUser(u);
   return [200, {
-    user: u ? { name: u.name, email: u.email, avatar: u.avatar, provider: u.p, isAdmin: isAdminUser(u) } : null,
+    user: u ? { name: u.name, email: u.email, avatar: u.avatar, provider: u.p, isAdmin: isAdminUser(u), workspace: w ? { id: w.id, name: w.name } : null } : null,
     providers: Object.keys(oauthConf).map(id => ({ id, label: PROVIDERS[id].label })),
     password_login: !DISABLE_PASSWORD_LOGIN,
   }];
@@ -274,7 +276,7 @@ route('GET', '/api/auth/me', async ctx => {
 route('POST', '/api/auth/logout', async () => [200, { ok: true }, { 'Set-Cookie': CLEAR_COOKIES }]);
 
 // OAuth redirect flow: GET /auth/<provider>  ->  provider  ->  GET /auth/<provider>/callback
-const NEXT_OK = new Set(['/', '/admin', '/login']);
+const NEXT_OK = new Set(['/', '/admin', '/dashboard', '/pricing', '/login']);
 const redirect = (res, to, cookiesOut = []) => { res.writeHead(302, { Location: to, 'Cache-Control': 'no-store', ...(cookiesOut.length ? { 'Set-Cookie': cookiesOut } : {}) }); res.end(); };
 async function handleAuth(req, res, url) {
   const m = /^\/auth\/(google|discord|github)(\/callback)?$/.exec(url.pathname);
@@ -672,22 +674,27 @@ route('GET', '/api/workspace', async ctx => [200, workspaceSummary(db.prepare('S
 route('GET', '/api/public/pricing', async ctx => {
   const plans = db.prepare('SELECT * FROM plans WHERE active=1 ORDER BY sort, price_cents').all().map(planView);
   const u = sessionUser(ctx.req), w = workspaceOfUser(u);
-  return [200, { plans, payments: billing.enabled(), site: Object.fromEntries(SITE_KEYS.map(k => [k, core.getSetting(k)])),
+  return [200, { plans, payments: billing.enabled(), signups: SIGNUPS_OPEN, site: Object.fromEntries(SITE_KEYS.map(k => [k, core.getSetting(k)])),
     current: w ? { plan_key: core.entitledPlanKey(w), status: w.plan_status, until: w.plan_until } : null }];
 });
 
 // A signed-in person gets their own private workspace (on the Free plan). Needs a verified email: that is who owns it.
+const createWorkspaceFor = u => {
+  if (!SIGNUPS_OPEN) throw new HttpError(403, 'Signups are closed. Contact the site owner for an invitation.');
+  if (!u.email) throw new HttpError(400, `${u.p} did not share a verified email address, so we cannot create an account. Sign in with a provider that does.`);
+  const r = db.prepare('INSERT INTO workspaces (name, owner_email, owner_name, bbb_secret, created_at) VALUES (?,?,?,?,?)')
+    .run(str(u.name, 60) || u.email.split('@')[0], u.email, str(u.name, 80), newSecret(), now());
+  core.log('user', 'workspace.create', u.email, u.p, Number(r.lastInsertRowid));
+  return db.prepare('SELECT * FROM workspaces WHERE id=?').get(r.lastInsertRowid);
+};
 route('POST', '/api/workspace/ensure', async ctx => {
   const u = sessionUser(ctx.req);
   if (!u) throw new HttpError(401, 'Sign in first.');
   const existing = workspaceOfUser(u);
   if (existing) return [200, workspaceSummary(existing)];
-  if (!u.email) throw new HttpError(400, `${u.p} did not share a verified email address, so we cannot create an account. Sign in with a provider that does.`);
+  if (!SIGNUPS_OPEN) throw new HttpError(403, 'Signups are closed. Contact the site owner for an invitation.');
   if (!rateLimit('ws:' + ctx.ip, Number(process.env.LICENSEX_SIGNUPS_PER_IP_HOUR || 10), 3600e3)) throw new HttpError(429, 'Too many accounts created from this address. Try again later.');
-  const r = db.prepare('INSERT INTO workspaces (name, owner_email, owner_name, bbb_secret, created_at) VALUES (?,?,?,?,?)')
-    .run(str(u.name, 60) || u.email.split('@')[0], u.email, str(u.name, 80), newSecret(), now());
-  core.log('user', 'workspace.create', u.email, u.p, Number(r.lastInsertRowid));
-  return [201, workspaceSummary(db.prepare('SELECT * FROM workspaces WHERE id=?').get(r.lastInsertRowid))];
+  return [201, workspaceSummary(createWorkspaceFor(u))];
 });
 
 route('POST', '/api/billing/checkout', async ctx => {
@@ -699,7 +706,7 @@ route('POST', '/api/billing/checkout', async ctx => {
   if (!plan || plan.price_cents <= 0) throw new HttpError(400, 'That plan is not for sale.');
   if (!billing.enabled()) throw new HttpError(503, 'Online payments are not set up yet. Please contact us to buy this plan.');
   let w = workspaceOfUser(u);
-  if (!w) { if (!u.email) throw new HttpError(400, 'Your sign-in did not share a verified email address, so we cannot create an account.'); w = db.prepare('SELECT * FROM workspaces WHERE id=?').get(Number(db.prepare('INSERT INTO workspaces (name, owner_email, owner_name, bbb_secret, created_at) VALUES (?,?,?,?,?)').run(str(u.name, 60) || u.email.split('@')[0], u.email, str(u.name, 80), newSecret(), now()).lastInsertRowid)); }
+  if (!w) w = createWorkspaceFor(u);
   const entitled = core.entitledPlanKey(w);
   if (entitled === plan.key && plan.interval === 'once') throw new HttpError(409, `You already have the ${plan.name} plan.`);
   if (w.stripe_subscription_id && w.plan_source === 'stripe' && entitled !== 'free' && w.plan_status !== 'canceled')
@@ -730,6 +737,20 @@ route('POST', '/api/stripe/webhook', async ctx => {
 const customerRow = w => ({ ...workspaceSummary(w), licenses: core.usage(w.id).licenses, products: core.usage(w.id).products,
   stripe_customer_id: w.stripe_customer_id, stripe_subscription_id: w.stripe_subscription_id });
 route('GET', '/api/admin/customers', async () => [200, db.prepare('SELECT * FROM workspaces ORDER BY id').all().map(customerRow)], { platform: true });
+// Invite: create a workspace for an email address. Whoever signs in with that VERIFIED email owns it, even when signups are closed.
+route('POST', '/api/admin/customers', async ctx => {
+  const b = await body(ctx.req);
+  const email = String(b.email ?? '').trim().toLowerCase();
+  if (!EMAIL_RE.test(email)) throw new HttpError(400, 'Enter a valid email address.');
+  if (db.prepare('SELECT 1 FROM workspaces WHERE owner_email=?').get(email)) throw new HttpError(409, 'That email already has an account.');
+  const plan = db.prepare('SELECT * FROM plans WHERE key=?').get(str(b.plan_key || 'free', 30));
+  if (!plan) throw new HttpError(400, 'Unknown plan');
+  const until = int(b.until, { min: 1, max: 4e10, nullable: true });
+  const r = db.prepare('INSERT INTO workspaces (name, owner_email, owner_name, plan_key, plan_until, plan_source, bbb_secret, created_at) VALUES (?,?,?,?,?,?,?,?)')
+    .run(str(b.name, 60).trim() || email.split('@')[0], email, str(b.name, 80).trim(), plan.key, plan.key === 'free' ? null : until, plan.key === 'free' ? 'free' : 'manual', newSecret(), now());
+  core.log('admin', 'customer.invite', email, plan.key, Number(r.lastInsertRowid));
+  return [201, customerRow(db.prepare('SELECT * FROM workspaces WHERE id=?').get(r.lastInsertRowid))];
+}, { platform: true });
 const customer = ctx => { const w = db.prepare('SELECT * FROM workspaces WHERE id=?').get(ctx.params.id); if (!w) throw new HttpError(404, 'Not found'); if (w.id === HOUSE) throw new HttpError(400, 'That is your own workspace.'); return w; };
 // Hand-granting a plan (gifts, friends, other payment methods). until=null means no end date.
 route('POST', '/api/admin/customers/:id/plan', async ctx => {

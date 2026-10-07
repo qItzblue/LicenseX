@@ -21,6 +21,10 @@ Settings can come from `licensex.config.json` or environment variables (variable
 (data dir), `LICENSEX_PUBLIC_URL`, `LICENSEX_MAX_UPLOAD_MB`, `TRUST_PROXY=1` (read the client IP from
 `X-Forwarded-For` behind a proxy; needed for correct IPs online, and put TLS in front).
 
+**Run it as a paid service:** other plugin developers sign up for a private workspace (their own plugins, licenses and
+settings), pick a plan on **/pricing**, and pay with Stripe or get a plan from you. You edit the plans, see every
+customer, and can open their workspace to help. Set up in **[docs/BILLING.md](docs/BILLING.md)**.
+
 **Build from source:** upload a Maven/Gradle project as a zip, get the compiled jar (after an inspection report), and turn it
 into a product in one click. Needs a JDK and Maven on the server. See **[docs/BUILD.md](docs/BUILD.md)**.
 
@@ -37,6 +41,7 @@ button in the site header. Setup in **[docs/LOGIN.md](docs/LOGIN.md)**.
 | `server/jarstamp.js`, `classfile.js`, `wrapjar.js` | Dependency-free JAR editor, class-file patcher and the plugin wrapper that adds the license check. |
 | `wrapper/` | Source of the precompiled wrapper classes (`wrapper/build.sh`). |
 | `server/auth.js` | Google / Discord / GitHub OAuth sign-in and the verified-email admin check. |
+| `server/billing.js` | Stripe Checkout, billing portal and webhook handling (no SDK), and plan entitlements. |
 | `server/builder.js`, `zipx.js` | Source inspection (risk scan) and the Maven/Gradle build runner; safe zip extraction. |
 | `server/backup.js` | Backup / restore (admin -> Settings -> Backup & move) for moving between hosts. |
 | `plugin/` | `LicenseClient` (drop-in, no deps) + an example Bukkit/Paper plugin (`mvn package`). |

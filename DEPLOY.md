@@ -17,6 +17,12 @@ files or PHP (InfinityFree, GitHub Pages, ...) cannot run it.
 Environment variables override the file: `LICENSEX_ADMIN_PASSWORD`, `LICENSEX_PUBLIC_URL`, `PORT`, `TRUST_PROXY=1`,
 `LICENSEX_DATA`, `LICENSEX_MAX_UPLOAD_MB`.
 
+## Offering it to other developers (optional)
+
+LicenseX can also be a paid service: customers get private workspaces and you take payments with Stripe. Environment
+variables / config keys: `LICENSEX_STRIPE_SECRET_KEY`, `LICENSEX_STRIPE_WEBHOOK_SECRET`, `LICENSEX_SIGNUPS=closed` (invite
+only). Everything is in **[docs/BILLING.md](docs/BILLING.md)**. Run a single instance.
+
 ## Where to host it
 
 Free plans change often. This was last checked in October 2026, so confirm on the provider's page.
