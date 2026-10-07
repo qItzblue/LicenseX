@@ -1,6 +1,14 @@
-import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+
+let DatabaseSync;
+try { ({ DatabaseSync } = await import('node:sqlite')); }
+catch {
+  console.error(`[LicenseX] This needs Node.js 22.13 or newer (this server runs ${process.version}). Pick a newer Node version in your host's settings, or install it from https://nodejs.org`);
+  process.exit(1);
+}
+
+export { DatabaseSync };
 
 export function openDb(path) {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });

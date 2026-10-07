@@ -3,19 +3,29 @@ import { readFileSync, writeFileSync, existsSync, statSync, createReadStream, cr
 import { join, resolve, relative, isAbsolute, extname, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
-import { openDb } from './db.js';
+import { openDb, DatabaseSync } from './db.js';
+import { createBackup, restoreBackup, RestoreError } from './backup.js';
 import { createCore, normalizeKey, KEY_RE, hash, now } from './core.js';
 import { injectFiles } from './jarstamp.js';
 import { wrapJar, checkWrappable, WrapError } from './wrapjar.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const WEB = join(ROOT, 'web');
-const PORT = Number(process.env.PORT || 3000);
-const DATA = process.env.LICENSEX_DATA || join(ROOT, 'data');
+
+// Settings come from environment variables, or from licensex.config.json next to this folder (env vars win).
+// The config file exists for hosts that only let you upload files.
+const CONFIG_FILE = process.env.LICENSEX_CONFIG || join(ROOT, 'licensex.config.json');
+let fileConfig = {};
+if (existsSync(CONFIG_FILE)) {
+  try { fileConfig = JSON.parse(readFileSync(CONFIG_FILE, 'utf8')); }
+  catch (e) { console.error(`[LicenseX] ${CONFIG_FILE} is not valid JSON: ${e.message}`); process.exit(1); }
+}
+const PORT = Number(process.env.PORT || fileConfig.port || 3000);
+const DATA = process.env.LICENSEX_DATA || fileConfig.dataDir || join(ROOT, 'data');
 const PRODUCTS_DIR = join(DATA, 'products');
-const PUBLIC_URL = (process.env.LICENSEX_PUBLIC_URL || '').replace(/\/+$/, '');
-const MAX_UPLOAD = Number(process.env.LICENSEX_MAX_UPLOAD_MB || 64) * 1024 * 1024;
-const TRUST_PROXY = process.env.TRUST_PROXY === '1';
+const PUBLIC_URL = String(process.env.LICENSEX_PUBLIC_URL || fileConfig.publicUrl || '').replace(/\/+$/, '');
+const MAX_UPLOAD = Number(process.env.LICENSEX_MAX_UPLOAD_MB || fileConfig.maxUploadMb || 64) * 1024 * 1024;
+const TRUST_PROXY = (process.env.TRUST_PROXY ?? String(fileConfig.trustProxy ?? '')) === '1' || fileConfig.trustProxy === true;
 
 mkdirSync(DATA, { recursive: true });
 mkdirSync(PRODUCTS_DIR, { recursive: true });
@@ -39,7 +49,11 @@ function loadSecret(name, make) {
   return v;
 }
 const SESSION_SECRET = loadSecret('session.secret', () => randomBytes(32).toString('hex'));
-let ADMIN_PASSWORD = process.env.LICENSEX_ADMIN_PASSWORD;
+let ADMIN_PASSWORD = process.env.LICENSEX_ADMIN_PASSWORD || fileConfig.adminPassword;
+if (ADMIN_PASSWORD && /^CHANGE-ME/i.test(ADMIN_PASSWORD)) {
+  console.error('[LicenseX] Set a real admin password in licensex.config.json (it still says CHANGE-ME...).');
+  process.exit(1);
+}
 if (!ADMIN_PASSWORD) {
   ADMIN_PASSWORD = loadSecret('admin-password.txt', () => randomBytes(9).toString('base64url'));
   console.log(`[LicenseX] No LICENSEX_ADMIN_PASSWORD set. Generated admin password stored in ${join(DATA, 'admin-password.txt')}`);
@@ -350,6 +364,27 @@ route('DELETE', '/api/admin/products/:id', async ctx => {
   db.prepare('DELETE FROM products WHERE id=?').run(p.id);
   core.log('admin', 'product.delete', p.slug, p.name);
   return [200, { ok: true }];
+}, { admin: true });
+
+// Admin: backup / restore ---------------------------------------------------------
+// Everything (licenses, servers, groups, settings, uploaded plugins) in one zip. Contains every license key and the
+// BuiltByBit secret, so treat it like a password. Restoring replaces all current data.
+route('GET', '/api/admin/backup', async () => {
+  const zip = createBackup(db, PRODUCTS_DIR);
+  core.log('admin', 'backup.download', '', `${zip.length}B`);
+  return [200, zip, { 'Content-Type': 'application/zip', 'Content-Disposition': `attachment; filename="licensex-backup-${new Date().toISOString().slice(0, 10)}.zip"` }];
+}, { admin: true });
+route('POST', '/api/admin/restore', async ctx => {
+  const tmp = join(DATA, '.restore-upload');
+  await saveUpload(ctx.req, tmp);
+  try {
+    const r = restoreBackup(db, PRODUCTS_DIR, readFileSync(tmp), DatabaseSync);
+    core.log('admin', 'backup.restore', '', `${r.products} plugin file(s)`);
+    return [200, { ok: true, ...r }];
+  } catch (e) {
+    if (e instanceof RestoreError) throw new HttpError(400, e.message);
+    throw e;
+  } finally { rmSync(tmp, { force: true }); }
 }, { admin: true });
 
 // Admin: groups ---------------------------------------------------------------

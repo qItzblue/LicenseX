@@ -141,3 +141,44 @@ test('site links: validated, public, and never leak secrets', async () => {
   assert.equal(JSON.stringify(site).includes('secret'), false);
   assert.equal('bbb_secret' in site, false);
 });
+
+test('backup and restore round-trips licenses, groups, settings and plugin files', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { listEntries } = await import('../server/jarstamp.js');
+  const plugin = readFileSync(new URL('./fixtures/hello/hello-plugin.jar', import.meta.url));
+  const { cookie } = await call('POST', '/api/admin/login', { password: 'secret-pw' });
+  assert.equal((await fetch(base + '/api/admin/backup')).status, 401);
+
+  const lic = (await call('POST', '/api/admin/licenses', { owner: 'restore-me', note: 'keep' }, cookie)).body;
+  await call('PUT', '/api/admin/settings', { site_name: 'Before Backup' }, cookie);
+  const prod = (await call('POST', '/api/admin/products', { name: 'Backed Up' }, cookie)).body;
+  await fetch(base + `/api/admin/products/${prod.id}/file`, { method: 'POST', headers: { Cookie: cookie, 'X-Filename': 'b.jar' }, body: plugin });
+
+  const res = await fetch(base + '/api/admin/backup', { headers: { Cookie: cookie } });
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type'), /zip/);
+  const backup = Buffer.from(await res.arrayBuffer());
+  const names = listEntries(backup);
+  assert.ok(names.includes('licensex.db') && names.includes('backup.json') && names.includes('products/backed-up.bin'), names.join());
+
+  // change things after the backup was taken
+  await call('DELETE', `/api/admin/licenses/${lic.id}`, null, cookie);
+  await call('PUT', '/api/admin/settings', { site_name: 'After Backup' }, cookie);
+  await call('DELETE', `/api/admin/products/${prod.id}`, null, cookie);
+  assert.equal((await call('GET', '/api/admin/licenses?q=restore-me', null, cookie)).body.length, 0);
+
+  const bad = await fetch(base + '/api/admin/restore', { method: 'POST', headers: { Cookie: cookie }, body: Buffer.from('not a zip') });
+  assert.equal(bad.status, 400);
+  assert.equal((await call('GET', '/api/public/site')).body.site_name, 'After Backup', 'a failed restore changes nothing');
+
+  const ok = await fetch(base + '/api/admin/restore', { method: 'POST', headers: { Cookie: cookie }, body: backup });
+  assert.equal(ok.status, 200);
+  const back = (await call('GET', '/api/admin/licenses?q=restore-me', null, cookie)).body;
+  assert.equal(back.length, 1);
+  assert.equal(back[0].key, lic.key, 'same license key after restore');
+  assert.equal((await call('GET', '/api/public/site')).body.site_name, 'Before Backup');
+  const products = (await call('GET', '/api/admin/products', null, cookie)).body;
+  assert.ok(products.find(p => p.slug === 'backed-up' && p.has_file && p.integration.ok), 'plugin file restored and still wrappable');
+  const dl = await fetch(base + `/download/backed-up?token=${prod.token}&user=5`);
+  assert.equal(dl.status, 200, 'restored plugin can be downloaded');
+});

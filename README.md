@@ -10,7 +10,16 @@ npm test
 ```
 
 If `LICENSEX_ADMIN_PASSWORD` is unset a random one is generated into `data/admin-password.txt`.
-Other env: `PORT`, `LICENSEX_DATA` (data dir), `TRUST_PROXY=1` (read client IP from `X-Forwarded-For` behind a reverse proxy; required for correct IPs in production, and put TLS in front).
+
+**Just want to put it online?** Download **`dist/licensex-deploy.zip`**: it is the whole app in one folder, with nothing to
+install or build. Unzip it on a host that runs Node.js 22.13+, copy `licensex.config.example.json` to
+`licensex.config.json`, set your password and address, and run `node server/index.js` (or `start.sh` / `start.bat`).
+**[DEPLOY.md](DEPLOY.md)** covers where to host it (including free options and their catches), Docker, HTTPS, and moving
+between hosts. Static/PHP-only hosts such as InfinityFree can't run it. Rebuild the zip with `npm run bundle`.
+
+Settings can come from `licensex.config.json` or environment variables (variables win): `PORT`, `LICENSEX_DATA`
+(data dir), `LICENSEX_PUBLIC_URL`, `LICENSEX_MAX_UPLOAD_MB`, `TRUST_PROXY=1` (read the client IP from
+`X-Forwarded-For` behind a proxy; needed for correct IPs online, and put TLS in front).
 
 ## How it works
 
@@ -21,6 +30,7 @@ Other env: `PORT`, `LICENSEX_DATA` (data dir), `TRUST_PROXY=1` (read client IP f
 | `web/admin.html` | Admin: licenses, servers, **products/downloads**, groups, global settings, audit log. |
 | `server/jarstamp.js`, `classfile.js`, `wrapjar.js` | Dependency-free JAR editor, class-file patcher and the plugin wrapper that adds the license check. |
 | `wrapper/` | Source of the precompiled wrapper classes (`wrapper/build.sh`). |
+| `server/backup.js` | Backup / restore (admin -> Settings -> Backup & move) for moving between hosts. |
 | `plugin/` | `LicenseClient` (drop-in, no deps) + an example Bukkit/Paper plugin (`mvn package`). |
 
 ## Products & integrated downloads

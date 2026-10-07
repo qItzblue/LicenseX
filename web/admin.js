@@ -293,7 +293,24 @@ async function settings() {
     h('div', { class: 'field' }, h('label', null, 'Group for BuiltByBit buyers'), (() => { const g = groupSelect(Number(s.bbb_group_id) || null); g.id = 's-bbb-group'; g.addEventListener('change', () => save({ bbb_group_id: g.value || '' })); return g; })(),
       h('div', { class: 'hint' }, 'Buyers get this group\'s server limit. No group = the default limit below.')));
 
-  view.replaceChildren(head('Settings'), bbb, brand, h('div', { class: 'card', style: { maxWidth: '680px' } },
+  const restoreInput = h('input', { type: 'file', accept: '.zip', hidden: true, onchange: async e => {
+    const file = e.target.files[0]; e.target.value = '';
+    if (!file) return;
+    if (!await confirmDialog('Restore this backup?', `Everything currently in LicenseX (licenses, servers, groups, settings, plugin files) is replaced with the contents of ${file.name}.`, 'Restore')) return;
+    try {
+      const r = await fetch('/api/admin/restore', { method: 'POST', body: file });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.message || 'Restore failed');
+      toast('Backup restored'); settings();
+    } catch (err) { toast(err.message, true); }
+  } });
+  const backup = h('div', { class: 'card', style: { maxWidth: '680px', marginBottom: '16px' } },
+    h('h3', { style: { marginBottom: '4px' } }, 'Backup & move'),
+    h('p', { class: 'muted', style: { marginTop: 0, fontSize: '14px' } }, 'Download everything as one file, and restore it on any LicenseX. Do this before changing host, and regularly if your host can wipe its disk. The file contains every license key, so keep it private.'),
+    h('div', { class: 'row wrap' }, h('a', { class: 'btn primary', href: '/api/admin/backup', download: '' }, '⬇ Download backup'),
+      h('button', { class: 'btn', onclick: () => restoreInput.click() }, 'Restore from backup'), restoreInput));
+
+  view.replaceChildren(head('Settings'), bbb, brand, backup, h('div', { class: 'card', style: { maxWidth: '680px' } },
     num('default_limit', 'Default server limit', 'Applies to licenses with no group and no override. -1 = unlimited.', -1),
     num('heartbeat_minutes', 'Plugin check-in interval (minutes)', 'How often running plugins re-validate. Removals and blocks take effect within this window.', 1),
     toggle('claims_enabled', 'Issue licenses on download', 'When off, new downloads cannot claim a license (existing licenses keep working).'),

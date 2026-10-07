@@ -1,0 +1,8 @@
+{
+  "adminPassword": "CHANGE-ME-TO-A-LONG-PASSWORD",
+  "publicUrl": "https://licenses.yourdomain.com",
+  "port": 3000,
+  "trustProxy": true,
+  "dataDir": "",
+  "maxUploadMb": 64
+}
