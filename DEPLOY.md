@@ -33,6 +33,30 @@ Free plans change often. This was last checked in October 2026, so confirm on th
 Why not "always free and asleep" hosts for selling: BuiltByBit asks LicenseX for a key at the moment a buyer
 downloads. If your host is asleep or slow to wake, that buyer gets "Unable to acquire a license key automatically".
 
+## Render, step by step
+
+Render deploys from GitHub, not from the zip.
+
+1. Put the project in a GitHub repo you control (this one is `qItzblue/LicenseX`, branch `claude/dreamy-cori-gp73ku`;
+   merge it to `main` or choose that branch on Render). Private repos work once you connect GitHub to Render.
+2. On [render.com](https://render.com): **New + -> Blueprint**, pick the repo and branch. Render reads `render.yaml`.
+   (No Blueprint? **New + -> Web Service**, pick the repo, **Language: Docker**, Instance type **Free**.)
+3. Enter the two values it asks for: `LICENSEX_ADMIN_PASSWORD` (long and random) and `LICENSEX_PUBLIC_URL`. You only
+   learn the address after the first deploy (`https://something.onrender.com`), so put a guess, then fix it under
+   **Environment** and let it redeploy.
+4. Wait for **Live**, then open `https://<your-service>.onrender.com/admin` and sign in.
+5. In **Settings**, the BuiltByBit URL now shows your Render address.
+
+**Read this before relying on it.** On the **free** plan:
+- The disk is wiped whenever the service restarts, redeploys or spins down, so **every license is lost** each time.
+  Download a backup (**Settings -> Backup & move**) before anything you do on Render and restore it afterwards.
+- The service sleeps after 15 minutes without traffic and takes about a minute to wake. Running servers keep working for
+  72 hours without contact, but a buyer who downloads during the sleep may get no key from BuiltByBit.
+
+That is fine for trying everything out. To sell, use a **paid** instance with a **persistent disk** mounted at `/data`
+(uncomment the `disk:` block in `render.yaml`, or add the disk under the service's settings). `/data` is already where
+the Docker image keeps your data. Plans and prices change, so check Render's pricing page.
+
 ## Docker
 
 ```

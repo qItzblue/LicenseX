@@ -1,0 +1,18 @@
+# Render Blueprint: New + -> Blueprint, pick this repo. Builds the Dockerfile (Node 22).
+# FREE plan = testing only: it sleeps after 15 min idle and its disk is wiped on every restart, so licenses are lost.
+# For real use switch `plan` to a paid one and uncomment the disk block so /data survives restarts.
+services:
+  - type: web
+    name: licensex
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/public/site
+    envVars:
+      - key: LICENSEX_ADMIN_PASSWORD   # Render asks you for this when you create the service
+        sync: false
+      - key: LICENSEX_PUBLIC_URL       # e.g. https://licensex.onrender.com (the address Render gives you)
+        sync: false
+    # disk:                            # paid plans only: keeps your licenses across restarts and deploys
+    #   name: licensex-data
+    #   mountPath: /data
+    #   sizeGB: 1
