@@ -48,4 +48,47 @@ async function remove(v, s) {
 }
 
 form.addEventListener('submit', e => { e.preventDefault(); lookup(keyEl.value.trim()); });
-try { const k = sessionStorage.getItem(KEY); if (k) { keyEl.value = k; lookup(k, { silent: true }); } } catch {}
+const linked = new URLSearchParams(location.search).get('key');
+if (linked) { keyEl.value = linked; lookup(linked.trim()); history.replaceState(null, '', location.pathname); }
+else try { const k = sessionStorage.getItem(KEY); if (k) { keyEl.value = k; lookup(k, { silent: true }); } } catch {}
+
+// --- site branding + contact links (set by the admin under Settings) -----------------
+const ICONS = {
+  discord: 'M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z',
+  store: 'M4 7h16l-1.2 12.2a1 1 0 0 1-1 .8H6.2a1 1 0 0 1-1-.8L4 7zM8 7a4 4 0 0 1 8 0',
+  mail: 'M3 6h18v12H3zM3 7l9 6 9-6',
+  web: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z',
+};
+const icon = d => { const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); s.setAttribute('viewBox', '0 0 24 24'); const p = document.createElementNS('http://www.w3.org/2000/svg', 'path'); p.setAttribute('d', d); s.append(p); return s; };
+const safeUrl = u => { try { return /^https?:$/.test(new URL(u).protocol) ? u : ''; } catch { return ''; } };
+
+(async function loadSite() {
+  let site;
+  try { site = await api('GET', '/api/public/site'); } catch { return; }
+  const name = site.site_name || 'LicenseX';
+  document.title = `${name} · Manage your license`;
+  document.getElementById('siteName').textContent = name;
+  document.getElementById('mark').textContent = name.trim().charAt(0).toUpperCase() || 'X';
+  if (site.site_tagline) document.getElementById('tagline').textContent = site.site_tagline;
+
+  const discord = safeUrl(site.discord_url), store = safeUrl(site.store_url), web = safeUrl(site.website_url), mail = site.support_email;
+  const ext = { target: '_blank', rel: 'noopener noreferrer' };
+  const nav = document.getElementById('topnav');
+  if (store) nav.append(h('a', { href: store, class: 'opt', ...ext }, 'BuiltByBit'));
+  if (discord) nav.append(h('a', { href: discord, class: 'pill', ...ext }, 'Join our Discord'));
+
+  const cards = [];
+  if (discord) cards.push(['discord', 'Discord', 'Chat with us and the community', discord, ext]);
+  if (store) cards.push(['store', 'BuiltByBit', 'Browse our plugins', store, ext]);
+  if (mail) cards.push(['mail', 'Email', mail, 'mailto:' + mail, {}]);
+  if (web) cards.push(['web', 'Website', web.replace(/^https?:\/\//, '').replace(/\/$/, ''), web, ext]);
+  if (cards.length) {
+    document.getElementById('contactCards').replaceChildren(...cards.map(([ic, title, sub, href, attrs]) =>
+      h('a', { class: 'card cc', href, ...attrs }, h('div', { class: 'ico' }, icon(ICONS[ic])), h('b', null, title), h('span', null, sub))));
+    document.getElementById('contact').hidden = false;
+    nav.append(h('a', { href: '#contact', class: 'opt' }, 'Contact'));
+  }
+  const foot = document.getElementById('footLinks');
+  foot.replaceChildren(...[[discord, 'Discord'], [store, 'BuiltByBit'], [web, 'Website'], [mail && 'mailto:' + mail, 'Contact'], ['/admin', 'Admin']].filter(([u]) => u).map(([u, t]) => h('a', { href: u, ...(u.startsWith('mailto') || u === '/admin' ? {} : ext) }, t)));
+  document.getElementById('footText').textContent = `© ${new Date().getFullYear()} ${name} · Servers are identified by plugin instance, never by your personal data.`;
+})();

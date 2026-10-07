@@ -125,10 +125,11 @@ async function licenseDrawer(id, refresh) {
 
 // --- servers ---------------------------------------------------------------
 async function servers() {
+  const hb = Number((await api('GET', '/api/admin/settings')).heartbeat_minutes) || 1;
   const body = h('div', { class: 'card table-card' });
   async function load(q = '') {
     const rows = await api('GET', '/api/admin/servers?q=' + encodeURIComponent(q));
-    const online = Date.now() / 1000 - 40 * 60;
+    const online = Date.now() / 1000 - Math.max(3, hb * 3) * 60; // 3 missed check-ins = idle
     body.replaceChildren(h('table', null, h('thead', null, h('tr', null, ['Server', 'Address', 'License', 'Version', 'Last seen', 'Status', ''].map(t => h('th', null, t)))),
       h('tbody', null, rows.length ? rows.map(s => h('tr', null,
         h('td', null, h('b', null, s.name || 'Unnamed')), h('td', { class: 'keycell' }, `${s.ip}:${s.port ?? '?'}`),
@@ -200,9 +201,9 @@ function productCard(p) {
     h('div', { class: 'row wrap', style: { gap: '18px', margin: '14px 0', color: 'var(--muted)', fontSize: '13px' } },
       h('span', null, h('b', { style: { color: 'var(--text)', fontSize: '18px' } }, p.downloads), ' downloads'),
       h('span', null, 'Licenses issued per download · ', p.group_id ? 'assigned to group' : 'default limit')),
-    h('label', { style: { marginTop: '4px' } }, 'BuiltByBit download URL (paste into your resource\'s off-site download)'),
-    h('div', { class: 'url-row' }, h('input', { class: 'mono', readonly: true, value: p.builtbybit_url, onclick: e => e.target.select() }),
-      h('button', { class: 'btn sm', onclick: () => copy(p.builtbybit_url) }, 'Copy')),
+    h('label', { style: { marginTop: '4px' } }, 'Direct download URL (for your own site, Discord or store; each buyer id keeps one license)'),
+    h('div', { class: 'url-row' }, h('input', { class: 'mono', readonly: true, value: p.download_url, onclick: e => e.target.select() }),
+      h('button', { class: 'btn sm', onclick: () => copy(p.download_url) }, 'Copy')),
     h('div', { class: 'row wrap', style: { marginTop: '14px', gap: '8px' } },
       h('a', { class: 'btn sm primary', href: p.download_url, target: '_blank' }, '⬇ Test download'),
       h('button', { class: 'btn sm', onclick: () => replaceInput.click() }, p.has_file ? 'Replace file' : 'Upload file'), replaceInput,
@@ -251,12 +252,36 @@ async function groupsPage() {
 // --- settings --------------------------------------------------------------
 async function settings() {
   const s = await api('GET', '/api/admin/settings');
-  const save = async patch => { try { await api('PUT', '/api/admin/settings', patch); toast('Saved'); } catch (e) { toast(e.message, true); } };
+  const save = async patch => { try { await api('PUT', '/api/admin/settings', patch); toast('Saved'); return true; } catch (e) { toast(e.message, true); return false; } };
   const toggle = (k, title, desc) => h('label', { class: 'switch', style: { color: 'inherit', fontSize: '15px', margin: 0 } }, h('span', null, h('b', null, title), h('div', { class: 'muted', style: { fontSize: '13px' } }, desc)),
     h('input', { type: 'checkbox', checked: s[k] === '1', onchange: e => save({ [k]: e.target.checked }) }));
   const num = (k, title, desc, min) => h('div', { class: 'switch' }, h('span', null, h('b', null, title), h('div', { class: 'muted', style: { fontSize: '13px' } }, desc)),
     h('input', { type: 'number', min, value: s[k], style: { width: '100px' }, onchange: e => save({ [k]: Number(e.target.value) }) }));
-  view.replaceChildren(head('Settings'), h('div', { class: 'card', style: { maxWidth: '680px' } },
+
+  const text = (k, label, ph, hint) => h('div', { class: 'field' }, h('label', null, label), h('input', { id: 's-' + k, value: s[k] || '', placeholder: ph }), hint && h('div', { class: 'hint' }, hint));
+  const brand = h('div', { class: 'card', style: { maxWidth: '680px', marginBottom: '16px' } },
+    h('h3', { style: { marginBottom: '4px' } }, 'Website & contact links'),
+    h('p', { class: 'muted', style: { marginTop: 0, fontSize: '14px' } }, 'Shown on the public license page. Leave a field empty to hide it.'),
+    text('site_name', 'Site name', 'LicenseX'),
+    text('site_tagline', 'Tagline', 'Licenses for our Minecraft plugins'),
+    text('discord_url', 'Discord invite link', 'https://discord.gg/yourinvite'),
+    text('store_url', 'BuiltByBit page link', 'https://builtbybit.com/creators/yourname.12345/'),
+    text('website_url', 'Website link', 'https://example.com'),
+    text('support_email', 'Support email', 'support@example.com'),
+    h('button', { class: 'btn primary', onclick: () => save(Object.fromEntries(['site_name', 'site_tagline', 'discord_url', 'store_url', 'website_url', 'support_email'].map(k => [k, brand.querySelector('#s-' + k).value]))) }, 'Save links'));
+
+  const secretEl = h('input', { class: 'mono', readonly: true, value: s.bbb_secret, onclick: e => e.target.select() });
+  const urlEl = h('input', { class: 'mono', readonly: true, value: s.bbb_callback_url, onclick: e => e.target.select() });
+  const bbb = h('div', { class: 'card', style: { maxWidth: '680px', marginBottom: '16px' } },
+    h('h3', { style: { marginBottom: '4px' } }, 'BuiltByBit integration'),
+    h('p', { class: 'muted', style: { marginTop: 0, fontSize: '14px' } }, 'Create a placeholder on BuiltByBit with type "External license key" using these two values. Each buyer then gets their own license automatically, the same one every time they download. Step-by-step guide: docs/BUILTBYBIT.md in the project.'),
+    h('div', { class: 'field' }, h('label', null, 'URL (paste into the placeholder)'), h('div', { class: 'url-row' }, urlEl, h('button', { class: 'btn sm', onclick: () => copy(urlEl.value) }, 'Copy'))),
+    h('div', { class: 'field' }, h('label', null, 'Secret'), h('div', { class: 'url-row' }, secretEl, h('button', { class: 'btn sm', onclick: () => copy(secretEl.value) }, 'Copy'),
+      h('button', { class: 'btn sm danger', onclick: async () => { if (await confirmDialog('Generate a new secret?', 'BuiltByBit will be refused until you paste the new secret into your placeholder.', 'Generate', false)) { if (await save({ regenerate_bbb_secret: true })) settings(); } } }, 'New secret'))),
+    h('div', { class: 'field' }, h('label', null, 'Group for BuiltByBit buyers'), (() => { const g = groupSelect(Number(s.bbb_group_id) || null); g.id = 's-bbb-group'; g.addEventListener('change', () => save({ bbb_group_id: g.value || '' })); return g; })(),
+      h('div', { class: 'hint' }, 'Buyers get this group\'s server limit. No group = the default limit below.')));
+
+  view.replaceChildren(head('Settings'), bbb, brand, h('div', { class: 'card', style: { maxWidth: '680px' } },
     num('default_limit', 'Default server limit', 'Applies to licenses with no group and no override. -1 = unlimited.', -1),
     num('heartbeat_minutes', 'Plugin check-in interval (minutes)', 'How often running plugins re-validate. Removals and blocks take effect within this window.', 1),
     toggle('claims_enabled', 'Issue licenses on download', 'When off, new downloads cannot claim a license (existing licenses keep working).'),

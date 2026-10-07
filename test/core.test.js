@@ -75,3 +75,29 @@ test('unlimited (-1) and unknown keys', () => {
   for (const i of 'abcdef') assert.ok(reg(core, lic.key, i).ok);
   assert.equal(reg(core, 'LX-AAAA-AAAA-AAAA-AAAA', 'a').code, 'INVALID_KEY');
 });
+
+test('plugins check in every minute by default', () => {
+  const { core } = fresh();
+  const lic = core.createLicense({});
+  assert.equal(reg(core, lic.key, 'a').heartbeat_minutes, 1);
+});
+
+test('a buyer keeps one license across downloads; other buyers on the same IP get their own', () => {
+  const { core } = fresh();
+  const dl = (user, nonce, product = 'Plugin') => core.claim({ nonce, user, product, ip: '5.5.5.5', device: 'd' });
+  const a1 = dl('1001', 'n1'), a2 = dl('1001', 'n2'), a3 = dl('1001', 'n3');   // user 1, three downloads
+  const b1 = dl('2002', 'n4');                                                // user 2, same IP + device
+  assert.equal(a1.key, a2.key);
+  assert.equal(a1.key, a3.key);
+  assert.notEqual(a1.key, b1.key);
+  assert.equal(dl('2002', 'n9').key, b1.key);
+  assert.notEqual(dl('1001', 'n5', 'Other Plugin').key, a1.key);             // per product
+});
+
+test('unreplaced %%placeholders%% and missing buyer ids never share a license', () => {
+  const { core } = fresh();
+  const raw = n => core.claim({ nonce: n, user: '%%__USER__%%', product: 'P', ip: '1.1.1.1', device: 'd' });
+  assert.notEqual(raw('x1').key, raw('x2').key);                              // falls back to the nonce
+  assert.equal(raw('x1').key, raw('x1').key);
+  assert.equal(core.claim({ nonce: '%%__NONCE__%%', user: '', product: 'P', ip: 'i', device: 'd' }).code, 'BAD_REQUEST');
+});

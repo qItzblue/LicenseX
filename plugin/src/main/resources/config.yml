@@ -1,6 +1,6 @@
 # LicenseX server that issues and validates licenses (no trailing slash).
 # Ignored when the jar was downloaded through LicenseX: the stamped-in licensex.json wins.
-licensex-url: "http://localhost:3000"
+licensex-url: "https://licenses.example.com"   # <- your public LicenseX address; also bake this in as the default before uploading to BuiltByBit
 
 # Only needed for a jar that was NOT downloaded through LicenseX and NOT built with BuiltByBit placeholders.
 # Paste the key you were given. Once a license is claimed it is stored in license.key and never changes.

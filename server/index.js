@@ -54,14 +54,17 @@ setInterval(() => { const t = Date.now(); for (const [k, v] of buckets) if (!v.s
 
 class HttpError extends Error { constructor(status, message, code) { super(message); this.status = status; this.code = code; } }
 const json = (res, status, body, headers = {}) => {
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
-  res.end(JSON.stringify(body));
+  const text = typeof body === 'string'; // plain-text responses (BuiltByBit expects the bare key)
+  res.writeHead(status, { 'Content-Type': text ? 'text/plain; charset=utf-8' : 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
+  res.end(text ? body : JSON.stringify(body));
 };
 async function body(req) {
   let size = 0; const chunks = [];
   for await (const c of req) { size += c.length; if (size > 32768) throw new HttpError(413, 'Body too large'); chunks.push(c); }
   if (!chunks.length) return {};
-  try { return JSON.parse(Buffer.concat(chunks).toString()); } catch { throw new HttpError(400, 'Invalid JSON'); }
+  const text = Buffer.concat(chunks).toString();
+  if (/x-www-form-urlencoded/i.test(req.headers['content-type'] || '')) return Object.fromEntries(new URLSearchParams(text)); // BuiltByBit posts a form
+  try { return JSON.parse(text); } catch { throw new HttpError(400, 'Invalid JSON'); }
 }
 const int = (v, { min = -1, max = 1e6, nullable = false } = {}) => {
   if (v === null || v === '' || v === undefined) { if (nullable) return null; throw new HttpError(400, 'Number required'); }
@@ -99,15 +102,41 @@ const route = (method, path, handler, opts = {}) =>
 route('POST', '/api/v1/claim', async ctx => {
   if (!rateLimit('claim:' + ctx.ip, 20, 60e3)) throw new HttpError(429, 'Too many requests');
   const b = await body(ctx.req);
-  const r = core.claim({ nonce: b.nonce, user: b.user, product: b.product, ip: ctx.ip, device: b.device ? hash(b.device) : hash(ctx.ip + ctx.req.headers['user-agent']) });
+  const r = core.claim({ nonce: b.nonce, user: b.user, name: b.name, product: b.product, ip: ctx.ip, device: b.device ? hash(b.device) : hash(ctx.ip + ctx.req.headers['user-agent']) });
   return [r.ok ? 200 : 403, r];
 });
 route('POST', '/api/v1/validate', async ctx => {
-  if (!rateLimit('val:' + ctx.ip, 120, 60e3)) throw new HttpError(429, 'Too many requests');
+  if (!rateLimit('val:' + ctx.ip, 600, 60e3)) throw new HttpError(429, 'Too many requests');
   const b = await body(ctx.req);
   const r = core.validate({ key: b.key, instanceId: b.instanceId, name: b.name, port: b.port, version: b.version, ip: ctx.ip });
   return [r.ok ? 200 : 403, r];
 });
+
+// BuiltByBit "External license key" placeholder --------------------------------
+// BuiltByBit POSTs {user_id, resource_id, version_id, secret, ...} (form-encoded) every time a buyer downloads
+// and writes the plain-text response over %%__BBB_LICENSE__%% inside the file. user_id is the buyer, so the same
+// buyer always gets the same license no matter how often they download.
+const bbbSecret = () => {
+  let s = core.getSetting('bbb_secret');
+  if (!s) { s = randomBytes(24).toString('base64url'); core.setSetting('bbb_secret', s); }
+  return s;
+};
+route('POST', '/api/v1/builtbybit/license', async ctx => {
+  if (!rateLimit('bbb:' + ctx.ip, 300, 60e3)) throw new HttpError(429, 'Too many requests');
+  const b = await body(ctx.req);
+  if (!safeEq(hash(b.secret ?? ''), hash(bbbSecret()))) { core.log('system', 'bbb.denied', ctx.ip, 'bad secret'); return [403, 'Forbidden'] }
+  const uid = str(b.user_id, 32).trim(), rid = str(b.resource_id, 32).trim();
+  if (!/^\d+$/.test(uid)) return [400, 'Missing user_id'];
+  const gid = Number(core.getSetting('bbb_group_id')) || null;
+  const r = core.claim({ user: uid, name: `BuiltByBit #${uid}`, product: `BuiltByBit resource ${rid || '?'}`,
+    group_id: gid && db.prepare('SELECT 1 FROM license_groups WHERE id=?').get(gid) ? gid : null, ip: ctx.ip, device: hash('bbb') });
+  if (!r.ok) return [503, r.message];
+  return [200, r.key];
+});
+
+// Public site info (branding + links shown on the home page; never secrets) -----
+const SITE_KEYS = ['site_name', 'site_tagline', 'discord_url', 'store_url', 'website_url', 'support_email'];
+route('GET', '/api/public/site', async () => [200, Object.fromEntries(SITE_KEYS.map(k => [k, core.getSetting(k)]))]);
 
 // Public portal ---------------------------------------------------------------
 async function portalLicense(ctx) {
@@ -244,9 +273,7 @@ const downloadUrlFor = (req, p) => {
   const origin = PUBLIC_URL || `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers.host || 'localhost:' + PORT}`;
   return `${origin}/download/${p.slug}?token=${p.token}`;
 };
-const productRow = (req, p) => ({ ...p, download_url: downloadUrlFor(req, p),
-  // BuiltByBit replaces these placeholders per download, so each buyer's download gets its own license.
-  builtbybit_url: `${downloadUrlFor(req, p)}&nonce=%%__NONCE__%%&user=%%__USERNAME__%%` });
+const productRow = (req, p) => ({ ...p, download_url: downloadUrlFor(req, p) });
 route('GET', '/api/admin/products', async ctx => {
   const rows = db.prepare('SELECT * FROM products ORDER BY id DESC').all();
   return [200, rows.map(p => productRow(ctx.req, p))];
@@ -327,13 +354,40 @@ route('DELETE', '/api/admin/groups/:id', async ctx => {
 }, { admin: true });
 
 // Admin: settings + audit -----------------------------------------------------
-route('GET', '/api/admin/settings', async () => [200, Object.fromEntries(['default_limit', 'claims_enabled', 'public_removal', 'heartbeat_minutes'].map(k => [k, core.getSetting(k)]))], { admin: true });
+route('GET', '/api/admin/settings', async ctx => [200, {
+  ...Object.fromEntries(['default_limit', 'claims_enabled', 'public_removal', 'heartbeat_minutes', 'bbb_group_id', ...SITE_KEYS].map(k => [k, core.getSetting(k)])),
+  bbb_secret: bbbSecret(),
+  bbb_callback_url: `${PUBLIC_URL || `${ctx.req.headers['x-forwarded-proto'] || 'http'}://${ctx.req.headers.host}`}/api/v1/builtbybit/license`,
+}], { admin: true });
+const httpUrl = (v, label) => {
+  v = String(v ?? '').trim().slice(0, 300);
+  if (!v) return '';
+  let u; try { u = new URL(v); } catch { throw new HttpError(400, `${label} must be a full link, e.g. https://discord.gg/yourinvite`); }
+  if (!/^https?:$/.test(u.protocol)) throw new HttpError(400, `${label} must start with http:// or https://`);
+  return u.href;
+};
 route('PUT', '/api/admin/settings', async ctx => {
   const b = await body(ctx.req);
   if ('default_limit' in b) core.setSetting('default_limit', int(b.default_limit, { min: -1, max: 100000 }));
   if ('heartbeat_minutes' in b) core.setSetting('heartbeat_minutes', int(b.heartbeat_minutes, { min: 1, max: 1440 }));
   for (const k of ['claims_enabled', 'public_removal']) if (k in b) core.setSetting(k, b[k] ? '1' : '0');
-  core.log('admin', 'settings.update', '', JSON.stringify(b));
+  if ('site_name' in b) core.setSetting('site_name', str(b.site_name, 40).trim() || 'LicenseX');
+  if ('site_tagline' in b) core.setSetting('site_tagline', str(b.site_tagline, 140).trim());
+  if ('discord_url' in b) core.setSetting('discord_url', httpUrl(b.discord_url, 'Discord link'));
+  if ('store_url' in b) core.setSetting('store_url', httpUrl(b.store_url, 'BuiltByBit link'));
+  if ('website_url' in b) core.setSetting('website_url', httpUrl(b.website_url, 'Website link'));
+  if ('support_email' in b) {
+    const e = str(b.support_email, 120).trim();
+    if (e && !/^[^\s@<>"]+@[^\s@<>"]+\.[^\s@<>"]+$/.test(e)) throw new HttpError(400, 'Support email is not a valid address');
+    core.setSetting('support_email', e);
+  }
+  if ('bbb_group_id' in b) {
+    const g = b.bbb_group_id ? int(b.bbb_group_id, { min: 1 }) : '';
+    if (g && !db.prepare('SELECT 1 FROM license_groups WHERE id=?').get(g)) throw new HttpError(400, 'Unknown group');
+    core.setSetting('bbb_group_id', g);
+  }
+  if (b.regenerate_bbb_secret) core.setSetting('bbb_secret', randomBytes(24).toString('base64url'));
+  core.log('admin', 'settings.update', '', JSON.stringify({ ...b, bbb_secret: undefined }));
   return [200, { ok: true }];
 }, { admin: true });
 route('GET', '/api/admin/audit', async ctx => [200, db.prepare('SELECT * FROM audit ORDER BY id DESC LIMIT ?').all(Math.min(Number(ctx.url.searchParams.get('limit')) || 100, 500))], { admin: true });
@@ -348,9 +402,11 @@ function handleDownload(req, res, slug, url) {
   if (!p || !p.has_file || !p.enabled) throw new HttpError(404, 'This download is not available.');
   if (!safeEq(url.searchParams.get('token') || '', p.token)) throw new HttpError(403, 'Invalid or missing download token.');
 
-  // No nonce (a human clicking the raw link) => a fresh nonce each time, so each download is its own license.
-  const nonce = str(url.searchParams.get('nonce'), 128).trim() || 'anon-' + randomBytes(12).toString('hex');
-  const r = core.claim({ nonce, user: str(url.searchParams.get('user'), 64), product: p.name, group_id: p.group_id, ip, device: hash(ip + req.headers['user-agent']) });
+  // A known buyer (?user=) always gets the same license. With no buyer id and no (real) nonce - e.g. someone
+  // opening the raw link - there is nothing to match on, so that download gets a fresh license.
+  const nonce = str(url.searchParams.get('nonce'), 128).trim();
+  const r = core.claim({ nonce: nonce.includes('%%') || !nonce ? 'anon-' + randomBytes(12).toString('hex') : nonce,
+    user: str(url.searchParams.get('user'), 64), name: str(url.searchParams.get('name'), 64), product: p.name, group_id: p.group_id, ip, device: hash(ip + req.headers['user-agent']) });
   if (!r.ok) throw new HttpError(403, r.message, r.code);
 
   const stamped = injectFiles(readFileSync(productFile(p.slug)), [{ name: 'licensex.json',
