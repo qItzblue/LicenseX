@@ -1,4 +1,3 @@
-# Dockerfile.builder
 FROM node:22-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -10,7 +9,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY package.json yarn.lock* ./
-
 RUN yarn install
 
 COPY . .
@@ -18,7 +16,9 @@ COPY . .
 ENV NODE_ENV=production
 ENV PORT=10000
 
-RUN java -version && mvn -version && gradle -version
+RUN java -version
+RUN mvn -version
+RUN gradle -version
 
 EXPOSE 10000
 
