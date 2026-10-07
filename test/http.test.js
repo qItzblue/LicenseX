@@ -22,9 +22,9 @@ test('end to end: claim -> plugin -> portal -> admin', async () => {
   const { cookie } = await call('POST', '/api/admin/login', { password: 'secret-pw' });
   assert.ok(cookie);
 
-  const { body: c } = await call('POST', '/api/v1/claim', { nonce: 'dl-1', user: 'steve' });
-  const key = c.key;
-  assert.equal((await call('POST', '/api/v1/claim', { nonce: 'dl-1-redownload', user: 'steve' })).body.key, key);
+  // the old unauthenticated /api/v1/claim endpoint is gone: anyone could mint licenses with it
+  assert.equal((await call('POST', '/api/v1/claim', { nonce: 'x', user: 'steve' })).status, 404);
+  const key = (await call('POST', '/api/admin/licenses', { owner: 'steve' }, cookie)).body.key;
 
   assert.equal((await call('POST', '/api/v1/validate', { key, instanceId: 'srv-1', name: 'Lobby', port: 25565 })).status, 200);
   assert.equal((await call('POST', '/api/v1/validate', { key, instanceId: 'srv-2', name: 'Pirate' })).body.code, 'LIMIT_REACHED');

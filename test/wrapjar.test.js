@@ -90,3 +90,19 @@ test('checkWrappable summary', () => {
   assert.deepEqual(checkWrappable(hello), { ok: true, main: 'com.acme.hello.HelloPlugin', code: '', message: '' });
   assert.equal(checkWrappable(Buffer.from('x')).ok, false);
 });
+
+test('hostile jars never crash the server: bombs, truncation, garbage inside', async () => {
+  const { deflateRawSync } = await import('node:zlib');
+  // a plugin.yml that inflates to far more than it claims
+  const bomb = injectFiles(hello, [{ name: 'plugin.yml', content: 'main: x.Y\n' + 'a'.repeat(30 * 1024 * 1024) }]);
+  const w = checkWrappable(bomb);
+  assert.equal(w.ok, false); assert.equal(w.code, 'BAD_JAR');
+  // truncated archives and random bytes
+  for (const bad of [hello.subarray(0, hello.length - 40), hello.subarray(0, 100), Buffer.alloc(300, 7)]) {
+    const r = checkWrappable(bad); assert.equal(r.ok, false);
+  }
+  // a class file that is garbage
+  const junk = injectFiles(hello, [{ name: 'com/acme/hello/HelloPlugin.class', content: Buffer.from('not a class') }]);
+  assert.equal(checkWrappable(junk).ok, false);
+  void deflateRawSync;
+});

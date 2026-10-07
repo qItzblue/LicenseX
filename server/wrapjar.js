@@ -43,14 +43,18 @@ export function wrapJar(jar, { url, key = '', product = '' }) {
   if (!has('plugin.yml')) throw new WrapError('NO_PLUGIN_YML', 'No plugin.yml found, so this is not a Bukkit/Spigot/Paper plugin.');
   if (has('dev/licensex/client/LicenseClient.class')) throw new WrapError('ALREADY_INTEGRATED', 'This plugin already contains the LicenseX client, so it is not wrapped.');
 
-  const yml = readEntry(jar, 'plugin.yml').toString('utf8').replace(/^﻿/, '');
+  let yml;
+  try { yml = readEntry(jar, 'plugin.yml').toString('utf8').replace(/^\uFEFF/, ''); }
+  catch { throw new WrapError('BAD_JAR', 'The plugin.yml inside this jar could not be read (corrupt or too large).'); }
   const m = MAIN_RE.exec(yml);
   if (!m) throw new WrapError('NO_MAIN', 'Could not find a "main:" line in plugin.yml.');
   const main = m[3];
   if (/^dev\.licensex\.w[0-9a-f]{8}\.Wrapper$/.test(main)) throw new WrapError('ALREADY_WRAPPED', 'This jar is already wrapped. Upload the original plugin jar instead.');
 
   const mainInternal = main.replace(/\./g, '/');
-  const mainBytes = readEntry(jar, mainInternal + '.class');
+  let mainBytes;
+  try { mainBytes = readEntry(jar, mainInternal + '.class'); }
+  catch { throw new WrapError('BAD_JAR', `The main class ${main} could not be read (corrupt or too large).`); }
   if (!mainBytes) throw new WrapError('MAIN_MISSING', `The main class ${main} is not inside this jar.`);
   let info;
   try { info = readClass(mainBytes); } catch { throw new WrapError('BAD_CLASS', `Could not read ${main}.`); }
@@ -67,7 +71,10 @@ export function wrapJar(jar, { url, key = '', product = '' }) {
   const files = loadTemplates().map(t => ({ name: `${pkg}/${t.file}`, content: mapUtf8(t.bytes, rename) }));
   files.push({ name: 'plugin.yml', content: yml.replace(MAIN_RE, `$1$2dev.licensex.w${suffix}.Wrapper$2$4`) });
   files.push({ name: 'licensex.json', content: JSON.stringify({ url, key, product, main, wrapped: 1 }) });
-  return { jar: injectFiles(jar, files, { remove: n => SIGNATURE_RE.test(n) }), main, package: pkg.replace(/\//g, '.') };
+  let out;
+  try { out = injectFiles(jar, files, { remove: n => SIGNATURE_RE.test(n) }); }
+  catch (e) { throw new WrapError('BAD_JAR', `This jar could not be processed (${e.message}).`); }
+  return { jar: out, main, package: pkg.replace(/\//g, '.') };
 }
 
 /** Dry run used at upload time to tell the admin whether auto-integration will work. */
@@ -75,6 +82,6 @@ export function checkWrappable(jar) {
   try { const r = wrapJar(jar, { url: 'https://example.invalid', product: 'check' }); return { ok: true, main: r.main, code: '', message: '' }; }
   catch (e) {
     if (e instanceof WrapError) return { ok: false, code: e.code, message: e.message, integrated: e.code === 'ALREADY_INTEGRATED' };
-    throw e;
+    return { ok: false, code: 'BAD_JAR', message: 'This file could not be analysed.', integrated: false };
   }
 }

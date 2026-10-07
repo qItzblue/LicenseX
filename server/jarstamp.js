@@ -60,7 +60,7 @@ export function readCentral(buf) {
 }
 
 /** Returns the (decompressed) bytes of one entry, or null if it isn't there. */
-export function readEntry(buf, wanted) {
+export function readEntry(buf, wanted, maxBytes = 8 * 1024 * 1024) {
   const eocd = findEocd(buf);
   let p = buf.readUInt32LE(eocd + 16);
   const count = buf.readUInt16LE(eocd + 10);
@@ -72,8 +72,8 @@ export function readEntry(buf, wanted) {
       const lo = buf.readUInt32LE(p + 42);
       const start = lo + 30 + buf.readUInt16LE(lo + 26) + buf.readUInt16LE(lo + 28);
       const data = buf.subarray(start, start + csize);
-      if (method === 0) return Buffer.from(data);
-      if (method === 8) return inflateRawSync(data);
+      if (method === 0) { if (data.length > maxBytes) throw new Error(`${wanted} is too large`); return Buffer.from(data); }
+      if (method === 8) return inflateRawSync(data, { maxOutputLength: maxBytes });
       throw new Error('Unsupported compression method ' + method);
     }
     p += 46 + n + m + k;

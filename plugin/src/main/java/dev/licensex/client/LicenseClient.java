@@ -40,7 +40,7 @@ public final class LicenseClient {
 
     /**
      * Reads /licensex.json from the jar, written by LicenseX when the buyer downloaded this exact copy.
-     * When present, the plugin is licensed out of the box with no config and no separate claim call.
+     * When present, the plugin is licensed out of the box with no config and no separate network call.
      */
     public static Optional<Embedded> embedded() {
         try (InputStream in = LicenseClient.class.getResourceAsStream("/licensex.json")) {
@@ -65,21 +65,6 @@ public final class LicenseClient {
             Path f = dataDir.resolve("license.key");
             return Files.exists(f) ? Optional.of(Files.readString(f).trim()).filter(s -> !s.isEmpty()) : Optional.empty();
         } catch (IOException e) { return Optional.empty(); }
-    }
-
-    /**
-     * Gets this install's license. The nonce is unique per download (BuiltByBit: %%__NONCE__%%), so each
-     * download gets a new license even from the same IP/device, while repeated calls with the same nonce
-     * return the same license. The result is persisted so the license never changes afterwards.
-     */
-    public Optional<String> claim(String nonce, String user, String product) throws IOException {
-        String resp = post("/api/v1/claim", "{\"nonce\":" + q(nonce) + ",\"user\":" + q(user) + ",\"product\":" + q(product)
-                + ",\"device\":" + q(deviceFingerprint()) + "}").body;
-        Matcher m = Pattern.compile("\"key\"\\s*:\\s*\"(LX-[A-Z0-9-]+)\"").matcher(resp);
-        if (!m.find()) return Optional.empty();
-        Files.createDirectories(dataDir);
-        Files.writeString(dataDir.resolve("license.key"), m.group(1));
-        return Optional.of(m.group(1));
     }
 
     /** Link to this license's own page on the LicenseX website. */
@@ -123,11 +108,6 @@ public final class LicenseClient {
         return id;
     }
     private void deleteInstanceId() { try { Files.deleteIfExists(dataDir.resolve(".instance-id")); } catch (IOException ignored) {} }
-
-    private static String deviceFingerprint() {
-        return System.getProperty("os.name") + "|" + System.getProperty("os.arch") + "|" + System.getProperty("user.name")
-                + "|" + System.getenv().getOrDefault("HOSTNAME", System.getenv().getOrDefault("COMPUTERNAME", ""));
-    }
 
     private static String field(String json, String name) {
         Matcher m = Pattern.compile("\"" + name + "\"\\s*:\\s*(?:\"((?:[^\"\\\\]|\\\\.)*)\"|(-?\\d+))").matcher(json);
