@@ -1,24 +1,11 @@
-# Base Node image
-FROM node:20-bookworm
-
-# Install JDK 17, Maven, Gradle, and required dependencies
-RUN apt-get update && \
-    apt-get install -y openjdk-17-jdk maven gradle wget unzip git && \
-    rm -rf /var/lib/apt/lists/*
-
-# Set Environment Variables for Java
-ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
-ENV PATH="$JAVA_HOME/bin:${PATH}"
-
+# LicenseX: no build step and no npm dependencies.
+FROM node:22-slim
 WORKDIR /app
-
-# Install app dependencies
-COPY package*.json ./
-RUN npm install
-
-# Copy source code
-COPY . .
-
-# Expose port and start application
+COPY server ./server
+COPY web ./web
+COPY package.json README.md DEPLOY.md licensex.config.example.json ./
+ENV NODE_ENV=production PORT=3000 LICENSEX_DATA=/data TRUST_PROXY=1
+# Licenses live in /data: mount a persistent volume here or they are lost when the container is replaced.
+VOLUME /data
 EXPOSE 3000
-CMD ["npm", "start"]
+CMD ["node", "server/index.js"]
