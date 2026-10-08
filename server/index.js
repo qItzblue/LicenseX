@@ -11,6 +11,8 @@ import { providerDefs, authorizeUrl, exchangeCode, fetchProfile, parseEmails, EM
 import { createCore, normalizeKey, KEY_RE, hash, now, PlanError, HOUSE } from './core.js';
 import { injectFiles } from './jarstamp.js';
 import { wrapJar, checkWrappable, WrapError } from './wrapjar.js';
+import { registerStripeConnect } from './stripe-connect.js';
+import { registerBuyers } from './buyers.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const WEB = join(ROOT, 'web');
@@ -311,7 +313,7 @@ route('GET', '/api/auth/me', async ctx => {
 route('POST', '/api/auth/logout', async () => [200, { ok: true }, { 'Set-Cookie': CLEAR_COOKIES }]);
 
 // OAuth redirect flow: GET /auth/<provider>  ->  provider  ->  GET /auth/<provider>/callback
-const NEXT_OK = new Set(['/', '/admin', '/dashboard', '/pricing', '/login']);
+const NEXT_OK = new Set(['/', '/admin', '/dashboard', '/account', '/pricing', '/login', '/login/creator', '/login/buyer']);
 const redirect = (res, to, cookiesOut = []) => { res.writeHead(302, { Location: to, 'Cache-Control': 'no-store', ...(cookiesOut.length ? { 'Set-Cookie': cookiesOut } : {}) }); res.end(); };
 async function handleAuth(req, res, url) {
   const m = /^\/auth\/(google|discord|github)(\/callback)?$/.exec(url.pathname);
@@ -942,13 +944,21 @@ function handleDownload(req, res, slug, url) {
   res.end(stamped);
 }
 
+// --- feature modules: each registers its own routes -------------------------------
+// They get the pieces of this file they need through one object, so they can live (and be tested) in their own files.
+const app = { route, db, core, HttpError, body, int, str, rateLimit, recentCount, clientIp, publicBase, sessionUser, cookies, isHttps, secure, sign, signToken, readToken, safeEq,
+  PUBLIC_URL, DATA, SESSION_SECRET, HOUSE, now, hash, normalizeKey, KEY_RE, billing, STRIPE, fileConfig, CONFIG_ADMIN_EMAILS, isAdminUser, workspaceOfUser };
+registerStripeConnect(app);
+registerBuyers(app);
+
 // --- static + dispatch -----------------------------------------------------
 const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
 function serveStatic(req, res, pathname) {
   if (pathname === '/') pathname = '/index.html';
   if (pathname === '/admin' || pathname === '/dashboard') pathname = '/admin.html';
   if (pathname === '/pricing') pathname = '/pricing.html';
-  if (pathname === '/login') pathname = '/login.html';
+  if (pathname === '/login' || pathname === '/login/creator' || pathname === '/login/buyer') pathname = '/login.html';
+  if (pathname === '/account') pathname = '/account.html';
   const file = resolve(WEB, '.' + pathname);
   const rel = relative(WEB, file);
   if (!rel || rel.startsWith('..') || isAbsolute(rel) || !existsSync(file) || !statSync(file).isFile()) return json(res, 404, { ok: false, message: 'Not found' });
