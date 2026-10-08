@@ -30,7 +30,12 @@ customer, and can open their workspace to help. Set up in **[docs/BILLING.md](do
 into a product in one click. Needs a JDK and Maven on the server. See **[docs/BUILD.md](docs/BUILD.md)**.
 
 **Sign in with Google, Discord or GitHub:** optional; people whose verified email is on your admin list get an **Admin**
-button in the site header. Setup in **[docs/LOGIN.md](docs/LOGIN.md)**.
+button in the site header. Creators and buyers have their own sign-in pages (`/login/creator`, `/login/buyer`, chooser at
+`/login`). Setup in **[docs/LOGIN.md](docs/LOGIN.md)**.
+
+**Buyer accounts:** a buyer signs in and sees every license they own at **/account** ("My licenses"): they add keys, and
+licenses you issue to their verified email appear by themselves. They see their servers and can remove the ones they no
+longer run (if you allow self-service removal). Details in [docs/LOGIN.md](docs/LOGIN.md).
 
 ## How it works
 
@@ -42,6 +47,8 @@ button in the site header. Setup in **[docs/LOGIN.md](docs/LOGIN.md)**.
 | `server/jarstamp.js`, `classfile.js`, `wrapjar.js` | Dependency-free JAR editor, class-file patcher and the plugin wrapper that adds the license check. |
 | `wrapper/` | Source of the precompiled wrapper classes (`wrapper/build.sh`). |
 | `server/auth.js` | Google / Discord / GitHub OAuth sign-in and the verified-email admin check. |
+| `server/buyers.js` | Buyer accounts: `/api/account` (list, link a key, unlink, remove a server). |
+| `web/login.html`, `web/account.html` | Sign-in pages (chooser, creator, buyer) and the buyer portal "My licenses". |
 | `server/billing.js` | Stripe Checkout, billing portal and webhook handling (no SDK), and plan entitlements. |
 | `server/builder.js`, `zipx.js` | Source inspection (risk scan) and the Maven/Gradle build runner; safe zip extraction. |
 | `server/backup.js` | Backup / restore (admin -> Settings -> Backup & move) for moving between hosts. |
