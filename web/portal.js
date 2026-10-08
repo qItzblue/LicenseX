@@ -93,20 +93,27 @@ const safeUrl = u => { try { return /^https?:$/.test(new URL(u).protocol) ? u : 
   document.getElementById('footText').textContent = `© ${new Date().getFullYear()} ${name} · Servers are identified by plugin instance, never by your personal data.`;
 })();
 
-// --- sign in / account chip / Admin button (top right) ---------------------------------
+// --- sign in / account chip / My licenses / Dashboard / Admin (top right) --------------------------
 (async function loadAuth() {
-  const slot = document.getElementById('authNav');
+  const slot = document.getElementById('authNav'), hint = document.getElementById('acctHint');
   let me;
   try { me = await api('GET', '/api/auth/me'); } catch { return; }
   if (!me.user) {
-    if (me.providers.length) slot.append(h('a', { href: '/login', class: 'pill' }, 'Sign in'));
+    if (me.providers.length) {
+      slot.append(h('a', { href: '/login', class: 'pill' }, 'Sign in'));
+      hint.replaceChildren('Have more than one license? ', h('a', { href: '/login/buyer' }, 'Sign in'), ' to keep them all in one place.');
+      hint.hidden = false;
+    }
     return;
   }
   const u = me.user;
   slot.append(...[
+    h('a', { href: '/account', class: 'pill' }, 'My licenses'),
     u.isAdmin ? h('a', { href: '/admin', class: 'admin' }, 'Admin') : u.workspace ? h('a', { href: '/dashboard', class: 'admin' }, 'Dashboard') : null,
     h('span', { class: 'me-chip muted', title: u.email || u.provider, style: { fontSize: '14px', padding: '0 6px' } },
       u.avatar ? h('img', { src: u.avatar, alt: '', referrerpolicy: 'no-referrer' }) : h('span', { class: 'ph' }, (u.name || '?').charAt(0).toUpperCase()),
       h('span', { class: 'opt' }, u.name)),
     h('button', { class: 'linklike', onclick: async () => { await api('POST', '/api/auth/logout'); location.reload(); } }, 'Sign out')].filter(Boolean));
+  hint.replaceChildren('Signed in as ', h('b', null, u.name), '. ', h('a', { href: '/account' }, 'See all your licenses'), ' in one place.');
+  hint.hidden = false;
 })();
