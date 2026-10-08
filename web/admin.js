@@ -126,7 +126,16 @@ async function licenses() {
   const search = h('input', { placeholder: 'Search key, owner, note, IP…', oninput: debounce(e => { filters.q = e.target.value; load(); }) });
   const status = h('select', { onchange: e => { filters.status = e.target.value; load(); } }, h('option', { value: '' }, 'All statuses'), h('option', { value: 'active' }, 'Active'), h('option', { value: 'blocked' }, 'Blocked'));
   const grp = h('select', { onchange: e => { filters.group = e.target.value; load(); } }, h('option', { value: '' }, 'All groups'), groups.map(g => h('option', { value: g.id }, g.name)));
-  render(head('Licenses', h('button', { class: 'btn primary', onclick: () => licenseForm(null, load) }, '+ New license')), h('div', { class: 'toolbar' }, search, status, grp), body);
+  async function cleanUp() {
+    const days = 7, q = { older_than_days: days };
+    const { count } = await api('POST', '/api/admin/licenses/purge-unused', { ...q, dry_run: true });
+    if (!count) return toast(`Nothing to clean up: no download license older than ${days} days is unused.`);
+    if (!await confirmDialog(`Delete ${count} unused license${count === 1 ? '' : 's'}?`, `These were created by downloads more than ${days} days ago and have never been used on a server. Licenses you made by hand, blocked ones and any that is in use are kept.`, 'Delete')) return;
+    const r = await api('POST', '/api/admin/licenses/purge-unused', q);
+    toast(`Deleted ${r.count} unused license${r.count === 1 ? '' : 's'}.`);
+    await load();
+  }
+  render(head('Licenses', h('button', { class: 'btn', title: 'Delete licenses that downloads created but nobody ever used', onclick: () => cleanUp().catch(e => toast(e.message, true)) }, 'Clean up unused'), h('button', { class: 'btn primary', onclick: () => licenseForm(null, load) }, '+ New license')), h('div', { class: 'toolbar' }, search, status, grp), body);
   await load();
 }
 const debounce = (fn, ms = 250) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
