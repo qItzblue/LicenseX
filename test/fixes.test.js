@@ -187,3 +187,22 @@ test('the developer can delete downloaded-but-never-used licenses in one go', as
   assert.deepEqual((await call('GET', '/api/admin/licenses', null, eve)).body.map(l => l.owner).sort(), ['b', 'friend'], 'and it only ever touches your own workspace');
   assert.ok(manual.id);
 });
+
+test('a huge plugin.yml is refused at upload instead of being re-compressed on every download', async () => {
+  const { injectFiles } = await import('../server/jarstamp.js');
+  const big = injectFiles(plugin, [{ name: 'plugin.yml', content: readFileSync(new URL('./fixtures/hello/plugin.yml', import.meta.url), 'utf8') + '\n# ' + 'x'.repeat(300 * 1024) }]);
+  const p = (await call('POST', '/api/admin/products', { name: 'Huge yml' }, alice)).body;
+  const up = await fetch(`${base}/api/admin/products/${p.id}/file`, { method: 'POST', headers: { Cookie: alice, 'X-Filename': 'big.jar' }, body: big });
+  const row = await up.json();
+  assert.equal(row.integration.ok, false);
+  assert.equal(row.integration.code, 'BAD_JAR');
+});
+
+test('audit entries stay small even when a plugin sends garbage as its port or name', async () => {
+  const lic = (await call('POST', '/api/admin/licenses', { owner: 'audit-size' }, alice)).body;
+  const r = await call('POST', '/api/v1/validate', { key: lic.key, instanceId: 'srv-big', name: 'n'.repeat(3000), port: 'p'.repeat(20000) });
+  assert.equal(r.status, 200);
+  const rows = (await call('GET', '/api/admin/audit?limit=5', null, alice)).body;
+  assert.ok(rows.every(a => a.detail.length <= 2000), 'detail is capped');
+  assert.match(rows.find(a => a.action === 'server.register').detail, /^[\d.:a-f]+:\? n{1,64}$/);
+});

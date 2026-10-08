@@ -7,12 +7,14 @@ import { openDb, DatabaseSync } from './db.js';
 import { createBackup, restoreBackup, RestoreError } from './backup.js';
 import { createBuildService, BuildError } from './builder.js';
 import { createBilling, verifySignature, StripeError } from './billing.js';
-import { providerDefs, authorizeUrl, exchangeCode, fetchProfile, parseEmails, EMAIL_RE } from './auth.js';
+import { providerDefs, authorizeUrl, exchangeCode, fetchProfile, parseEmails, normEmail, EMAIL_RE } from './auth.js';
 import { createCore, normalizeKey, KEY_RE, hash, now, PlanError, HOUSE } from './core.js';
 import { injectFiles } from './jarstamp.js';
 import { wrapJar, checkWrappable, WrapError } from './wrapjar.js';
 import { registerStripeConnect } from './stripe-connect.js';
 import { registerBuyers } from './buyers.js';
+import { registerTeam } from './team.js';
+import { accessFor, slotsFor } from './rbac.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const WEB = join(ROOT, 'web');
@@ -195,7 +197,7 @@ async function saveUpload(req, destPath, max = MAX_UPLOAD) {
 }
 
 // --- routes --------------------------------------------------------------
-const routes = []; // [method, regex, handler, {admin}]
+export const routes = []; // [method, regex, handler, {admin | perm | platform}] (exported so tests can check that every admin route is guarded)
 const route = (method, path, handler, opts = {}) =>
   routes.push([method, new RegExp('^' + path.replace(/:(\w+)/g, '(?<$1>[^/]+)') + '$'), handler, opts]);
 
@@ -227,7 +229,9 @@ route('POST', '/api/v1/builtbybit/license', async ctx => {
   const uid = str(b.user_id, 32).trim(), rid = str(b.resource_id, 32).trim();
   if (!/^\d+$/.test(uid)) return [400, 'Missing user_id'];
   const gid = Number(core.getSetting('bbb_group_id', w.id)) || null;
-  const r = core.claim({ ws: w.id, user: uid, name: `BuiltByBit #${uid}`, product: `BuiltByBit resource ${rid || '?'}`,
+  // when the developer told us which product this BuiltByBit resource is, the license is linked to it
+  const linked = rid ? db.prepare('SELECT id FROM products WHERE workspace_id=? AND bbb_resource_id=?').get(w.id, rid) : null;
+  const r = core.claim({ ws: w.id, user: uid, name: `BuiltByBit #${uid}`, product: `BuiltByBit resource ${rid || '?'}`, product_id: linked?.id ?? null,
     group_id: gid && db.prepare('SELECT 1 FROM license_groups WHERE id=? AND workspace_id=?').get(gid, w.id) ? gid : null, ip: ctx.ip, device: hash('bbb') });
   if (!r.ok) return [r.code === 'PLAN_LIMIT' ? 402 : 503, r.message];
   return [200, r.key];
@@ -270,7 +274,11 @@ const CLEAR_COOKIES = ['lx_admin=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'
 route('POST', '/api/admin/logout', async () => [200, { ok: true }, { 'Set-Cookie': CLEAR_COOKIES }]);
 route('GET', '/api/admin/me', async ctx => {
   const w = db.prepare('SELECT id, name, plan_key, suspended FROM workspaces WHERE id=?').get(ctx.wsId);
+  const sc = ctx.access.scope;
   return [200, { ok: true, via: ctx.admin.via, role: ctx.admin.role, name: ctx.admin.name, email: ctx.admin.email || '',
+    permissions: [...ctx.access.perms], limited: !!sc, products: sc ? [...sc] : null,
+    member_role: ctx.admin.member?.role_name || (ctx.access.owner ? 'Owner' : ''),
+    workspaces: ctx.admin.workspaces || null,
     workspace: { id: w.id, name: w.name, house: w.id === HOUSE, suspended: !!w.suspended, plan: core.planOf(w.id) } }];
 }, { admin: true });
 
@@ -281,31 +289,40 @@ const isAdminUser = u => !!u && Array.isArray(u.emails) && u.emails.some(e => ad
 const workspaceOfUser = u => {
   if (!u || !Array.isArray(u.emails) || !u.emails.length) return null;
   const marks = u.emails.map(() => '?').join(',');
-  return db.prepare(`SELECT * FROM workspaces WHERE owner_email IN (${marks}) ORDER BY id LIMIT 1`).get(...u.emails) || null;
+  // someone whose several verified emails each own a workspace gets the one for the email they signed in with, then the oldest
+  return db.prepare(`SELECT * FROM workspaces WHERE owner_email IN (${marks}) ORDER BY (owner_email = ?) DESC, id LIMIT 1`).get(...u.emails, u.email || '') || null;
 };
 /**
  * Who is calling the admin API?
- *  - platform: the owner (admin password, or a verified email on the admin list). Can open any workspace.
- *  - tenant:   a customer whose verified email owns a workspace. Can only ever touch that workspace.
+ *  - platform: the site owner (admin password, or a verified email on the admin list). Can open any workspace.
+ *  - tenant:   a customer whose verified email owns a workspace.
+ *  - member:   somebody a workspace owner added to their team: a verified email on a member row, holding a role.
+ * Tenants and members can only ever touch the workspace they are acting in; if they belong to several they pick one with
+ * the X-Workspace header (default: the one they own, else the first they were added to).
  */
-const adminIdentity = req => {
+const adminIdentity = (req, url) => {
   if (validSession(cookies(req).lx_admin)) return { via: 'password', role: 'platform', name: 'Admin password' };
   const u = sessionUser(req);
   if (!u) return null;
   if (isAdminUser(u)) return { via: u.p, role: 'platform', name: u.name, email: u.email };
-  const w = workspaceOfUser(u);
-  return w ? { via: u.p, role: 'tenant', name: u.name, email: u.email, wsId: w.id } : null;
+  const slots = slotsFor(db, u.emails, u.email);
+  if (!slots.length) return null;
+  const asked = Number(req.headers['x-workspace'] || url?.searchParams.get('ws') || 0);
+  const slot = slots.find(x => x.wsId === asked) || slots[0];
+  return { via: u.p, role: slot.kind === 'owner' ? 'tenant' : 'member', name: u.name, email: u.email, wsId: slot.wsId, member: slot.member,
+    workspaces: slots.map(x => ({ id: x.wsId, name: x.name, role: x.role })) };
 };
-/** Which workspace a request acts on. Tenants: their own, always. Platform: the one they picked (default: the owner's). */
+/** Which workspace a request acts on. Tenants and members: the one they are in. Platform: the one they picked (default: the owner's). */
 function resolveWorkspace(admin, req, url) {
-  if (admin.role === 'tenant') return admin.wsId;
+  if (admin.role !== 'platform') return admin.wsId;
   const asked = Number(req.headers['x-workspace'] || url.searchParams.get('ws') || HOUSE);
   return Number.isInteger(asked) && db.prepare('SELECT 1 FROM workspaces WHERE id=?').get(asked) ? asked : HOUSE;
 }
 route('GET', '/api/auth/me', async ctx => {
   const u = sessionUser(ctx.req), w = workspaceOfUser(u);
+  const memberships = u ? slotsFor(db, u.emails, u.email).filter(x => x.kind === 'member').map(x => ({ id: x.wsId, name: x.name, role: x.role })) : [];
   return [200, {
-    user: u ? { name: u.name, email: u.email, avatar: u.avatar, provider: u.p, isAdmin: isAdminUser(u), workspace: w ? { id: w.id, name: w.name } : null } : null,
+    user: u ? { name: u.name, email: u.email, avatar: u.avatar, provider: u.p, isAdmin: isAdminUser(u), workspace: w ? { id: w.id, name: w.name } : null, memberships } : null,
     providers: Object.keys(oauthConf).map(id => ({ id, label: PROVIDERS[id].label })),
     password_login: !DISABLE_PASSWORD_LOGIN,
   }];
@@ -345,6 +362,7 @@ async function handleAuth(req, res, url) {
   const user = { p: provider, id: profile.id, name: String(profile.name).slice(0, 80), avatar: String(profile.avatar).slice(0, 300),
     email: profile.email, emails: profile.emails.slice(0, 20), exp: Date.now() + 7 * 86400e3 };
   core.log('user', isAdminUser(user) ? 'login.admin' : 'login', `${provider}:${profile.email || profile.id}`);
+  if (user.emails.length) db.prepare(`UPDATE members SET last_login = ? WHERE email IN (${user.emails.map(() => '?').join(',')})`).run(now(), ...user.emails);
   redirect(res, pending.n && NEXT_OK.has(pending.n) ? pending.n : '/', [
     `lx_user=${signToken(user)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${7 * 86400}${secure(req)}`,
     'lx_oauth=; HttpOnly; SameSite=Lax; Path=/auth; Max-Age=0']);
@@ -354,43 +372,74 @@ async function handleAuth(req, res, url) {
 route('GET', '/api/admin/stats', async ctx => {
   const w = ctx.wsId, t = now(), one = (sql, ...args) => db.prepare(sql).get(...args);
   const hb = Number(core.getSetting('heartbeat_minutes', w));
-  return [200, {
-    licenses: one('SELECT COUNT(*) n FROM licenses WHERE workspace_id=?', w).n,
-    blocked: one("SELECT COUNT(*) n FROM licenses WHERE workspace_id=? AND status='blocked'", w).n,
-    servers: one("SELECT COUNT(*) n FROM servers s JOIN licenses l ON l.id=s.license_id WHERE l.workspace_id=? AND s.status='active'", w).n,
-    online: one("SELECT COUNT(*) n FROM servers s JOIN licenses l ON l.id=s.license_id WHERE l.workspace_id=? AND s.status='active' AND s.last_seen > ?", w, t - 2 * hb * 60).n,
-    disabled: one("SELECT COUNT(*) n FROM servers s JOIN licenses l ON l.id=s.license_id WHERE l.workspace_id=? AND s.status='disabled'", w).n,
-    issued_24h: one('SELECT COUNT(*) n FROM licenses WHERE workspace_id=? AND created_at > ?', w, t - 86400).n,
-    recent: db.prepare('SELECT * FROM audit WHERE workspace_id=? ORDER BY id DESC LIMIT 8').all(w),
-    per_day: db.prepare(`SELECT date(created_at,'unixepoch') d, COUNT(*) n FROM licenses WHERE workspace_id=? AND created_at > ? GROUP BY d ORDER BY d`).all(w, t - 14 * 86400),
-  }];
+  const [ls, la] = scopeSql(ctx, 'l.product_id'), [ls2, la2] = scopeSql(ctx, 'product_id');
+  const seeLicenses = can(ctx, 'licenses.view'), seeServers = can(ctx, 'servers.view');
+  const out = { licenses: 0, blocked: 0, servers: 0, online: 0, disabled: 0, issued_24h: 0, per_day: [], recent: [], hidden: [] };
+  if (seeLicenses) Object.assign(out, {
+    licenses: one(`SELECT COUNT(*) n FROM licenses WHERE workspace_id=? AND ${ls2}`, w, ...la2).n,
+    blocked: one(`SELECT COUNT(*) n FROM licenses WHERE workspace_id=? AND status='blocked' AND ${ls2}`, w, ...la2).n,
+    issued_24h: one(`SELECT COUNT(*) n FROM licenses WHERE workspace_id=? AND created_at > ? AND ${ls2}`, w, t - 86400, ...la2).n,
+    per_day: db.prepare(`SELECT date(created_at,'unixepoch') d, COUNT(*) n FROM licenses WHERE workspace_id=? AND created_at > ? AND ${ls2} GROUP BY d ORDER BY d`).all(w, t - 14 * 86400, ...la2),
+  }); else out.hidden.push('licenses');
+  if (seeServers) Object.assign(out, {
+    servers: one(`SELECT COUNT(*) n FROM servers s JOIN licenses l ON l.id=s.license_id WHERE l.workspace_id=? AND s.status='active' AND ${ls}`, w, ...la).n,
+    online: one(`SELECT COUNT(*) n FROM servers s JOIN licenses l ON l.id=s.license_id WHERE l.workspace_id=? AND s.status='active' AND s.last_seen > ? AND ${ls}`, w, t - 2 * hb * 60, ...la).n,
+    disabled: one(`SELECT COUNT(*) n FROM servers s JOIN licenses l ON l.id=s.license_id WHERE l.workspace_id=? AND s.status='disabled' AND ${ls}`, w, ...la).n,
+  }); else out.hidden.push('servers');
+  if (can(ctx, 'audit.view')) out.recent = db.prepare('SELECT * FROM audit WHERE workspace_id=? ORDER BY id DESC LIMIT 8').all(w);
+  return [200, out];
 }, { admin: true });
 
 // Admin: licenses -------------------------------------------------------------
 // Everything below is scoped to ctx.wsId (the caller's own workspace). Looking a row up by id ALWAYS includes the workspace.
-const ownLicense = (ctx, id) => { const l = db.prepare('SELECT * FROM licenses WHERE id=? AND workspace_id=?').get(id, ctx.wsId); if (!l) throw new HttpError(404, 'Not found'); return l; };
-const ownProduct = (ctx, id) => { const p = db.prepare('SELECT * FROM products WHERE id=? AND workspace_id=?').get(id, ctx.wsId); if (!p) throw new HttpError(404, 'Not found'); return p; };
+// A member limited to some products (ctx.access.scope) only ever sees licenses, servers and products linked to those; to them anything else does not exist.
+const inScope = (ctx, productId) => !ctx.access?.scope || (productId != null && ctx.access.scope.has(productId));
+/** SQL for "only my products": [fragment, args] to AND into a query over a table/alias that has the product_id column. */
+const scopeSql = (ctx, col) => {
+  const sc = ctx.access?.scope;
+  if (!sc) return ['1=1', []];
+  return sc.size ? [`${col} IN (${[...sc].map(() => '?').join(',')})`, [...sc]] : ['0', []];
+};
+const can = (ctx, perm) => !!ctx.access?.perms.has(perm);
+const need = (ctx, perm) => { if (!can(ctx, perm)) throw new HttpError(403, 'You do not have permission to do that.', 'FORBIDDEN'); };
+const ownLicense = (ctx, id) => { const l = db.prepare('SELECT * FROM licenses WHERE id=? AND workspace_id=?').get(id, ctx.wsId); if (!l || !inScope(ctx, l.product_id)) throw new HttpError(404, 'Not found'); return l; };
+const ownProduct = (ctx, id) => { const p = db.prepare('SELECT * FROM products WHERE id=? AND workspace_id=?').get(id, ctx.wsId); if (!p || !inScope(ctx, p.id)) throw new HttpError(404, 'Not found'); return p; };
+/** A product id from a request body: it must exist in this workspace and, for a limited member, be one of theirs. */
+const ownProductId = (ctx, v) => {
+  const id = int(v, { min: 1, nullable: true });
+  if (id == null) { if (ctx.access?.scope) throw new HttpError(400, 'Pick one of your products.'); return null; }
+  const p = db.prepare('SELECT id FROM products WHERE id=? AND workspace_id=?').get(id, ctx.wsId);
+  if (!p || !inScope(ctx, p.id)) throw new HttpError(400, 'Unknown product');
+  return p.id;
+};
 const ownGroup = (ctx, gid) => { if (gid == null) return null; if (!db.prepare('SELECT 1 FROM license_groups WHERE id=? AND workspace_id=?').get(gid, ctx.wsId)) throw new HttpError(400, 'Unknown group'); return gid; };
-const wl = (ctx, action, target = '', detail = '') => core.log('admin', action, target, detail, ctx.wsId);
+const wl = (ctx, action, target = '', detail = '') => core.log(ctx.admin?.email || 'admin', action, target, detail, ctx.wsId);
 const withinPlan = fn => { try { return fn(); } catch (e) { if (e instanceof PlanError) throw new HttpError(402, e.message, e.code); throw e; } };
 const licenseRow = l => ({ ...l, state: core.licenseState(l), limit: core.effectiveLimit(l), used: core.usedSlots(l) });
 route('GET', '/api/admin/licenses', async ctx => {
-  const u = ctx.url.searchParams, where = ['workspace_id = ?'], args = [ctx.wsId];
+  const u = ctx.url.searchParams, where = ['l.workspace_id = ?'], args = [ctx.wsId];
+  const [sw, sa] = scopeSql(ctx, 'l.product_id'); where.push(sw); args.push(...sa);
   const text = u.get('q')?.trim();
-  if (text) { where.push('(key LIKE ? OR owner LIKE ? OR note LIKE ? OR issued_ip LIKE ? OR issued_device LIKE ?)'); args.push(...Array(5).fill(`%${text}%`)); }
-  if (u.get('status') === 'blocked') where.push("status='blocked'");
-  if (u.get('status') === 'active') where.push("status='active'");
-  if (u.get('group')) { where.push('group_id = ?'); args.push(Number(u.get('group'))); }
-  if (u.get('ip')) { where.push('issued_ip = ?'); args.push(u.get('ip')); }
-  const rows = db.prepare(`SELECT * FROM licenses WHERE ${where.join(' AND ')} ORDER BY id DESC LIMIT 500`).all(...args);
+  if (text) { where.push('(l.key LIKE ? OR l.owner LIKE ? OR l.note LIKE ? OR l.issued_ip LIKE ? OR l.issued_device LIKE ? OR l.buyer_email LIKE ?)'); args.push(...Array(6).fill(`%${text}%`)); }
+  if (u.get('status') === 'blocked') where.push("l.status='blocked'");
+  if (u.get('status') === 'active') where.push("l.status='active'");
+  if (u.get('group')) { where.push('l.group_id = ?'); args.push(Number(u.get('group'))); }
+  if (u.get('product') === 'none') where.push('l.product_id IS NULL');
+  else if (u.get('product')) { where.push('l.product_id = ?'); args.push(Number(u.get('product'))); }
+  if (u.get('ip')) { where.push('l.issued_ip = ?'); args.push(u.get('ip')); }
+  const rows = db.prepare(`SELECT l.*, p.name product_name FROM licenses l LEFT JOIN products p ON p.id = l.product_id WHERE ${where.join(' AND ')} ORDER BY l.id DESC LIMIT 500`).all(...args);
   return [200, rows.map(licenseRow)];
-}, { admin: true });
+}, { perm: 'licenses.view' });
 route('GET', '/api/admin/licenses/:id', async ctx => {
   const lic = ownLicense(ctx, ctx.params.id);
-  const same_ip = db.prepare('SELECT id,key,owner,created_at FROM licenses WHERE workspace_id = ? AND issued_ip = ? AND id != ? AND issued_ip != \'\' ORDER BY id DESC LIMIT 20').all(ctx.wsId, lic.issued_ip, lic.id);
-  return [200, { ...licenseRow(lic), servers: db.prepare('SELECT * FROM servers WHERE license_id = ? ORDER BY first_seen').all(lic.id), same_ip }];
-}, { admin: true });
+  const same_ip = lic.issued_ip ? db.prepare(`SELECT id,key,owner,created_at FROM licenses l WHERE l.workspace_id = ? AND l.issued_ip = ? AND l.id != ? AND ${scopeSql(ctx, 'l.product_id')[0]} ORDER BY l.id DESC LIMIT 20`)
+    .all(ctx.wsId, lic.issued_ip, lic.id, ...scopeSql(ctx, 'l.product_id')[1]) : [];
+  const product_name = lic.product_id ? db.prepare('SELECT name FROM products WHERE id=?').get(lic.product_id)?.name || '' : '';
+  const servers = can(ctx, 'servers.view') ? db.prepare('SELECT * FROM servers WHERE license_id = ? ORDER BY first_seen').all(lic.id) : [];
+  return [200, { ...licenseRow({ ...lic, product_name }), servers, same_ip }];
+}, { perm: 'licenses.view' });
 
+const LICENSE_EDIT_FIELDS = ['owner', 'note', 'group_id', 'max_servers', 'expires_at', 'buyer_email', 'product_id'];
 function licenseFields(ctx, b, partial) {
   const f = {};
   if (!partial || 'owner' in b) f.owner = str(b.owner, 64);
@@ -400,6 +449,15 @@ function licenseFields(ctx, b, partial) {
   }
   if (!partial || 'max_servers' in b) f.max_servers = int(b.max_servers, { min: -1, max: 100000, nullable: true });
   if (!partial || 'expires_at' in b) f.expires_at = int(b.expires_at, { min: 1, max: 4e10, nullable: true });
+  if (!partial || 'buyer_email' in b) {
+    const e = normEmail(b.buyer_email);
+    if (e && (e.length > 120 || !EMAIL_RE.test(e))) throw new HttpError(400, 'The buyer email is not a valid address.');
+    f.buyer_email = e;
+  }
+  if (!partial || 'product_id' in b) {
+    f.product_id = ownProductId(ctx, b.product_id);
+    f.product = f.product_id ? db.prepare('SELECT name FROM products WHERE id=?').get(f.product_id).name : '';
+  }
   if ('status' in b) { if (!['active', 'blocked'].includes(b.status)) throw new HttpError(400, 'Bad status'); f.status = b.status; }
   if ('block_reason' in b) f.block_reason = str(b.block_reason, 200);
   return f;
@@ -409,60 +467,70 @@ route('POST', '/api/admin/licenses', async ctx => {
   const lic = withinPlan(() => core.createLicense({ ...licenseFields(ctx, b, false), workspace_id: ctx.wsId }));
   wl(ctx, 'license.create', lic.key, lic.owner);
   return [201, licenseRow(lic)];
-}, { admin: true });
+}, { perm: 'licenses.create' });
 route('PATCH', '/api/admin/licenses/:id', async ctx => {
   const lic = ownLicense(ctx, ctx.params.id);
   const f = licenseFields(ctx, await body(ctx.req), true);
+  // changing the details and blocking are separate permissions
+  if (LICENSE_EDIT_FIELDS.some(k => k in f)) need(ctx, 'licenses.edit');
+  if ('status' in f || 'block_reason' in f) need(ctx, 'licenses.block');
   if (f.status === 'active') f.block_reason = '';
   const keys = Object.keys(f);
   if (keys.length) db.prepare(`UPDATE licenses SET ${keys.map(k => k + '=?').join(',')} WHERE id=?`).run(...keys.map(k => f[k]), lic.id);
   wl(ctx, f.status ? (f.status === 'blocked' ? 'license.block' : 'license.unblock') : 'license.update', lic.key, JSON.stringify(f));
   return [200, licenseRow(core.q.licenseById.get(lic.id))];
-}, { admin: true });
+}, { perm: ['licenses.edit', 'licenses.block'] });
 route('DELETE', '/api/admin/licenses/:id', async ctx => {
   const lic = ownLicense(ctx, ctx.params.id);
   db.prepare('DELETE FROM licenses WHERE id=?').run(lic.id);
   wl(ctx, 'license.delete', lic.key, lic.owner);
   return [200, { ok: true }];
-}, { admin: true });
+}, { perm: 'licenses.delete' });
 
 // Delete licenses that downloads issued but that were never used on a server: the quick way to clear out junk.
 route('POST', '/api/admin/licenses/purge-unused', async ctx => {
   const b = await body(ctx.req);
   const days = int(b.older_than_days ?? 7, { min: 0, max: 3650 });
   const cutoff = core.now() - days * 86400;
-  const where = "workspace_id = ? AND source = 'claim' AND status = 'active' AND created_at <= ? AND NOT EXISTS (SELECT 1 FROM servers s WHERE s.license_id = licenses.id)";
-  const count = db.prepare(`SELECT COUNT(*) n FROM licenses WHERE ${where}`).get(ctx.wsId, cutoff).n;
+  const [sw, sa] = scopeSql(ctx, 'product_id');
+  const where = `workspace_id = ? AND source = 'claim' AND status = 'active' AND created_at <= ? AND ${sw} AND NOT EXISTS (SELECT 1 FROM servers s WHERE s.license_id = licenses.id)`;
+  const count = db.prepare(`SELECT COUNT(*) n FROM licenses WHERE ${where}`).get(ctx.wsId, cutoff, ...sa).n;
   if (!b.dry_run && count) {
-    db.prepare(`DELETE FROM licenses WHERE ${where}`).run(ctx.wsId, cutoff);
+    db.prepare(`DELETE FROM licenses WHERE ${where}`).run(ctx.wsId, cutoff, ...sa);
     wl(ctx, 'license.purge', '', `${count} unused download license(s) older than ${days} day(s)`);
   }
   return [200, { ok: true, count, deleted: !b.dry_run }];
-}, { admin: true });
+}, { perm: 'licenses.delete' });
 
 // Admin: servers --------------------------------------------------------------
 route('GET', '/api/admin/servers', async ctx => {
   const text = ctx.url.searchParams.get('q')?.trim();
+  const [sw, sa] = scopeSql(ctx, 'l.product_id');
   const rows = db.prepare(`SELECT s.*, l.key license_key, l.owner FROM servers s JOIN licenses l ON l.id = s.license_id
-    WHERE l.workspace_id = ?2 AND s.status != 'removed' ${text ? 'AND (s.name LIKE ?1 OR s.ip LIKE ?1 OR l.key LIKE ?1 OR l.owner LIKE ?1)' : ''} ORDER BY s.last_seen DESC LIMIT 500`).all(text ? `%${text}%` : null, ctx.wsId);
+    WHERE l.workspace_id = ? AND ${sw} AND s.status != 'removed' ${text ? 'AND (s.name LIKE ? OR s.ip LIKE ? OR l.key LIKE ? OR l.owner LIKE ?)' : ''} ORDER BY s.last_seen DESC LIMIT 500`)
+    .all(ctx.wsId, ...sa, ...(text ? Array(4).fill(`%${text}%`) : []));
   return [200, rows];
-}, { admin: true });
+}, { perm: 'servers.view' });
+/** A server of this workspace that the caller may touch (for a limited member: only on licenses of their products). */
+const ownServer = (ctx, id) => {
+  const s = db.prepare('SELECT s.*, l.key k, l.product_id FROM servers s JOIN licenses l ON l.id=s.license_id WHERE s.id=? AND l.workspace_id=?').get(id, ctx.wsId);
+  if (!s || !inScope(ctx, s.product_id)) throw new HttpError(404, 'Not found');
+  return s;
+};
 route('PATCH', '/api/admin/servers/:id', async ctx => {
   const b = await body(ctx.req);
   if (!['active', 'disabled'].includes(b.status)) throw new HttpError(400, 'Bad status');
-  const s = db.prepare('SELECT s.*, l.key k FROM servers s JOIN licenses l ON l.id=s.license_id WHERE s.id=? AND l.workspace_id=?').get(ctx.params.id, ctx.wsId);
-  if (!s) throw new HttpError(404, 'Not found');
+  const s = ownServer(ctx, ctx.params.id);
   db.prepare('UPDATE servers SET status=? WHERE id=?').run(b.status, s.id);
   wl(ctx, b.status === 'disabled' ? 'server.disable' : 'server.enable', s.k, `${s.ip}:${s.port} ${s.name}`);
   return [200, { ok: true }];
-}, { admin: true });
+}, { perm: 'servers.manage' });
 route('DELETE', '/api/admin/servers/:id', async ctx => {
-  const s = db.prepare('SELECT s.*, l.key k FROM servers s JOIN licenses l ON l.id=s.license_id WHERE s.id=? AND l.workspace_id=?').get(ctx.params.id, ctx.wsId);
-  if (!s) throw new HttpError(404, 'Not found');
+  const s = ownServer(ctx, ctx.params.id);
   db.prepare("UPDATE servers SET status='removed' WHERE id=?").run(s.id); // plugin learns about it on next heartbeat
   wl(ctx, 'server.remove', s.k, `${s.ip}:${s.port} ${s.name}`);
   return [200, { ok: true }];
-}, { admin: true });
+}, { perm: 'servers.manage' });
 
 // Admin: products (plugin downloads) ------------------------------------------
 const productFile = slug => join(PRODUCTS_DIR, slug + '.bin');
@@ -493,9 +561,10 @@ const productRow = (req, p) => {
     integration: !p.has_file ? null : { ok: !!wrap_ok, integrated: wrap_code === 'ALREADY_INTEGRATED', code: wrap_code, message: wrap_message, main: main_class } };
 };
 route('GET', '/api/admin/products', async ctx => {
-  const rows = db.prepare('SELECT * FROM products WHERE workspace_id=? ORDER BY id DESC').all(ctx.wsId);
+  const [sw, sa] = scopeSql(ctx, 'p.id');
+  const rows = db.prepare(`SELECT p.*, (SELECT COUNT(*) FROM licenses l WHERE l.product_id = p.id) licenses FROM products p WHERE p.workspace_id=? AND ${sw} ORDER BY p.id DESC`).all(ctx.wsId, ...sa);
   return [200, rows.map(p => productRow(ctx.req, p))];
-}, { admin: true });
+}, { perm: 'products.view' });
 route('POST', '/api/admin/products', async ctx => {
   const b = await body(ctx.req);
   const name = str(b.name, 60).trim();
@@ -506,7 +575,7 @@ route('POST', '/api/admin/products', async ctx => {
   const r = db.prepare('INSERT INTO products(workspace_id,slug,name,token,group_id,created_at) VALUES(?,?,?,?,?,?)').run(ctx.wsId, slug, name, randomBytes(12).toString('base64url'), group_id, now());
   wl(ctx, 'product.create', slug, name);
   return [201, productRow(ctx.req, db.prepare('SELECT * FROM products WHERE id=?').get(r.lastInsertRowid))];
-}, { admin: true });
+}, { perm: 'products.create' });
 /** Stores `buf` as the plugin file of product `p` and records whether it can be wrapped. */
 function setProductFile(ctx, p, buf, filename) {
   try { injectFiles(buf, [{ name: '.licensex-probe', content: '1' }]); }
@@ -530,14 +599,14 @@ route('POST', '/api/admin/products/:id/file', async ctx => {
     setProductFile(ctx, p, readFileSync(tmp), filename);
   } finally { rmSync(tmp, { force: true }); }
   return [200, productRow(ctx.req, db.prepare('SELECT * FROM products WHERE id=?').get(p.id))];
-}, { admin: true });
+}, { perm: 'products.edit' });
 // The jar to upload to BuiltByBit: wrapped, but with no key. BuiltByBit overwrites %%__BBB_LICENSE__%% per buyer.
 route('GET', '/api/admin/products/:id/bbb-build', async ctx => {
   const p = ownProduct(ctx, ctx.params.id);
   if (!p.has_file) throw new HttpError(404, 'Upload a plugin file first.');
   const stem = (p.filename || p.slug + '.jar').replace(/\.(jar|zip)$/i, '').replace(/[^\w.\-]/g, '_');
   return [200, licensedJar(ctx.req, p, ''), { 'Content-Type': 'application/java-archive', 'Content-Disposition': `attachment; filename="${stem}-builtbybit.jar"` }];
-}, { admin: true });
+}, { perm: 'products.edit' });
 route('PATCH', '/api/admin/products/:id', async ctx => {
   const p = ownProduct(ctx, ctx.params.id);
   const b = await body(ctx.req), f = {};
@@ -545,18 +614,27 @@ route('PATCH', '/api/admin/products/:id', async ctx => {
   if ('enabled' in b) f.enabled = b.enabled ? 1 : 0;
   if ('group_id' in b) f.group_id = ownGroup(ctx, b.group_id ? int(b.group_id, { min: 1 }) : null);
   if (b.regenerate_token) f.token = randomBytes(12).toString('base64url');
+  if ('bbb_resource_id' in b) {
+    // which BuiltByBit resource this product is, so licenses BuiltByBit asks for are linked to it (and to the people limited to it)
+    const rid = str(b.bbb_resource_id, 12).trim();
+    if (rid && !/^\d{1,12}$/.test(rid)) throw new HttpError(400, 'The BuiltByBit resource id is the number in the resource\'s address.');
+    if (rid && db.prepare('SELECT 1 FROM products WHERE workspace_id=? AND bbb_resource_id=? AND id!=?').get(ctx.wsId, rid, p.id)) throw new HttpError(409, 'Another product already uses that BuiltByBit resource id.');
+    f.bbb_resource_id = rid;
+  }
   const keys = Object.keys(f);
   if (keys.length) db.prepare(`UPDATE products SET ${keys.map(k => k + '=?').join(',')} WHERE id=?`).run(...keys.map(k => f[k]), p.id);
+  if (f.bbb_resource_id) db.prepare('UPDATE licenses SET product_id = ? WHERE workspace_id = ? AND product_id IS NULL AND product = ?').run(p.id, ctx.wsId, `BuiltByBit resource ${f.bbb_resource_id}`);
   wl(ctx, 'product.update', p.slug, JSON.stringify(f).replace(/"token":"[^"]+"/, '"token":"***"'));
   return [200, productRow(ctx.req, db.prepare('SELECT * FROM products WHERE id=?').get(p.id))];
-}, { admin: true });
+}, { perm: 'products.edit' });
 route('DELETE', '/api/admin/products/:id', async ctx => {
   const p = ownProduct(ctx, ctx.params.id);
   rmSync(productFile(p.slug), { force: true });
+  db.prepare('UPDATE licenses SET product_id = NULL WHERE product_id = ?').run(p.id); // keep the licenses, just unlinked
   db.prepare('DELETE FROM products WHERE id=?').run(p.id);
   wl(ctx, 'product.delete', p.slug, p.name);
   return [200, { ok: true }];
-}, { admin: true });
+}, { perm: 'products.delete' });
 
 // Admin: build from source ---------------------------------------------------------
 // Upload a Maven/Gradle project as a zip -> inspection report -> build -> jar (optionally straight into a product).
@@ -637,14 +715,17 @@ const groupFields = b => {
   const color = /^#[0-9a-f]{6}$/i.test(b.color) ? b.color : '#8b5cf6';
   return [name, int(b.max_servers, { min: -1, max: 100000 }), color];
 };
-route('GET', '/api/admin/groups', async ctx => [200, db.prepare(`SELECT g.*, (SELECT COUNT(*) FROM licenses WHERE group_id=g.id) licenses FROM license_groups g WHERE g.workspace_id=? ORDER BY g.id`).all(ctx.wsId)], { admin: true });
+route('GET', '/api/admin/groups', async ctx => {
+  const [sw, sa] = scopeSql(ctx, 'l.product_id');
+  return [200, db.prepare(`SELECT g.*, (SELECT COUNT(*) FROM licenses l WHERE l.group_id=g.id AND ${sw}) licenses FROM license_groups g WHERE g.workspace_id=? ORDER BY g.id`).all(...sa, ctx.wsId)];
+}, { perm: 'groups.view' });
 route('POST', '/api/admin/groups', async ctx => {
   const [name, max, color] = groupFields(await body(ctx.req));
   try { db.prepare('INSERT INTO license_groups(workspace_id,name,max_servers,color,created_at) VALUES(?,?,?,?,?)').run(ctx.wsId, name, max, color, now()); }
   catch (e) { if (/UNIQUE/.test(e.message)) throw new HttpError(409, 'A group with that name exists'); throw e; }
   wl(ctx, 'group.create', name, `limit=${max}`);
   return [201, { ok: true }];
-}, { admin: true });
+}, { perm: 'groups.manage' });
 route('PATCH', '/api/admin/groups/:id', async ctx => {
   const [name, max, color] = groupFields(await body(ctx.req));
   let r;
@@ -653,13 +734,13 @@ route('PATCH', '/api/admin/groups/:id', async ctx => {
   if (!r.changes) throw new HttpError(404, 'Not found');
   wl(ctx, 'group.update', name, `limit=${max}`);
   return [200, { ok: true }];
-}, { admin: true });
+}, { perm: 'groups.manage' });
 route('DELETE', '/api/admin/groups/:id', async ctx => {
   const r = db.prepare('DELETE FROM license_groups WHERE id=? AND workspace_id=?').run(ctx.params.id, ctx.wsId);
   if (!r.changes) throw new HttpError(404, 'Not found');
   wl(ctx, 'group.delete', ctx.params.id);
   return [200, { ok: true }];
-}, { admin: true });
+}, { perm: 'groups.manage' });
 
 // Admin: settings + audit -----------------------------------------------------
 const WS_SETTING_KEYS = ['default_limit', 'claims_enabled', 'public_removal', 'heartbeat_minutes', 'bbb_group_id'];
@@ -672,14 +753,15 @@ route('GET', '/api/admin/settings', async ctx => {
     bbb_callback_url: `${publicBase(ctx.req)}/api/v1/builtbybit/license`,
     public_url_set: !!PUBLIC_URL,
   };
+  out.site_access = ctx.admin.role === 'platform' || can(ctx, 'platform.site'); // may edit the public name/links
+  if (out.site_access) Object.assign(out, Object.fromEntries(SITE_KEYS.map(k => [k, core.getSetting(k)])));
   if (ctx.admin.role === 'platform') Object.assign(out, {
-    ...Object.fromEntries(SITE_KEYS.map(k => [k, core.getSetting(k)])),
     admin_emails: parseEmails(core.getSetting('admin_emails')), admin_emails_config: CONFIG_ADMIN_EMAILS, password_login: !DISABLE_PASSWORD_LOGIN,
     oauth: Object.fromEntries(Object.keys(PROVIDERS).map(p => [p, { label: PROVIDERS[p].label, configured: !!oauthConf[p], callback_url: `${publicBase(ctx.req)}/auth/${p}/callback` }])),
     stripe: { configured: !!STRIPE.secretKey, webhook_configured: !!STRIPE.webhookSecret, webhook_url: `${publicBase(ctx.req)}/api/stripe/webhook` },
   });
   return [200, out];
-}, { admin: true });
+}, { perm: 'settings.manage' });
 const httpUrl = (v, label) => {
   v = String(v ?? '').trim().slice(0, 300);
   if (!v) return '';
@@ -687,10 +769,11 @@ const httpUrl = (v, label) => {
   if (!/^https?:$/.test(u.protocol)) throw new HttpError(400, `${label} must start with http:// or https://`);
   return u.href;
 };
-const PLATFORM_SETTING_KEYS = [...SITE_KEYS, 'admin_emails'];
 route('PUT', '/api/admin/settings', async ctx => {
   const b = await body(ctx.req), w = ctx.wsId;
-  if (ctx.admin.role !== 'platform' && PLATFORM_SETTING_KEYS.some(k => k in b)) throw new HttpError(403, 'Only the site owner can change those settings.');
+  // the public site name/links can be handed to staff (platform.site); who may sign in as an admin never can
+  if (SITE_KEYS.some(k => k in b) && ctx.admin.role !== 'platform' && !can(ctx, 'platform.site')) throw new HttpError(403, 'Only the site owner can change those settings.');
+  if ('admin_emails' in b && ctx.admin.role !== 'platform') throw new HttpError(403, 'Only the site owner can change those settings.');
   if ('default_limit' in b) core.setSetting('default_limit', int(b.default_limit, { min: -1, max: 100000 }), w);
   if ('heartbeat_minutes' in b) core.setSetting('heartbeat_minutes', int(b.heartbeat_minutes, { min: 1, max: 1440 }), w);
   for (const k of ['claims_enabled', 'public_removal']) if (k in b) core.setSetting(k, b[k] ? '1' : '0', w);
@@ -715,8 +798,8 @@ route('PUT', '/api/admin/settings', async ctx => {
   }
   wl(ctx, 'settings.update', '', JSON.stringify({ ...b, bbb_secret: undefined }));
   return [200, { ok: true }];
-}, { admin: true });
-route('GET', '/api/admin/audit', async ctx => [200, db.prepare('SELECT * FROM audit WHERE workspace_id=? ORDER BY id DESC LIMIT ?').all(ctx.wsId, Math.min(Number(ctx.url.searchParams.get('limit')) || 100, 500))], { admin: true });
+}, { perm: 'settings.manage' });
+route('GET', '/api/admin/audit', async ctx => [200, db.prepare('SELECT * FROM audit WHERE workspace_id=? ORDER BY id DESC LIMIT ?').all(ctx.wsId, Math.max(1, Math.min(Number(ctx.url.searchParams.get('limit')) || 100, 500)))], { perm: 'audit.view' });
 
 // Workspaces, plans and billing ----------------------------------------------------
 const billing = createBilling({ db, core, cfg: STRIPE, log: (a, t, d) => console.error(`[LicenseX] ${a} ${t} ${d}`) });
@@ -802,7 +885,7 @@ route('POST', '/api/stripe/webhook', async ctx => {
 // Platform: customers ------------------------------------------------------------
 const customerRow = w => ({ ...workspaceSummary(w), licenses: core.usage(w.id).licenses, products: core.usage(w.id).products,
   stripe_customer_id: w.stripe_customer_id, stripe_subscription_id: w.stripe_subscription_id });
-route('GET', '/api/admin/customers', async () => [200, db.prepare('SELECT * FROM workspaces ORDER BY id').all().map(customerRow)], { platform: true });
+route('GET', '/api/admin/customers', async () => [200, db.prepare('SELECT * FROM workspaces ORDER BY id').all().map(customerRow)], { perm: 'platform.customers' });
 // Invite: create a workspace for an email address. Whoever signs in with that VERIFIED email owns it, even when signups are closed.
 route('POST', '/api/admin/customers', async ctx => {
   const b = await body(ctx.req);
@@ -816,7 +899,7 @@ route('POST', '/api/admin/customers', async ctx => {
     .run(str(b.name, 60).trim() || email.split('@')[0], email, str(b.name, 80).trim(), plan.key, plan.key === 'free' ? null : until, plan.key === 'free' ? 'free' : 'manual', newSecret(), now());
   core.log('admin', 'customer.invite', email, plan.key, Number(r.lastInsertRowid));
   return [201, customerRow(db.prepare('SELECT * FROM workspaces WHERE id=?').get(r.lastInsertRowid))];
-}, { platform: true });
+}, { perm: 'platform.customers' });
 const customer = ctx => { const w = db.prepare('SELECT * FROM workspaces WHERE id=?').get(ctx.params.id); if (!w) throw new HttpError(404, 'Not found'); if (w.id === HOUSE) throw new HttpError(400, 'That is your own workspace.'); return w; };
 // Hand-granting a plan (gifts, friends, other payment methods). until=null means no end date.
 route('POST', '/api/admin/customers/:id/plan', async ctx => {
@@ -827,19 +910,19 @@ route('POST', '/api/admin/customers/:id/plan', async ctx => {
   db.prepare("UPDATE workspaces SET plan_key=?, plan_status='active', plan_until=?, plan_source=? WHERE id=?").run(plan.key, plan.key === 'free' ? null : until, plan.key === 'free' ? 'free' : 'manual', w.id);
   core.log('admin', 'customer.plan', `${w.owner_email} -> ${plan.key}`, until ? `until ${new Date(until * 1000).toISOString().slice(0, 10)}` : 'no end date', w.id);
   return [200, customerRow(db.prepare('SELECT * FROM workspaces WHERE id=?').get(w.id))];
-}, { platform: true });
+}, { perm: 'platform.customers' });
 route('POST', '/api/admin/customers/:id/suspend', async ctx => {
   const w = customer(ctx), b = await body(ctx.req);
   db.prepare('UPDATE workspaces SET suspended=?, suspended_reason=? WHERE id=?').run(b.suspended ? 1 : 0, b.suspended ? str(b.reason, 200) : '', w.id);
   core.log('admin', b.suspended ? 'customer.suspend' : 'customer.unsuspend', w.owner_email, str(b.reason, 200), w.id);
   return [200, customerRow(db.prepare('SELECT * FROM workspaces WHERE id=?').get(w.id))];
-}, { platform: true });
+}, { perm: 'platform.customers' });
 route('DELETE', '/api/admin/customers/:id', async ctx => {
   const w = customer(ctx);
   for (const p of db.prepare('SELECT slug FROM products WHERE workspace_id=?').all(w.id)) rmSync(productFile(p.slug), { force: true });
   db.exec('BEGIN');
   try {
-    for (const t of ['licenses', 'products', 'license_groups', 'ws_settings', 'audit']) db.prepare(`DELETE FROM ${t} WHERE workspace_id=?`).run(w.id); // servers go with their licenses
+    for (const t of ['members', 'roles', 'licenses', 'products', 'license_groups', 'ws_settings', 'audit']) db.prepare(`DELETE FROM ${t} WHERE workspace_id=?`).run(w.id); // servers, buyer links and member scopes go with their parents
     db.prepare('DELETE FROM workspaces WHERE id=?').run(w.id);
     db.exec('COMMIT');
   } catch (e) { db.exec('ROLLBACK'); throw e; }
@@ -907,6 +990,8 @@ function licensedJar(req, p, key) {
 // --- public download (BuiltByBit points here) ------------------------------
 // GET /download/:slug?token=...&nonce=...&user=...
 // Issues a license for the nonce (new per nonce, stable on repeat), stamps the key into the jar and serves it.
+let downloadsNow = 0;
+const MAX_DOWNLOADS_NOW = Math.max(1, Number(process.env.LICENSEX_MAX_DOWNLOADS || fileConfig.maxDownloads || 8));
 function handleDownload(req, res, slug, url) {
   const ip = clientIp(req);
   if (!rateLimit('dl:' + ip, 60, 60e3)) throw new HttpError(429, 'Too many downloads. Try again shortly.');
@@ -917,12 +1002,17 @@ function handleDownload(req, res, slug, url) {
     res.writeHead(200, { 'Content-Type': 'application/java-archive', 'Cache-Control': 'no-store' });
     return res.end();
   }
+  // The stamped jar is built in memory, so only a few downloads run at once and a client that stops reading is cut off.
+  if (downloadsNow >= MAX_DOWNLOADS_NOW) { res.setHeader('Retry-After', '5'); throw new HttpError(503, 'Busy right now. Please try again in a few seconds.'); }
+  downloadsNow++;
+  res.once('close', () => { downloadsNow--; });
+  res.setTimeout(60e3, () => res.destroy());
 
   // A known buyer (?user=) always gets the same license. With no buyer id and no (real) nonce - e.g. someone
   // opening the raw link - there is nothing to match on, so that download gets a fresh license.
   const nonce = str(url.searchParams.get('nonce'), 128).trim();
   const r = core.claim({ ws: p.workspace_id, nonce: nonce.includes('%%') || !nonce ? 'anon-' + randomBytes(12).toString('hex') : nonce,
-    user: str(url.searchParams.get('user'), 64), name: str(url.searchParams.get('name'), 64), product: p.name, group_id: p.group_id, ip, device: hash(ip + req.headers['user-agent']),
+    user: str(url.searchParams.get('user'), 64), name: str(url.searchParams.get('name'), 64), product: p.name, product_id: p.id, group_id: p.group_id, ip, device: hash(ip + req.headers['user-agent']),
     canMint: () => recentCount('mint:p' + p.id, 3600e3) < MINT_PER_PRODUCT_HOUR && recentCount('mint:ip' + ip, 3600e3) < MINT_PER_IP_HOUR });
   if (!r.ok) {
     if (r.code === 'PLAN_LIMIT') { // the public must not learn which plan the developer is on; the developer sees why in the audit log
@@ -950,6 +1040,7 @@ const app = { route, db, core, HttpError, body, int, str, rateLimit, recentCount
   PUBLIC_URL, DATA, SESSION_SECRET, HOUSE, now, hash, normalizeKey, KEY_RE, billing, STRIPE, fileConfig, CONFIG_ADMIN_EMAILS, isAdminUser, workspaceOfUser };
 registerStripeConnect(app);
 registerBuyers(app);
+registerTeam(app);
 
 // --- static + dispatch -----------------------------------------------------
 const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
@@ -989,16 +1080,19 @@ export const server = createServer(async (req, res) => {
     for (const [method, re, handler, opts] of routes) {
       const m = req.method === method && re.exec(url.pathname);
       if (!m) continue;
-      const admin = adminIdentity(req);
-      let wsId = HOUSE;
-      if (opts.admin || opts.platform) {
+      const admin = adminIdentity(req, url);
+      let wsId = HOUSE, access = null;
+      if (opts.admin || opts.platform || opts.perm) {
         if (!admin) throw new HttpError(401, 'Not signed in');
         if (opts.platform && admin.role !== 'platform') throw new HttpError(403, 'Only the site owner can do that.');
         wsId = resolveWorkspace(admin, req, url);
+        access = accessFor(db, admin, wsId);
+        const needed = opts.perm ? [].concat(opts.perm) : [];
+        if (needed.length && !needed.some(k => access.perms.has(k))) throw new HttpError(403, 'You do not have permission to do that.', 'FORBIDDEN');
         // A suspended customer can still look around (and read their data), but nothing can be changed.
-        if (admin.role === 'tenant' && req.method !== 'GET' && core.isSuspended(wsId) && !opts.allowSuspended) throw new HttpError(403, 'This account is suspended. Contact support.');
+        if (admin.role !== 'platform' && req.method !== 'GET' && core.isSuspended(wsId) && !opts.allowSuspended) throw new HttpError(403, 'This account is suspended. Contact support.');
       }
-      const [status, payload, headers] = await handler({ req, url, params: m.groups || {}, ip: clientIp(req), admin, wsId });
+      const [status, payload, headers] = await handler({ req, url, params: m.groups || {}, ip: clientIp(req), admin, wsId, access });
       return json(res, status, payload, headers);
     }
     throw new HttpError(404, 'Not found');

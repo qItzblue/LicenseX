@@ -46,7 +46,7 @@ export function createCore(db) {
   const getSetting = (k, ws = HOUSE) => (WS_KEYS.has(k) ? q.wsSetting.get(ws, k) : q.setting.get(k))?.value ?? defaults[k];
   const setSetting = (k, v, ws = HOUSE) => (WS_KEYS.has(k) ? q.putWsSetting.run(ws, k, String(v)) : q.putSetting.run(k, String(v)));
 
-  const log = (actor, action, target = '', detail = '', ws = HOUSE) => q.audit.run(ws, now(), actor, action, String(target), String(detail));
+  const log = (actor, action, target = '', detail = '', ws = HOUSE) => q.audit.run(ws, now(), String(actor).slice(0, 120), action, String(target).slice(0, 200), String(detail).slice(0, 2000));
 
   // --- plans ---------------------------------------------------------------------------------
   /**
@@ -94,13 +94,13 @@ export function createCore(db) {
   const blockReason = lic => (lic.status === 'blocked' ? lic.block_reason : isSuspended(lic.workspace_id) ? (q.workspace.get(lic.workspace_id).suspended_reason || 'This developer\'s account is suspended.') : '');
 
   function createLicense({ workspace_id = HOUSE, owner = '', note = '', group_id = null, max_servers = null, expires_at = null,
-                          source = 'admin', product = '', nonce = null, issued_ip = '', issued_device = '' }) {
+                          source = 'admin', product = '', product_id = null, buyer_email = '', nonce = null, issued_ip = '', issued_device = '' }) {
     assertWithin(workspace_id, 'licenses');
     for (let i = 0; i < 5; i++) {
       const key = generateKey();
       try {
-        const r = db.prepare(`INSERT INTO licenses(workspace_id,key,owner,note,group_id,max_servers,expires_at,source,product,nonce,issued_ip,issued_device,created_at)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(workspace_id, key, owner, note, group_id, max_servers, expires_at, source, product, nonce, issued_ip, issued_device, now());
+        const r = db.prepare(`INSERT INTO licenses(workspace_id,key,owner,note,group_id,max_servers,expires_at,source,product,product_id,buyer_email,nonce,issued_ip,issued_device,created_at)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(workspace_id, key, owner, note, group_id, max_servers, expires_at, source, product, product_id, buyer_email, nonce, issued_ip, issued_device, now());
         return q.licenseById.get(r.lastInsertRowid);
       } catch (e) { if (!/UNIQUE.*licenses\.key/.test(e.message)) throw e; }
     }
@@ -117,7 +117,7 @@ export function createCore(db) {
    * such request would share one license.
    */
   const real = v => { v = String(v ?? '').trim(); return v && !v.includes('%%') ? v : ''; };
-  function claim({ ws = HOUSE, nonce, user = '', name = '', product = '', group_id = null, ip, device, canMint = () => true }) {
+  function claim({ ws = HOUSE, nonce, user = '', name = '', product = '', product_id = null, group_id = null, ip, device, canMint = () => true }) {
     if (isSuspended(ws)) return { ok: false, code: 'SUSPENDED', message: 'This developer\'s account is suspended.' };
     if (getSetting('claims_enabled', ws) !== '1') return { ok: false, code: 'CLAIMS_DISABLED', message: 'License issuing is currently disabled.' };
     const uid = real(user).slice(0, 64), label = real(name).slice(0, 64) || uid;
@@ -133,12 +133,14 @@ export function createCore(db) {
     if (lic && lic.workspace_id !== ws) return { ok: false, code: 'BAD_REQUEST', message: 'Unavailable.' }; // never hand out another workspace's license
     if (!lic) {
       if (!canMint()) return { ok: false, code: 'RATE_LIMIT', message: 'Too many new downloads right now. Please try again in a little while.' };
-      try { lic = createLicense({ workspace_id: ws, owner: label, source: 'claim', product: String(product).slice(0, 64),
+      try { lic = createLicense({ workspace_id: ws, owner: label, source: 'claim', product: String(product).slice(0, 64), product_id,
         group_id, nonce: identity, issued_ip: ip, issued_device: device }); }
       catch (e) { if (e instanceof PlanError) return { ok: false, code: e.code, message: e.message }; throw e; }
       log('system', 'license.claim', lic.key, `ip=${ip} user=${uid || '-'} product=${product}`, ws);
       created = true;
     }
+    // a license issued before this product was linked (e.g. its BuiltByBit resource id was entered later) is linked now
+    if (!created && product_id && lic.product_id == null) { db.prepare('UPDATE licenses SET product_id = ? WHERE id = ?').run(product_id, lic.id); lic.product_id = product_id; }
     return { ok: true, key: lic.key, created, product: lic.product };
   }
 
@@ -167,7 +169,7 @@ export function createCore(db) {
         return { ok: false, code: 'LIMIT_REACHED', message: `Server limit reached (${limit}). Remove a server at the license portal first.` };
       db.prepare('INSERT INTO servers(license_id,instance_id,name,ip,port,version,first_seen,last_seen) VALUES(?,?,?,?,?,?,?,?)')
         .run(lic.id, instanceId, String(name).slice(0, 64), ip, Number.isInteger(port) ? port : null, String(version).slice(0, 32), now(), now());
-      log('system', 'server.register', lic.key, `${ip}:${port} ${name}`, lic.workspace_id);
+      log('system', 'server.register', lic.key, `${ip}:${Number.isInteger(port) ? port : '?'} ${String(name).slice(0, 64)}`, lic.workspace_id);
     } else {
       db.prepare('UPDATE servers SET last_seen=?, ip=?, port=?, name=?, version=? WHERE id=?')
         .run(now(), ip, Number.isInteger(port) ? port : srv.port, String(name).slice(0, 64), String(version).slice(0, 32), srv.id);
