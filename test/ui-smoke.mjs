@@ -46,9 +46,9 @@ try {
   await a.goto(base + '/admin');
   await a.fill('#pw', 'ui-pass');
   await a.click('#loginForm button');
-  await walk(a, 'owner', ['overview', 'licenses', 'servers', 'products', 'build', 'groups', 'customers', 'plans', 'settings', 'audit']);
+  await walk(a, 'owner', ['overview', 'licenses', 'servers', 'products', 'build', 'groups', 'team', 'customers', 'plans', 'settings', 'audit']);
   await a.reload(); // a fresh load with the saved session works as well
-  await walk(a, 'owner(reload)', ['overview', 'licenses', 'servers', 'products', 'build', 'groups', 'customers', 'plans', 'settings', 'audit']);
+  await walk(a, 'owner(reload)', ['overview', 'licenses', 'servers', 'products', 'build', 'groups', 'team', 'customers', 'plans', 'settings', 'audit']);
 
   // 2. a customer with their own workspace, signed in through the (fake) provider
   const cookie = await signIn(base, mock, googleUser('dev@studio.io'));
@@ -56,7 +56,38 @@ try {
   await cust.addCookies([{ name: 'lx_user', value: cookie.split('=').slice(1).join('='), url: base }]);
   const b = await newPage(cust, 'customer');
   await b.goto(base + '/dashboard');
-  await walk(b, 'customer', ['overview', 'licenses', 'servers', 'products', 'groups', 'billing', 'settings', 'audit']);
+  await walk(b, 'customer', ['overview', 'licenses', 'servers', 'products', 'groups', 'team', 'billing', 'settings', 'audit']);
+
+  // 2b. the Team page, and a limited team member who only gets the pages their role allows
+  const api = (method, path, body, ck = cookie) => fetch(base + path, { method, headers: { 'Content-Type': 'application/json', Cookie: ck }, body: body ? JSON.stringify(body) : undefined }).then(r => r.json());
+  const prodA = await api('POST', '/api/admin/products', { name: 'Alpha plugin' }), prodB = await api('POST', '/api/admin/products', { name: 'Beta plugin' });
+  await api('POST', '/api/admin/licenses', { owner: 'alpha-buyer', product_id: prodA.id }); await api('POST', '/api/admin/licenses', { owner: 'beta-buyer', product_id: prodB.id });
+  const roles = (await api('GET', '/api/admin/team')).roles;
+  await api('POST', '/api/admin/team/members', { email: 'help@studio.io', role_id: roles.find(r => r.name === 'Support').id, all_products: false, product_ids: [prodA.id] });
+  await b.goto(base + '/dashboard#team');
+  await b.waitForFunction(() => document.querySelector('#view h1')?.innerText === 'Team' && /help@studio/.test(document.querySelector('#view').innerText));
+  assert.match(await b.$eval('#view', v => v.innerText), /help@studio\.io[\s\S]*Support[\s\S]*Alpha plugin/, 'the team table lists the member with their role and product');
+  await b.click('text=+ New role');
+  await b.waitForSelector('dialog .perm-row');
+  assert.ok((await b.$$('dialog .perm-row input')).length >= 10, 'the role editor lists the permissions');
+  await b.click('dialog >> text=Cancel');
+  await b.click('text=+ Add person');
+  await b.waitForSelector('dialog #m-email');
+  await b.click('dialog >> text=Only these products');
+  assert.ok(await b.isVisible('dialog .perm-list'), 'picking "only these products" shows the product list');
+  await b.click('dialog >> text=Cancel');
+
+  const help = await browser.newContext();
+  await help.addCookies([{ name: 'lx_user', value: (await signIn(base, mock, googleUser('help@studio.io'))).split('=').slice(1).join('='), url: base }]);
+  const c = await newPage(help, 'member');
+  await c.goto(base + '/dashboard');
+  await walk(c, 'member', ['overview', 'licenses', 'servers', 'products', 'groups']);
+  await c.evaluate(() => { location.hash = 'licenses'; });
+  await c.waitForFunction(() => /alpha-buyer/.test(document.querySelector('#view').innerText));
+  const seen = await c.$eval('#view', v => v.innerText);
+  assert.match(seen, /alpha-buyer/); assert.doesNotMatch(seen, /beta-buyer/, 'a product-limited member never sees the other product\'s licenses');
+  assert.match(await c.$eval('#view', v => v.innerText), /Alpha plugin/);
+  assert.equal(await c.locator('text=+ New license').count(), 0, 'Support cannot create licenses, so there is no button');
 
   // 3. the public pages
   const pub = await newPage(await browser.newContext(), 'public');

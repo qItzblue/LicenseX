@@ -1,14 +1,21 @@
 import { h, api, toast, confirmDialog, ago, date, limitText, copy, currentWs, setWs, wsHeaders, wsq } from '/lib.js';
 import { paymentsCard } from '/admin-payments.js';
+import { teamPage } from '/admin-team.js';
 
 const $ = id => document.getElementById(id);
 const view = $('view');
 /** Like replaceChildren, but skips null/false (the native one would print them as text). */
 const render = (...nodes) => view.replaceChildren(...nodes.flat().filter(n => n != null && n !== false));
 let groups = [];
-const PAGES_PLATFORM = { overview: 'Overview', licenses: 'Licenses', servers: 'Servers', products: 'Products', build: 'Build', groups: 'Groups', customers: 'Customers', plans: 'Plans', settings: 'Settings', audit: 'Audit log' };
-const PAGES_TENANT = { overview: 'Overview', licenses: 'Licenses', servers: 'Servers', products: 'Products', groups: 'Groups', billing: 'Billing', settings: 'Settings', audit: 'Audit log' };
-let PAGES = PAGES_TENANT;
+// Which pages exist for this person. The server enforces everything; this only hides what they could not use anyway.
+const can = perm => (window.__me?.permissions || []).includes(perm);
+const PAGE_DEFS = [
+  ['overview', 'Overview', () => true], ['licenses', 'Licenses', () => can('licenses.view')], ['servers', 'Servers', () => can('servers.view')],
+  ['products', 'Products', () => can('products.view')], ['build', 'Build', () => window.__me.role === 'platform'], ['groups', 'Groups', () => can('groups.view')],
+  ['team', 'Team', () => can('team.manage')], ['customers', 'Customers', () => can('platform.customers')], ['plans', 'Plans', () => window.__me.role === 'platform'],
+  ['billing', 'Billing', () => window.__me.role === 'tenant'], ['settings', 'Settings', () => can('settings.manage')], ['audit', 'Audit log', () => can('audit.view')],
+];
+let PAGES = { overview: 'Overview' };
 const isDash = location.pathname === '/dashboard';
 let WS = null;   // the workspace being shown (refreshed on every page change)
 
@@ -49,11 +56,12 @@ $('logout').addEventListener('click', async () => { await api('POST', '/api/auth
 function showApp() {
   $('app').hidden = false;
   const me = window.__me;
-  PAGES = me.role === 'platform' ? PAGES_PLATFORM : PAGES_TENANT;
+  PAGES = Object.fromEntries(PAGE_DEFS.filter(([, , ok]) => ok()).map(([k, label]) => [k, label]));
   document.title = me.role === 'platform' ? 'Admin' : 'Dashboard';
   if (me) $('whoami').textContent = me.email ? `${me.name} (${me.email})` : me.name;
   $('nav').replaceChildren(...Object.entries(PAGES).map(([k, label]) => h('a', { 'data-page': k, onclick: () => (location.hash = k) }, label)));
   if (me.role === 'platform') workspaceSwitcher();
+  else if ((me.workspaces || []).length > 1) membershipSwitcher(me);
   route();
 }
 window.addEventListener('hashchange', () => !$('app').hidden && route());
@@ -70,6 +78,15 @@ async function workspaceSwitcher() {
   box.hidden = false;
 }
 
+/** Somebody who belongs to several workspaces (their own plus teams they were added to) picks which one to work in. */
+function membershipSwitcher(me) {
+  const box = $('wsSwitch');
+  const sel = h('select', { style: { fontSize: '13px' }, onchange: e => { setWs(e.target.value); location.hash = 'overview'; location.reload(); } },
+    me.workspaces.map(w => h('option', { value: w.id, selected: w.id === me.workspace.id }, `${w.name} · ${w.role}`)));
+  box.replaceChildren(h('label', { style: { fontSize: '12px', marginBottom: '4px' } }, 'Workspace'), sel);
+  box.hidden = false;
+}
+
 let buildTimer;
 async function route() {
   clearInterval(buildTimer);
@@ -79,8 +96,8 @@ async function route() {
     WS = await api('GET', '/api/workspace');
     window.__me.workspace = { ...window.__me.workspace, ...WS };
     banner();
-    groups = await api('GET', '/api/admin/groups');
-    await { overview, licenses, servers, products, build: buildPage, groups: groupsPage, customers: customersPage, plans: plansPage, billing: billingPage, settings, audit }[page]();
+    groups = can('groups.view') ? await api('GET', '/api/admin/groups') : [];
+    await { overview, licenses, servers, products, build: buildPage, groups: groupsPage, team: () => teamPage({ render, head }), customers: customersPage, plans: plansPage, billing: billingPage, settings, audit }[page]();
   } catch (e) { if (e.status === 401) return location.reload(); toast(e.message, true); }
 }
 
@@ -102,31 +119,44 @@ async function overview() {
   const s = await api('GET', '/api/admin/stats');
   const stat = (n, l) => h('div', { class: 'card stat' }, h('div', { class: 'n' }, n), h('div', { class: 'l' }, l));
   const max = Math.max(1, ...s.per_day.map(d => d.n));
-  render(head('Overview'), WS.house ? null : planCard(),
-    h('div', { class: 'stats' }, stat(s.licenses, 'Licenses'), stat(s.servers, 'Active servers'), stat(s.online, 'Online now'), stat(s.disabled, 'Disabled servers'), stat(s.blocked, 'Blocked licenses'), stat(s.issued_24h, 'Issued last 24h')),
-    h('div', { class: 'cols' },
-      h('div', { class: 'card' }, h('h3', null, 'Licenses issued · 14 days'), h('div', { class: 'bars' }, s.per_day.length ? s.per_day.map(d => h('div', { title: `${d.d}: ${d.n}`, style: { height: d.n / max * 100 + '%' } })) : h('span', { class: 'muted' }, 'No data yet'))),
-      h('div', { class: 'card' }, h('h3', { style: { marginBottom: '8px' } }, 'Recent activity'), s.recent.length ? s.recent.map(auditLine) : h('span', { class: 'muted' }, 'Nothing yet'))));
+  const me = window.__me, hide = k => s.hidden.includes(k);
+  let limitedNote = null;
+  if (me.limited) {
+    const names = can('products.view') ? (await api('GET', '/api/admin/products')).map(p => p.name) : [];
+    limitedNote = h('div', { class: 'notice' }, h('span', null, h('b', null, 'Your access is limited to '), names.length ? names.join(', ') : `${me.products.length} product${me.products.length === 1 ? '' : 's'}`, '. Everything below only counts what belongs to them.'));
+  }
+  const cards = [...(hide('licenses') ? [] : [stat(s.licenses, 'Licenses')]), ...(hide('servers') ? [] : [stat(s.servers, 'Active servers'), stat(s.online, 'Online now'), stat(s.disabled, 'Disabled servers')]),
+    ...(hide('licenses') ? [] : [stat(s.blocked, 'Blocked licenses'), stat(s.issued_24h, 'Issued last 24h')])];
+  render(head('Overview'), limitedNote, WS.house || me.role === 'member' ? null : planCard(),
+    me.role === 'member' && !cards.length ? h('div', { class: 'muted' }, `You are signed in as ${me.member_role} in ${WS.name}. Use the menu to open what you have access to.`) : null,
+    cards.length ? h('div', { class: 'stats' }, cards) : null,
+    cards.length || s.recent.length ? h('div', { class: 'cols' },
+      hide('licenses') ? null : h('div', { class: 'card' }, h('h3', null, 'Licenses issued · 14 days'), h('div', { class: 'bars' }, s.per_day.length ? s.per_day.map(d => h('div', { title: `${d.d}: ${d.n}`, style: { height: d.n / max * 100 + '%' } })) : h('span', { class: 'muted' }, 'No data yet'))),
+      can('audit.view') ? h('div', { class: 'card' }, h('h3', { style: { marginBottom: '8px' } }, 'Recent activity'), s.recent.length ? s.recent.map(auditLine) : h('span', { class: 'muted' }, 'Nothing yet')) : null) : null);
 }
 const auditLine = a => h('div', { class: 'audit-line' }, h('span', null, h('b', null, a.action), ' ', h('span', { class: 'muted keycell' }, a.target)), h('span', { class: 'faint' }, ago(a.at)));
 
 // --- licenses --------------------------------------------------------------
 async function licenses() {
-  const filters = { q: '', status: '', group: '' };
+  const filters = { q: '', status: '', group: '', product: '' };
   const body = h('div', { class: 'card table-card' });
+  const products = productOptions = await api('GET', '/api/admin/products/options').catch(() => []);
   async function load() {
     const qs = new URLSearchParams(Object.entries(filters).filter(([, v]) => v));
     const rows = await api('GET', '/api/admin/licenses?' + qs);
     body.replaceChildren(h('table', null,
-      h('thead', null, h('tr', null, ['License', 'Owner', 'Group', 'Servers', 'Status', 'Issued', 'IP'].map(t => h('th', null, t)))),
+      h('thead', null, h('tr', null, ['License', 'Owner', 'Product', 'Group', 'Servers', 'Status', 'Issued', 'IP'].map(t => h('th', null, t)))),
       h('tbody', null, rows.length ? rows.map(l => h('tr', { class: 'clickable', onclick: () => licenseDrawer(l.id, load) },
-        h('td', null, keyCell(l.key)), h('td', null, l.owner || h('span', { class: 'faint' }, '—')), h('td', null, groupTag(l.group_id)),
+        h('td', null, keyCell(l.key)), h('td', null, l.owner || h('span', { class: 'faint' }, '—'), l.buyer_email && h('div', { class: 'faint' }, l.buyer_email)),
+        h('td', null, l.product_name ? h('span', { class: 'chip' }, l.product_name) : h('span', { class: 'faint' }, '—')), h('td', null, groupTag(l.group_id)),
         h('td', null, `${l.used} / ${limitText(l.limit)}`), h('td', null, h('span', { class: 'chip ' + l.state }, l.state)),
-        h('td', { class: 'muted' }, date(l.created_at)), h('td', { class: 'keycell muted' }, l.issued_ip || '—'))) : h('tr', null, h('td', { colspan: 7, class: 'muted' }, 'No licenses found')))));
+        h('td', { class: 'muted' }, date(l.created_at)), h('td', { class: 'keycell muted' }, l.issued_ip || '—'))) : h('tr', null, h('td', { colspan: 8, class: 'muted' }, 'No licenses found')))));
   }
-  const search = h('input', { placeholder: 'Search key, owner, note, IP…', oninput: debounce(e => { filters.q = e.target.value; load(); }) });
+  const search = h('input', { placeholder: 'Search key, owner, buyer email, note, IP…', oninput: debounce(e => { filters.q = e.target.value; load(); }) });
   const status = h('select', { onchange: e => { filters.status = e.target.value; load(); } }, h('option', { value: '' }, 'All statuses'), h('option', { value: 'active' }, 'Active'), h('option', { value: 'blocked' }, 'Blocked'));
-  const grp = h('select', { onchange: e => { filters.group = e.target.value; load(); } }, h('option', { value: '' }, 'All groups'), groups.map(g => h('option', { value: g.id }, g.name)));
+  const grp = can('groups.view') ? h('select', { onchange: e => { filters.group = e.target.value; load(); } }, h('option', { value: '' }, 'All groups'), groups.map(g => h('option', { value: g.id }, g.name))) : null;
+  const prod = products.length > 1 || (products.length && !window.__me.limited) ? h('select', { onchange: e => { filters.product = e.target.value; load(); } }, h('option', { value: '' }, 'All products'),
+    products.map(p => h('option', { value: p.id }, p.name)), !window.__me.limited && h('option', { value: 'none' }, 'No product')) : null;
   async function cleanUp() {
     const days = 7, q = { older_than_days: days };
     const { count } = await api('POST', '/api/admin/licenses/purge-unused', { ...q, dry_run: true });
@@ -136,7 +166,9 @@ async function licenses() {
     toast(`Deleted ${r.count} unused license${r.count === 1 ? '' : 's'}.`);
     await load();
   }
-  render(head('Licenses', h('button', { class: 'btn', title: 'Delete licenses that downloads created but nobody ever used', onclick: () => cleanUp().catch(e => toast(e.message, true)) }, 'Clean up unused'), h('button', { class: 'btn primary', onclick: () => licenseForm(null, load) }, '+ New license')), h('div', { class: 'toolbar' }, search, status, grp), body);
+  render(head('Licenses',
+    can('licenses.delete') && h('button', { class: 'btn', title: 'Delete licenses that downloads created but nobody ever used', onclick: () => cleanUp().catch(e => toast(e.message, true)) }, 'Clean up unused'),
+    can('licenses.create') && h('button', { class: 'btn primary', onclick: () => licenseForm(null, load) }, '+ New license')), h('div', { class: 'toolbar' }, search, status, grp, prod), body);
   await load();
 }
 const debounce = (fn, ms = 250) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
@@ -144,12 +176,19 @@ const debounce = (fn, ms = 250) => { let t; return (...a) => { clearTimeout(t); 
 const groupSelect = sel => h('select', { id: 'f-group' }, h('option', { value: '' }, 'No group (default limit)'), groups.map(g => h('option', { value: g.id, selected: g.id === sel }, `${g.name} (${limitText(g.max_servers)} servers)`)));
 const toDateInput = ts => ts ? new Date(ts * 1000).toISOString().slice(0, 10) : '';
 
+let productOptions = []; // [{id, name}] the signed-in person may link a license to
 function licenseForm(lic, done) {
+  const limited = !!window.__me.limited;
+  const prodSel = productOptions.length || limited ? h('select', { id: 'f-product' },
+    !limited && h('option', { value: '' }, 'No product'), productOptions.map(p => h('option', { value: p.id, selected: p.id === lic?.product_id }, p.name))) : null;
   const dlg = h('dialog', null,
     h('h3', { style: { marginBottom: '16px' } }, lic ? 'Edit license' : 'New license'),
     h('div', { class: 'field' }, h('label', null, 'Owner'), h('input', { id: 'f-owner', value: lic?.owner || '', placeholder: 'Name, Discord or BuiltByBit user' })),
+    prodSel && h('div', { class: 'field' }, h('label', null, 'Product'), prodSel, h('div', { class: 'hint' }, limited ? 'Pick the product this license is for.' : 'Which plugin this license belongs to. People limited to a product only see licenses linked to it.')),
+    h('div', { class: 'field' }, h('label', null, 'Buyer email (optional)'), h('input', { id: 'f-buyer', type: 'email', value: lic?.buyer_email || '', placeholder: 'buyer@example.com' }),
+      h('div', { class: 'hint' }, 'When this buyer signs in at the site with that email, the license shows up in their account.')),
     h('div', { class: 'grid2' },
-      h('div', { class: 'field' }, h('label', null, 'Group'), groupSelect(lic?.group_id)),
+      can('groups.view') && h('div', { class: 'field' }, h('label', null, 'Group'), groupSelect(lic?.group_id)),
       h('div', { class: 'field' }, h('label', null, 'Server limit override'), h('input', { id: 'f-max', type: 'number', min: -1, value: lic?.max_servers ?? '', placeholder: 'inherit' }), h('div', { class: 'hint' }, 'Empty = inherit · -1 = unlimited'))),
     h('div', { class: 'field' }, h('label', null, 'Expires'), h('input', { id: 'f-exp', type: 'date', value: toDateInput(lic?.expires_at) })),
     h('div', { class: 'field' }, h('label', null, 'Note'), h('textarea', { id: 'f-note', rows: 2 }, lic?.note || '')),
@@ -157,7 +196,9 @@ function licenseForm(lic, done) {
       h('button', { class: 'btn', onclick: () => dlg.close() }, 'Cancel'),
       h('button', { class: 'btn primary', onclick: async () => {
         const v = id => dlg.querySelector('#' + id).value;
-        const payload = { owner: v('f-owner'), group_id: v('f-group') || null, max_servers: v('f-max') === '' ? null : Number(v('f-max')), expires_at: v('f-exp') ? Math.floor(new Date(v('f-exp') + 'T23:59:59Z') / 1000) : null, note: v('f-note') };
+        const payload = { owner: v('f-owner'), buyer_email: v('f-buyer'), max_servers: v('f-max') === '' ? null : Number(v('f-max')), expires_at: v('f-exp') ? Math.floor(new Date(v('f-exp') + 'T23:59:59Z') / 1000) : null, note: v('f-note') };
+        if (can('groups.view')) payload.group_id = v('f-group') || null;
+        if (prodSel) payload.product_id = v('f-product') || null;
         try {
           const r = lic ? await api('PATCH', `/api/admin/licenses/${lic.id}`, payload) : await api('POST', '/api/admin/licenses', payload);
           dlg.close(); toast(lic ? 'Saved' : `Created ${r.key}`); if (!lic) copy(r.key); done(r);
@@ -170,6 +211,7 @@ function licenseForm(lic, done) {
 async function licenseDrawer(id, refresh) {
   document.querySelector('.drawer')?.remove();
   const l = await api('GET', '/api/admin/licenses/' + id);
+  if (!productOptions.length) productOptions = await api('GET', '/api/admin/products/options').catch(() => []);
   const close = () => { drawer.remove(); refresh?.(); };
   const reload = () => { drawer.remove(); licenseDrawer(id, refresh); refresh?.(); };
   const act = (fn, msg) => async () => { try { await fn(); toast(msg); reload(); } catch (e) { toast(e.message, true); } };
@@ -177,20 +219,21 @@ async function licenseDrawer(id, refresh) {
     h('div', { class: 'row spread' }, h('h2', { class: 'keycell', style: { fontSize: '18px' } }, l.key), h('button', { class: 'btn ghost sm', onclick: close }, '✕')),
     h('div', { class: 'row wrap', style: { margin: '10px 0 18px' } }, h('span', { class: 'chip ' + l.state }, l.state), groupTag(l.group_id), h('span', { class: 'muted' }, `${l.used} / ${limitText(l.limit)} servers`)),
     l.block_reason && h('div', { class: 'err' }, 'Blocked: ' + l.block_reason),
-    h('div', { class: 'muted', style: { marginBottom: '16px' } }, `${l.owner || 'No owner'} · issued ${date(l.created_at)} via ${l.source}${l.issued_ip ? ' from ' + l.issued_ip : ''}${l.expires_at ? ' · expires ' + date(l.expires_at) : ''}`, l.note && h('div', { class: 'faint' }, l.note)),
+    h('div', { class: 'muted', style: { marginBottom: '16px' } }, `${l.owner || 'No owner'} · issued ${date(l.created_at)} via ${l.source}${l.issued_ip ? ' from ' + l.issued_ip : ''}${l.expires_at ? ' · expires ' + date(l.expires_at) : ''}`,
+      l.product_name && h('div', { class: 'faint' }, 'Product: ' + l.product_name), l.buyer_email && h('div', { class: 'faint' }, 'Buyer: ' + l.buyer_email), l.note && h('div', { class: 'faint' }, l.note)),
     h('div', { class: 'row wrap', style: { marginBottom: '22px' } },
       h('button', { class: 'btn sm', onclick: () => copy(l.key) }, 'Copy key'),
-      h('button', { class: 'btn sm', onclick: () => licenseForm(l, reload) }, 'Edit / set limit'),
-      l.status === 'active'
+      can('licenses.edit') && h('button', { class: 'btn sm', onclick: () => licenseForm(l, reload) }, 'Edit / set limit'),
+      can('licenses.block') && (l.status === 'active'
         ? h('button', { class: 'btn sm danger', onclick: async () => { const r = prompt('Block reason (shown to the plugin owner):', ''); if (r !== null) act(() => api('PATCH', `/api/admin/licenses/${l.id}`, { status: 'blocked', block_reason: r }), 'Blocked')(); } }, 'Block')
-        : h('button', { class: 'btn sm', onclick: act(() => api('PATCH', `/api/admin/licenses/${l.id}`, { status: 'active' }), 'Unblocked') }, 'Unblock'),
-      h('button', { class: 'btn sm danger', onclick: async () => { if (await confirmDialog('Delete license?', 'The license and all its servers are removed permanently. Plugins using it will stop working.', 'Delete')) { await api('DELETE', `/api/admin/licenses/${l.id}`); toast('Deleted'); close(); } } }, 'Delete')),
-    h('h3', { style: { marginBottom: '8px' } }, 'Servers'),
-    l.servers.filter(s => s.status !== 'removed').length ? l.servers.filter(s => s.status !== 'removed').map(s => h('div', { class: 'audit-line' },
+        : h('button', { class: 'btn sm', onclick: act(() => api('PATCH', `/api/admin/licenses/${l.id}`, { status: 'active' }), 'Unblocked') }, 'Unblock')),
+      can('licenses.delete') && h('button', { class: 'btn sm danger', onclick: async () => { if (await confirmDialog('Delete license?', 'The license and all its servers are removed permanently. Plugins using it will stop working.', 'Delete')) { await api('DELETE', `/api/admin/licenses/${l.id}`); toast('Deleted'); close(); } } }, 'Delete')),
+    can('servers.view') && h('h3', { style: { marginBottom: '8px' } }, 'Servers'),
+    can('servers.view') && (l.servers.filter(s => s.status !== 'removed').length ? l.servers.filter(s => s.status !== 'removed').map(s => h('div', { class: 'audit-line' },
       h('div', null, h('b', null, s.name || 'Unnamed'), ' ', h('span', { class: 'chip ' + s.status }, s.status), h('div', { class: 'muted keycell' }, `${s.ip}:${s.port ?? '?'} · ${ago(s.last_seen)}`)),
-      h('div', { class: 'row' },
+      can('servers.manage') && h('div', { class: 'row' },
         h('button', { class: 'btn sm', onclick: act(() => api('PATCH', `/api/admin/servers/${s.id}`, { status: s.status === 'disabled' ? 'active' : 'disabled' }), 'Updated') }, s.status === 'disabled' ? 'Enable' : 'Disable'),
-        h('button', { class: 'btn sm danger', onclick: act(() => api('DELETE', `/api/admin/servers/${s.id}`), 'Removed') }, 'Remove')))) : h('div', { class: 'muted' }, 'No servers'),
+        h('button', { class: 'btn sm danger', onclick: act(() => api('DELETE', `/api/admin/servers/${s.id}`), 'Removed') }, 'Remove')))) : h('div', { class: 'muted' }, 'No servers')),
     l.same_ip.length > 0 && h('div', { style: { marginTop: '24px' } }, h('h3', { style: { marginBottom: '8px' } }, `Other licenses issued from ${l.issued_ip}`),
       l.same_ip.map(o => h('div', { class: 'audit-line', style: { cursor: 'pointer' }, onclick: () => licenseDrawer(o.id, refresh) }, keyCell(o.key), h('span', { class: 'faint' }, `${o.owner || '—'} · ${date(o.created_at)}`)))));
   document.body.append(drawer);
@@ -198,7 +241,7 @@ async function licenseDrawer(id, refresh) {
 
 // --- servers ---------------------------------------------------------------
 async function servers() {
-  const hb = Number((await api('GET', '/api/admin/settings')).heartbeat_minutes) || 1;
+  const hb = WS.heartbeat_minutes || 1;
   const body = h('div', { class: 'card table-card' });
   async function load(q = '') {
     const rows = await api('GET', '/api/admin/servers?q=' + encodeURIComponent(q));
@@ -208,7 +251,7 @@ async function servers() {
         h('td', null, h('b', null, s.name || 'Unnamed')), h('td', { class: 'keycell' }, `${s.ip}:${s.port ?? '?'}`),
         h('td', null, keyCell(s.license_key), s.owner && h('div', { class: 'faint' }, s.owner)), h('td', { class: 'muted' }, s.version || '—'), h('td', { class: 'muted' }, ago(s.last_seen)),
         h('td', null, h('span', { class: 'chip ' + (s.status === 'disabled' ? 'disabled' : s.last_seen > online ? 'online' : 'idle') }, s.status === 'disabled' ? 'disabled' : s.last_seen > online ? 'online' : 'idle')),
-        h('td', null, h('div', { class: 'row' },
+        h('td', null, can('servers.manage') && h('div', { class: 'row' },
           h('button', { class: 'btn sm', onclick: async () => { await api('PATCH', `/api/admin/servers/${s.id}`, { status: s.status === 'disabled' ? 'active' : 'disabled' }); load(q); } }, s.status === 'disabled' ? 'Enable' : 'Disable'),
           h('button', { class: 'btn sm danger', onclick: async () => { if (await confirmDialog('Remove server?', 'It will be shut down at its next check-in and the slot freed.', 'Remove')) { await api('DELETE', `/api/admin/servers/${s.id}`); load(q); } } }, 'Remove'))))) : h('tr', null, h('td', { colspan: 7, class: 'muted' }, 'No servers yet')))));
   }
@@ -253,10 +296,10 @@ async function products() {
     } catch (e) { toast(e.message, true); drop.classList.remove('busy'); }
   }
 
-  grid.replaceChildren(...(list.length ? list.map(productCard) : [h('div', { class: 'muted', style: { padding: '8px' } }, 'No products yet. Drop a plugin jar above to create your first licensed download.')]));
+  grid.replaceChildren(...(list.length ? list.map(productCard) : [h('div', { class: 'muted', style: { padding: '8px' } }, can('products.create') ? 'No products yet. Drop a plugin jar above to create your first licensed download.' : 'There are no products you can see yet.')]));
   render(head('Products'),
     h('p', { class: 'muted', style: { marginTop: '-12px' } }, 'Upload your finished plugin jar as it is. LicenseX wraps it so it checks its buyer\'s license before starting, and hands each buyer their own copy with the license built in. For BuiltByBit, use the BuiltByBit build button.'),
-    drop, grid);
+    can('products.create') ? drop : null, grid);
 }
 
 function productCard(p) {
@@ -275,18 +318,19 @@ function productCard(p) {
     integrationNote(p),
     h('div', { class: 'row wrap', style: { gap: '18px', margin: '14px 0', color: 'var(--muted)', fontSize: '13px' } },
       h('span', null, h('b', { style: { color: 'var(--text)', fontSize: '18px' } }, p.downloads), ' downloads'),
-      h('span', null, 'Licenses issued per download · ', p.group_id ? 'assigned to group' : 'default limit')),
+      h('span', null, h('b', { style: { color: 'var(--text)', fontSize: '18px' } }, p.licenses ?? 0), ' licenses'),
+      p.bbb_resource_id && h('span', null, `BuiltByBit resource ${p.bbb_resource_id}`)),
     h('label', { style: { marginTop: '4px' } }, 'Direct download URL (your own site or Discord; add &user=<buyer id> to keep one license per buyer)'),
     h('div', { class: 'url-row' }, h('input', { class: 'mono', readonly: true, value: p.download_url, onclick: e => e.target.select() }),
       h('button', { class: 'btn sm', onclick: () => copy(p.download_url) }, 'Copy')),
     h('div', { class: 'row wrap', style: { marginTop: '14px', gap: '8px' } },
       h('a', { class: 'btn sm primary', href: p.download_url, target: '_blank' }, '⬇ Test download'),
-      p.has_file && p.integration && (p.integration.ok || p.integration.integrated) && h('a', { class: 'btn sm', href: wsq(`/api/admin/products/${p.id}/bbb-build`), title: 'The jar to upload to BuiltByBit. BuiltByBit fills in each buyer\'s key.' }, '⬇ BuiltByBit build'),
-      h('button', { class: 'btn sm', onclick: () => replaceInput.click() }, p.has_file ? 'Replace file' : 'Upload file'), replaceInput,
-      h('button', { class: 'btn sm', onclick: () => productEdit(p) }, 'Edit'),
-      h('button', { class: 'btn sm', onclick: patch({ enabled: !p.enabled }, p.enabled ? 'Disabled' : 'Enabled') }, p.enabled ? 'Disable' : 'Enable'),
-      h('button', { class: 'btn sm', onclick: async () => { if (await confirmDialog('Regenerate download token?', 'The old BuiltByBit URL stops working immediately. Update your resource with the new URL.', 'Regenerate', false)) patch({ regenerate_token: true }, 'New token generated')(); } }, 'New token'),
-      h('button', { class: 'btn sm danger', onclick: async () => { if (await confirmDialog('Delete product?', `"${p.name}" and its uploaded file are removed. Issued licenses are not affected.`, 'Delete')) { await api('DELETE', `/api/admin/products/${p.id}`); toast('Deleted'); refresh(); } } }, 'Delete')));
+      can('products.edit') && p.has_file && p.integration && (p.integration.ok || p.integration.integrated) && h('a', { class: 'btn sm', href: wsq(`/api/admin/products/${p.id}/bbb-build`), title: 'The jar to upload to BuiltByBit. BuiltByBit fills in each buyer\'s key.' }, '⬇ BuiltByBit build'),
+      can('products.edit') && h('button', { class: 'btn sm', onclick: () => replaceInput.click() }, p.has_file ? 'Replace file' : 'Upload file'), replaceInput,
+      can('products.edit') && h('button', { class: 'btn sm', onclick: () => productEdit(p) }, 'Edit'),
+      can('products.edit') && h('button', { class: 'btn sm', onclick: patch({ enabled: !p.enabled }, p.enabled ? 'Disabled' : 'Enabled') }, p.enabled ? 'Disable' : 'Enable'),
+      can('products.edit') && h('button', { class: 'btn sm', onclick: async () => { if (await confirmDialog('Regenerate download token?', 'The old BuiltByBit URL stops working immediately. Update your resource with the new URL.', 'Regenerate', false)) patch({ regenerate_token: true }, 'New token generated')(); } }, 'New token'),
+      can('products.delete') && h('button', { class: 'btn sm danger', onclick: async () => { if (await confirmDialog('Delete product?', `"${p.name}" and its uploaded file are removed. Issued licenses are not affected.`, 'Delete')) { await api('DELETE', `/api/admin/products/${p.id}`); toast('Deleted'); refresh(); } } }, 'Delete')));
 }
 
 function integrationNote(p) {
@@ -301,11 +345,13 @@ function integrationNote(p) {
 function productEdit(p) {
   const dlg = h('dialog', null, h('h3', { style: { marginBottom: '16px' } }, 'Edit product'),
     h('div', { class: 'field' }, h('label', null, 'Name'), h('input', { id: 'p-name', value: p.name })),
-    h('div', { class: 'field' }, h('label', null, 'Assign issued licenses to group'), groupSelect(p.group_id),
+    can('groups.view') && h('div', { class: 'field' }, h('label', null, 'Assign issued licenses to group'), groupSelect(p.group_id),
       h('div', { class: 'hint' }, 'Buyers of this product get a license in this group, inheriting its server limit.')),
+    h('div', { class: 'field' }, h('label', null, 'BuiltByBit resource id (optional)'), h('input', { id: 'p-bbb', value: p.bbb_resource_id || '', inputmode: 'numeric', placeholder: 'e.g. 123456' }),
+      h('div', { class: 'hint' }, 'The number in this resource\'s BuiltByBit address. Licenses BuiltByBit asks for are then linked to this product, so people limited to it can see them.')),
     h('div', { class: 'row', style: { 'justify-content': 'flex-end' } }, h('button', { class: 'btn', onclick: () => dlg.close() }, 'Cancel'),
       h('button', { class: 'btn primary', onclick: async () => {
-        try { await api('PATCH', `/api/admin/products/${p.id}`, { name: dlg.querySelector('#p-name').value, group_id: dlg.querySelector('#f-group').value || null }); dlg.close(); toast('Saved'); products(); }
+        try { await api('PATCH', `/api/admin/products/${p.id}`, { name: dlg.querySelector('#p-name').value, bbb_resource_id: dlg.querySelector('#p-bbb').value.trim(), ...(can('groups.view') ? { group_id: dlg.querySelector('#f-group').value || null } : {}) }); dlg.close(); toast('Saved'); products(); }
         catch (e) { toast(e.message, true); }
       } }, 'Save')));
   dlg.addEventListener('close', () => dlg.remove()); document.body.append(dlg); dlg.showModal();
@@ -578,11 +624,11 @@ async function groupsPage() {
         } }, 'Save')));
     dlg.addEventListener('close', () => dlg.remove()); document.body.append(dlg); dlg.showModal();
   };
-  render(head('Groups', h('button', { class: 'btn primary', onclick: () => edit(null) }, '+ New group')),
+  render(head('Groups', can('groups.manage') && h('button', { class: 'btn primary', onclick: () => edit(null) }, '+ New group')),
     h('p', { class: 'muted', style: { marginTop: '-12px' } }, 'Groups set a shared server limit. A limit set directly on a license always wins.'),
     h('div', { class: 'card table-card' }, h('table', null, h('thead', null, h('tr', null, ['Group', 'Server limit', 'Licenses', ''].map(t => h('th', null, t)))),
       h('tbody', null, groups.length ? groups.map(g => h('tr', null, h('td', null, h('span', { class: 'tag', style: { '--c': g.color } }, g.name)), h('td', null, limitText(g.max_servers)), h('td', { class: 'muted' }, g.licenses),
-        h('td', null, h('div', { class: 'row', style: { 'justify-content': 'flex-end' } }, h('button', { class: 'btn sm', onclick: () => edit(g) }, 'Edit'),
+        h('td', null, can('groups.manage') && h('div', { class: 'row', style: { 'justify-content': 'flex-end' } }, h('button', { class: 'btn sm', onclick: () => edit(g) }, 'Edit'),
           h('button', { class: 'btn sm danger', onclick: async () => { if (await confirmDialog('Delete group?', `Licenses in "${g.name}" fall back to the default limit.`, 'Delete')) { await api('DELETE', `/api/admin/groups/${g.id}`); groupsPage(); } } }, 'Delete'))))) : h('tr', null, h('td', { colspan: 4, class: 'muted' }, 'No groups yet'))))));
 }
 
@@ -653,7 +699,7 @@ async function settings() {
     s.password_login === false ? h('div', { class: 'hint' }, 'Password login is turned off in the server config.') : h('div', { class: 'hint' }, 'The admin password still works as a backup way in.'));
 
   const site = window.__me.role === 'platform' && WS.house;   // site-wide cards are the owner's, in the owner's own workspace
-  render(head('Settings'), site && !s.public_url_set && !/^(localhost|127\.0\.0\.1)$/.test(location.hostname) ? h('div', { class: 'notice warn' }, h('b', null, 'Set LICENSEX_PUBLIC_URL. '), 'Without it, download links, the address baked into plugins and the sign-in callbacks below are guessed from the browser request and can be wrong behind a proxy. Set it to your real https address (see DEPLOY.md).') : null, site ? h('div', { class: 'notice ok' }, 'Site-wide settings (branding, sign-in, backups) are below the workspace settings. Customers only see the workspace settings.') : null, site ? access : null, bbb, site ? paymentsCard(s, settings) : null, site ? brand : null, site ? backup : null, h('div', { class: 'card', style: { maxWidth: '680px' } },
+  render(head('Settings'), site && !s.public_url_set && !/^(localhost|127\.0\.0\.1)$/.test(location.hostname) ? h('div', { class: 'notice warn' }, h('b', null, 'Set LICENSEX_PUBLIC_URL. '), 'Without it, download links, the address baked into plugins and the sign-in callbacks below are guessed from the browser request and can be wrong behind a proxy. Set it to your real https address (see DEPLOY.md).') : null, site ? h('div', { class: 'notice ok' }, 'Site-wide settings (branding, sign-in, backups) are below the workspace settings. Customers only see the workspace settings.') : null, site ? access : null, bbb, site ? paymentsCard(s, settings) : null, site || (WS.house && s.site_access) ? brand : null, site ? backup : null, h('div', { class: 'card', style: { maxWidth: '680px' } },
     num('default_limit', 'Default server limit', 'Applies to licenses with no group and no override. -1 = unlimited.', -1),
     num('heartbeat_minutes', 'Plugin check-in interval (minutes)', 'How often running plugins re-validate. Removals and blocks take effect within this window.', 1),
     toggle('claims_enabled', 'Issue licenses on download', 'When off, new downloads cannot claim a license (existing licenses keep working).'),

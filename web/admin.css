@@ -64,3 +64,17 @@ pre.logbox { background: #07080c; border: 1px solid var(--border); border-radius
 .plan-row { display: grid; grid-template-columns: 1fr auto auto; gap: 18px; align-items: center; padding: 14px 18px; }
 .plan-row.current { border-color: var(--accent); }
 @media (max-width: 560px) { .plan-row { grid-template-columns: 1fr; } }
+
+/* Team page */
+.perm-list { display: grid; gap: 12px; max-height: 52vh; overflow-y: auto; padding-right: 4px; }
+.perm-group { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px 10px; margin: 0; min-width: 0; }
+.perm-group legend { padding: 0 6px; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
+.perm-row { display: flex; align-items: flex-start; gap: 10px; padding: 6px 0; cursor: pointer; font-size: 14px; line-height: 1.35; }
+.perm-row input { width: 18px; height: 18px; margin-top: 1px; flex: none; accent-color: var(--accent); }
+.perm-row.off { opacity: .5; cursor: not-allowed; }
+.perm-tag { margin-left: 8px; font-size: 11px; padding: 1px 7px; border-radius: 99px; background: var(--accent-soft); color: var(--accent); white-space: nowrap; }
+.scope-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.scope-chips .chip { text-transform: none; }
+tr.dim td { opacity: .55; }
+.card.role .scope-chips .chip { font-size: 12px; }
+dialog .field input[type="radio"], dialog .field input[type="checkbox"] { width: 18px; height: 18px; }

@@ -565,6 +565,11 @@ route('GET', '/api/admin/products', async ctx => {
   const rows = db.prepare(`SELECT p.*, (SELECT COUNT(*) FROM licenses l WHERE l.product_id = p.id) licenses FROM products p WHERE p.workspace_id=? AND ${sw} ORDER BY p.id DESC`).all(ctx.wsId, ...sa);
   return [200, rows.map(p => productRow(ctx.req, p))];
 }, { perm: 'products.view' });
+// Names of the products the caller may link a license to (a limited member only gets theirs).
+route('GET', '/api/admin/products/options', async ctx => {
+  const [sw, sa] = scopeSql(ctx, 'id');
+  return [200, db.prepare(`SELECT id, name FROM products WHERE workspace_id=? AND ${sw} ORDER BY name`).all(ctx.wsId, ...sa)];
+}, { perm: ['licenses.view', 'licenses.create', 'products.view'] });
 route('POST', '/api/admin/products', async ctx => {
   const b = await body(ctx.req);
   const name = str(b.name, 60).trim();
@@ -815,6 +820,7 @@ function workspaceSummary(w) {
     plan: planView({ features: '', currency: 'usd', description: '', highlight: 0, ...plan }),
     plan_key: w.plan_key, plan_status: w.plan_status, plan_until: w.plan_until, plan_source: w.plan_source,
     lapsed: w.plan_key !== 'free' && entitled === 'free', usage: core.usage(w.id),
+    heartbeat_minutes: Number(core.getSetting('heartbeat_minutes', w.id)) || 1,
     billing: { stripe: billing.enabled(), can_portal: billing.enabled() && !!w.stripe_customer_id } };
 }
 route('GET', '/api/workspace', async ctx => [200, workspaceSummary(db.prepare('SELECT * FROM workspaces WHERE id=?').get(ctx.wsId))], { admin: true, allowSuspended: true });
