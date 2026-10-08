@@ -117,17 +117,22 @@ export function createCore(db) {
    * such request would share one license.
    */
   const real = v => { v = String(v ?? '').trim(); return v && !v.includes('%%') ? v : ''; };
-  function claim({ ws = HOUSE, nonce, user = '', name = '', product = '', group_id = null, ip, device }) {
+  function claim({ ws = HOUSE, nonce, user = '', name = '', product = '', group_id = null, ip, device, canMint = () => true }) {
     if (isSuspended(ws)) return { ok: false, code: 'SUSPENDED', message: 'This developer\'s account is suspended.' };
     if (getSetting('claims_enabled', ws) !== '1') return { ok: false, code: 'CLAIMS_DISABLED', message: 'License issuing is currently disabled.' };
     const uid = real(user).slice(0, 64), label = real(name).slice(0, 64) || uid;
-    // Identity is hashed so long ids/product names can't truncate into a collision.
-    const identity = uid ? 'user:' + hash(ws + '\0' + String(product) + '\0' + uid) : real(nonce).slice(0, 128);
+    // Identities are hashed together with the workspace, so long ids/product names can't truncate into a collision and one
+    // developer can never craft a nonce that lands on another developer's buyer.
+    const rawNonce = real(nonce).slice(0, 128);
+    const identity = uid ? 'user:' + hash(ws + '\0' + String(product) + '\0' + uid) : rawNonce ? 'nonce:' + hash(ws + '\0' + rawNonce) : '';
     if (!identity) return { ok: false, code: 'BAD_REQUEST', message: 'Missing buyer or nonce.' };
     let lic = q.licenseByNonce.get(identity);
+    // licenses issued before nonces were namespaced stored the raw value; they still count, but only for their own workspace
+    if (!lic && !uid) { const old = q.licenseByNonce.get(rawNonce); if (old && old.workspace_id === ws) lic = old; }
     let created = false;
     if (lic && lic.workspace_id !== ws) return { ok: false, code: 'BAD_REQUEST', message: 'Unavailable.' }; // never hand out another workspace's license
     if (!lic) {
+      if (!canMint()) return { ok: false, code: 'RATE_LIMIT', message: 'Too many new downloads right now. Please try again in a little while.' };
       try { lic = createLicense({ workspace_id: ws, owner: label, source: 'claim', product: String(product).slice(0, 64),
         group_id, nonce: identity, issued_ip: ip, issued_device: device }); }
       catch (e) { if (e instanceof PlanError) return { ok: false, code: e.code, message: e.message }; throw e; }

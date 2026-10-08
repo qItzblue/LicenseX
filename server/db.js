@@ -135,6 +135,7 @@ export function openDb(path) {
     CREATE INDEX IF NOT EXISTS idx_audit_at ON audit(at DESC);
   `);
   migrate(db);
+  reserveWorkspaceIds(db);
   return db;
 }
 
@@ -151,7 +152,7 @@ export const SEED_PLANS = [
 ];
 
 /** Brings databases from older versions up to date. Safe to run on every start. */
-function migrate(db) {
+export function migrate(db) {
   // products: integration columns (added in v0.3)
   for (const [name, def] of [['wrap_ok', 'INTEGER NOT NULL DEFAULT 0'], ['wrap_code', "TEXT NOT NULL DEFAULT ''"],
                              ['wrap_message', "TEXT NOT NULL DEFAULT ''"], ['main_class', "TEXT NOT NULL DEFAULT ''"]])
@@ -200,4 +201,19 @@ function migrate(db) {
     for (const p of SEED_PLANS)
       db.prepare('INSERT INTO plans (key, name, description, price_cents, interval, max_products, max_licenses, features, highlight, sort) VALUES (?,?,?,?,?,?,?,?,?,?)')
         .run(p.key, p.name, p.description, p.price_cents, p.interval, p.max_products, p.max_licenses, p.features, p.highlight, p.sort);
+}
+
+/**
+ * Data that points at a workspace id nobody owns (a half-finished restore, a hand-edited database) must never be adopted by
+ * the next customer to sign up. Raising the id counter above every workspace_id in use guarantees new workspaces get fresh ids.
+ */
+export function reserveWorkspaceIds(db) {
+  let top = 0;
+  for (const t of ['workspaces', 'licenses', 'products', 'license_groups', 'audit', 'ws_settings']) {
+    const col = t === 'workspaces' ? 'id' : 'workspace_id';
+    top = Math.max(top, db.prepare(`SELECT COALESCE(MAX(${col}), 0) AS m FROM ${t}`).get().m);
+  }
+  const row = db.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'workspaces'").get();
+  if (!row) db.prepare("INSERT INTO sqlite_sequence (name, seq) VALUES ('workspaces', ?)").run(top);
+  else if (row.seq < top) db.prepare("UPDATE sqlite_sequence SET seq = ? WHERE name = 'workspaces'").run(top);
 }

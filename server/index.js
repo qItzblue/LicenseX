@@ -137,6 +137,11 @@ function rateLimit(id, max, windowMs) {
 }
 setInterval(() => { const t = Date.now(); for (const [k, v] of buckets) if (!v.some(x => t - x < 3600e3)) buckets.delete(k); }, 600e3).unref();
 
+// Direct download links are public, so each one can only mint so many NEW licenses per hour (repeat downloads by the same buyer are free).
+const MINT_PER_PRODUCT_HOUR = Math.max(1, Number(process.env.LICENSEX_MINT_PER_HOUR || fileConfig.mintPerHour || 60));
+const MINT_PER_IP_HOUR = 10;
+const recentCount = (id, windowMs) => { const t = Date.now(); return (buckets.get(id) || []).filter(x => t - x < windowMs).length; };
+
 class HttpError extends Error { constructor(status, message, code) { super(message); this.status = status; this.code = code; } }
 const json = (res, status, body, headers = {}) => {
   if (Buffer.isBuffer(body)) { // binary download (headers carry the content type)
@@ -165,7 +170,7 @@ const str = (v, max = 200) => String(v ?? '').slice(0, max);
 const slugify = s => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'product';
 
 /** Stream a request body straight to disk with a hard size cap. Used for plugin uploads. */
-async function saveUpload(req, destPath) {
+async function saveUpload(req, destPath, max = MAX_UPLOAD) {
   const tmp = destPath + '.tmp-' + randomBytes(4).toString('hex');
   const out = createWriteStream(tmp);
   let size = 0, failure = null;
@@ -174,7 +179,7 @@ async function saveUpload(req, destPath) {
   try {
     for await (const c of req) {
       size += c.length;
-      if (size > MAX_UPLOAD) throw new HttpError(413, `File too large (max ${Math.round(MAX_UPLOAD / 1048576)} MB)`);
+      if (size > max) throw new HttpError(413, `File too large (max ${Math.round(max / 1048576)} MB)`);
       check();
       if (!out.write(c)) { await new Promise(r => { out.once('drain', r); out.once('error', r); }); check(); }
     }
@@ -419,6 +424,20 @@ route('DELETE', '/api/admin/licenses/:id', async ctx => {
   return [200, { ok: true }];
 }, { admin: true });
 
+// Delete licenses that downloads issued but that were never used on a server: the quick way to clear out junk.
+route('POST', '/api/admin/licenses/purge-unused', async ctx => {
+  const b = await body(ctx.req);
+  const days = int(b.older_than_days ?? 7, { min: 0, max: 3650 });
+  const cutoff = core.now() - days * 86400;
+  const where = "workspace_id = ? AND source = 'claim' AND status = 'active' AND created_at <= ? AND NOT EXISTS (SELECT 1 FROM servers s WHERE s.license_id = licenses.id)";
+  const count = db.prepare(`SELECT COUNT(*) n FROM licenses WHERE ${where}`).get(ctx.wsId, cutoff).n;
+  if (!b.dry_run && count) {
+    db.prepare(`DELETE FROM licenses WHERE ${where}`).run(ctx.wsId, cutoff);
+    wl(ctx, 'license.purge', '', `${count} unused download license(s) older than ${days} day(s)`);
+  }
+  return [200, { ok: true, count, deleted: !b.dry_run }];
+}, { admin: true });
+
 // Admin: servers --------------------------------------------------------------
 route('GET', '/api/admin/servers', async ctx => {
   const text = ctx.url.searchParams.get('q')?.trim();
@@ -445,6 +464,16 @@ route('DELETE', '/api/admin/servers/:id', async ctx => {
 
 // Admin: products (plugin downloads) ------------------------------------------
 const productFile = slug => join(PRODUCTS_DIR, slug + '.bin');
+/** A free product slug. Slugs are at most 48 characters, suffix included: download addresses and backup file names rely on it. */
+function uniqueSlug(wanted) {
+  const base = slugify(wanted);
+  let slug = base;
+  for (let i = 2; db.prepare('SELECT 1 FROM products WHERE slug=?').get(slug); i++) {
+    const suffix = `-${i}`;
+    slug = base.slice(0, 48 - suffix.length).replace(/-+$/, '') + suffix;
+  }
+  return slug;
+}
 /**
  * The address buyers and OAuth providers should use for this server. Set LICENSEX_PUBLIC_URL: without it we have to
  * guess from the request, and the Host header is whatever the caller typed (only a plain host[:port] is accepted).
@@ -471,8 +500,7 @@ route('POST', '/api/admin/products', async ctx => {
   if (!name) throw new HttpError(400, 'Name required');
   const group_id = ownGroup(ctx, b.group_id ? int(b.group_id, { min: 1 }) : null);
   withinPlan(() => core.assertWithin(ctx.wsId, 'products'));
-  let slug = slugify(b.slug || name), base = slug, i = 2;
-  while (db.prepare('SELECT 1 FROM products WHERE slug=?').get(slug)) slug = `${base}-${i++}`;
+  const slug = uniqueSlug(b.slug || name);
   const r = db.prepare('INSERT INTO products(workspace_id,slug,name,token,group_id,created_at) VALUES(?,?,?,?,?,?)').run(ctx.wsId, slug, name, randomBytes(12).toString('base64url'), group_id, now());
   wl(ctx, 'product.create', slug, name);
   return [201, productRow(ctx.req, db.prepare('SELECT * FROM products WHERE id=?').get(r.lastInsertRowid))];
@@ -569,8 +597,7 @@ route('POST', '/api/admin/builds/:id/product', async ctx => {
     const name = str(b.name, 60).trim();
     if (!name) throw new HttpError(400, 'Give the new product a name, or pick an existing product.');
     withinPlan(() => core.assertWithin(ctx.wsId, 'products'));
-    let slug = slugify(name), base = slug, i = 2;
-    while (db.prepare('SELECT 1 FROM products WHERE slug=?').get(slug)) slug = `${base}-${i++}`;
+    const slug = uniqueSlug(name);
     const r = db.prepare('INSERT INTO products(workspace_id,slug,name,token,created_at) VALUES(?,?,?,?,?)').run(ctx.wsId, slug, name, randomBytes(12).toString('base64url'), now());
     p = db.prepare('SELECT * FROM products WHERE id=?').get(r.lastInsertRowid);
     wl(ctx, 'product.create', slug, name);
@@ -590,7 +617,7 @@ route('GET', '/api/admin/backup', async () => {
 }, { platform: true });
 route('POST', '/api/admin/restore', async ctx => {
   const tmp = join(DATA, '.restore-upload');
-  await saveUpload(ctx.req, tmp);
+  await saveUpload(ctx.req, tmp, MAX_UPLOAD * 4); // a backup holds every plugin jar plus the database
   try {
     const r = restoreBackup(db, PRODUCTS_DIR, readFileSync(tmp), DatabaseSync);
     core.log('admin', 'backup.restore', '', `${r.products} plugin file(s)`);
@@ -893,8 +920,17 @@ function handleDownload(req, res, slug, url) {
   // opening the raw link - there is nothing to match on, so that download gets a fresh license.
   const nonce = str(url.searchParams.get('nonce'), 128).trim();
   const r = core.claim({ ws: p.workspace_id, nonce: nonce.includes('%%') || !nonce ? 'anon-' + randomBytes(12).toString('hex') : nonce,
-    user: str(url.searchParams.get('user'), 64), name: str(url.searchParams.get('name'), 64), product: p.name, group_id: p.group_id, ip, device: hash(ip + req.headers['user-agent']) });
-  if (!r.ok) throw new HttpError(r.code === 'PLAN_LIMIT' ? 402 : 403, r.message, r.code);
+    user: str(url.searchParams.get('user'), 64), name: str(url.searchParams.get('name'), 64), product: p.name, group_id: p.group_id, ip, device: hash(ip + req.headers['user-agent']),
+    canMint: () => recentCount('mint:p' + p.id, 3600e3) < MINT_PER_PRODUCT_HOUR && recentCount('mint:ip' + ip, 3600e3) < MINT_PER_IP_HOUR });
+  if (!r.ok) {
+    if (r.code === 'PLAN_LIMIT') { // the public must not learn which plan the developer is on; the developer sees why in the audit log
+      core.log('system', 'download.refused', p.slug, r.message, p.workspace_id);
+      throw new HttpError(503, 'This download is temporarily unavailable. Please contact the developer.', 'UNAVAILABLE');
+    }
+    if (r.code === 'RATE_LIMIT') { core.log('system', 'download.throttled', p.slug, `ip=${ip}`, p.workspace_id); throw new HttpError(429, r.message, r.code); }
+    throw new HttpError(403, r.message, r.code);
+  }
+  if (r.created) { rateLimit('mint:p' + p.id, Infinity, 3600e3); rateLimit('mint:ip' + ip, Infinity, 3600e3); } // only licenses actually issued count against the caps
 
   const stamped = licensedJar(req, p, r.key);
   db.prepare('UPDATE products SET downloads = downloads + 1 WHERE id=?').run(p.id);

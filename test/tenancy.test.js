@@ -174,7 +174,7 @@ test('plan limits stop new products and licenses, for dashboard, downloads and B
   for (let i = 0; i < 3; i++) assert.equal((await call('POST', '/api/admin/licenses', { owner: 'n' + i }, dave)).status, 201);
   const over = await call('POST', '/api/admin/licenses', { owner: 'one too many' }, dave);
   assert.equal(over.status, 402); assert.match(over.body.message, /up to 3 licenses/);
-  assert.equal((await fetch(`${base}/download/${p1.body.slug}?token=${p1.body.token}&user=1`)).status, 402, 'download cannot mint past the limit');
+  assert.equal((await fetch(`${base}/download/${p1.body.slug}?token=${p1.body.token}&user=1`)).status, 503, 'download cannot mint past the limit (buyers see a neutral message, not the plan)');
   const secret = (await call('GET', '/api/admin/settings', null, dave)).body.bbb_secret;
   const bbb = await formPost('/api/v1/builtbybit/license', { secret, user_id: '1', resource_id: '1' });
   assert.equal(bbb.status, 402); assert.match(bbb.text, /3 licenses/);
