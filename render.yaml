@@ -1,10 +1,14 @@
-# Render Blueprint: New + -> Blueprint, pick this repo. Builds the Dockerfile (Node 22).
+# Render Blueprint: New + -> Blueprint, pick this repo and the `deploy` branch.
+# Builds Dockerfile.builder: LicenseX plus Java, Maven and Gradle, so the admin's Build page works.
+# Don't need Build from source? Change dockerfilePath to ./Dockerfile (smaller, lighter).
 # FREE plan = testing only: it sleeps after 15 min idle and its disk is wiped on every restart, so licenses are lost.
 # For real use switch `plan` to a paid one and uncomment the disk block so /data survives restarts.
 services:
   - type: web
     name: licensex
     runtime: docker
+    dockerfilePath: ./Dockerfile.builder
+    dockerContext: .
     plan: free
     healthCheckPath: /api/public/site
     envVars:

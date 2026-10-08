@@ -43,9 +43,12 @@ The build feature needs a **JDK** (17 or 21, matching your plugin) and **Maven**
 The Build page shows which ones the server has. Without them it still lets you upload and inspect.
 
 - **Your own PC / a VPS:** install a JDK and Maven (`sudo apt install openjdk-21-jdk-headless maven` on Ubuntu/Debian).
-- **Docker:** use `Dockerfile.builder` instead of `Dockerfile`. It adds a JDK and Maven. It is bigger and needs more memory
-  (1 GB or more), so it will not fit Render's free plan.
-- **Gradle projects:** install `gradle`, or tick *trust* and the project's own `gradlew` wrapper is used.
+- **Docker / Render:** use `Dockerfile.builder` instead of `Dockerfile` (the Blueprint in `render.yaml` already does). It adds
+  Java (JDK 21), Maven and Gradle 8. On an existing Render service: **Settings -> Dockerfile Path -> `./Dockerfile.builder`**,
+  then **Manual Deploy**. It is bigger and builds need memory: if a build dies with "Killed" or an out-of-memory error,
+  move the service to a bigger instance.
+- **Gradle projects:** `gradle` is installed by `Dockerfile.builder`; elsewhere install it yourself, or tick *trust* and the
+  project's own `gradlew` wrapper is used.
 - Builds download dependencies from the internet (Maven Central, repo.papermc.io, ...), so the server needs outbound access.
 - Environment: `LICENSEX_BUILD_M2` can point at an existing Maven repository folder to reuse its downloads.
 
