@@ -93,8 +93,168 @@ try {
   const pub = await newPage(await browser.newContext(), 'public');
   for (const path of ['/', '/pricing', '/login']) { await pub.goto(base + path); await pub.waitForLoadState('networkidle'); }
 
+  await buyerFlows();   // sign-in pages, buyer portal, redirects (defined at the end of the file)
+
   assert.deepEqual(problems, [], 'no script errors anywhere');
   console.log('ui smoke: ok');
 } finally {
   await browser.close(); server.close(); mock.close();
+}
+
+// --- buyer accounts: the three sign-in pages, the buyer portal and the redirects --------------------------------------
+async function buyerFlows() {
+  const call = (method, path, body, cookie) => fetch(base + path, { method, headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}) }, body: body ? JSON.stringify(body) : undefined }).then(r => r.json());
+  const withCookie = async (cookie, viewport) => {
+    const ctx = await browser.newContext(viewport ? { viewport } : {});
+    if (cookie) await ctx.addCookies([{ name: 'lx_user', value: cookie.split('=').slice(1).join('='), url: base }]);
+    return ctx;
+  };
+  const owner = await signIn(base, mock, googleUser('boss@example.com'));
+  const lic = await call('POST', '/api/admin/licenses', { owner: 'Pat Buyer', max_servers: 3 }, owner);
+  for (const [id, name] of [['u1', 'Survival'], ['u2', 'Creative']]) await call('POST', '/api/v1/validate', { key: lic.key, instanceId: id, name, port: 25565 });
+  const check = (id) => call('POST', '/api/v1/validate', { key: lic.key, instanceId: id, name: 'x', port: 25565 });
+
+  // 1. the three sign-in pages
+  const pub = await newPage(await withCookie(null), 'login pages');
+  await pub.goto(base + '/login');
+  await pub.waitForSelector('#pickCreator');
+  let text = await pub.innerText('body');
+  for (const copy of ["I'm a creator", 'I make Minecraft plugins', "I'm a buyer", 'I bought a plugin', 'See my licenses and servers'])
+    assert.ok(text.includes(copy), `chooser says "${copy}"`);
+  assert.equal(await pub.getAttribute('#pickCreator', 'href'), '/login/creator');
+  assert.equal(await pub.getAttribute('#pickBuyer', 'href'), '/login/buyer');
+  assert.equal(await pub.locator('.oauth-btn').count(), 0, 'the chooser has no provider buttons, it only asks who you are');
+
+  await pub.goto(base + '/login/creator');
+  await pub.waitForSelector('.oauth-btn');
+  text = await pub.innerText('body');
+  assert.ok(text.includes('Creator sign in') && text.includes('creates your free workspace'), 'creator copy');
+  assert.deepEqual(await pub.$$eval('.oauth-btn', as => as.map(a => a.getAttribute('href'))), ['google', 'discord', 'github'].map(p => `/auth/${p}?next=%2Fdashboard`));
+  await pub.goto(base + '/login/creator?next=/pricing');
+  await pub.waitForSelector('.oauth-btn');
+  assert.ok((await pub.getAttribute('.oauth-btn', 'href')).endsWith('next=%2Fpricing'), 'the pricing page can send creators back to it');
+  await pub.goto(base + '/login?next=/dashboard');
+  await pub.waitForSelector('.oauth-btn');
+  assert.ok((await pub.innerText('body')).includes('Creator sign in'), 'old /login?next=/dashboard links still reach the creator sign-in');
+
+  await pub.goto(base + '/login/buyer');
+  await pub.waitForSelector('.oauth-btn');
+  text = await pub.innerText('body');
+  assert.ok(text.includes('Buyer sign in') && text.includes('see all your licenses'), 'buyer copy');
+  assert.ok(!text.includes('creates your free workspace'), 'the buyer page does not talk about workspaces');
+  assert.deepEqual(await pub.$$eval('.oauth-btn', as => as.map(a => a.getAttribute('href'))), ['google', 'discord', 'github'].map(p => `/auth/${p}?next=%2Faccount`));
+  assert.equal(await pub.getAttribute('#keyLookup', 'href'), '/', 'buyers who want no account can still look up a key');
+  await pub.goto(base + '/login/buyer?error=denied');
+  await pub.waitForSelector('.err');
+  assert.ok((await pub.innerText('.err')).includes('cancelled'), 'error codes show up');
+
+  // a provider failure lands on /login; the message is shown on the page the visitor started from (here: the provider hop is made to fail)
+  await pub.route('**/auth/google?*', route => route.fulfill({ status: 302, headers: { Location: '/login?error=denied' } }));
+  await pub.goto(base + '/login/buyer');
+  await pub.click('.oauth-btn:has-text("Google")');
+  await pub.waitForURL('**/login/buyer?error=denied*');
+  assert.ok((await pub.innerText('.err')).includes('cancelled'), 'a failed buyer sign-in reports on the buyer page');
+  await pub.goto(base + '/login/creator');
+  await pub.click('.oauth-btn:has-text("Google")');
+  await pub.waitForURL('**/login/creator?error=denied*');
+  await pub.unroute('**/auth/google?*');
+
+  // not signed in: the portal sends you to the buyer sign-in; the home and pricing pages offer Sign in / creator sign-up
+  await pub.goto(base + '/account');
+  await pub.waitForURL('**/login/buyer');
+  await pub.goto(base + '/');
+  await pub.waitForSelector('nav.top a.pill');
+  assert.equal(await pub.getAttribute('nav.top a.pill', 'href'), '/login');
+  await pub.goto(base + '/pricing');
+  await pub.waitForSelector('.plan');
+  assert.equal(await pub.getAttribute('#ctaBtn', 'href'), '/login/creator');
+  assert.ok((await pub.$$eval('.plan a.btn', as => as.map(a => a.getAttribute('href')))).every(h => h === '/login/creator'), 'pricing buttons lead through the creator sign-in');
+
+  // 2. a buyer signs in through the page (real redirect flow against the fake provider) and lands on the portal
+  const buyerCtx = await withCookie(null);
+  const buyer = await newPage(buyerCtx, 'buyer');
+  mock.as(googleUser('pat@buyers.io', { name: 'Pat Buyer' }));
+  await buyer.goto(base + '/login/buyer');
+  await buyer.click('.oauth-btn:has-text("Google")');
+  await buyer.waitForURL('**/account');
+  await buyer.waitForSelector('.state');
+  assert.ok((await buyer.innerText('#list')).includes('No licenses yet'), 'a new account starts with a clear empty state');
+  assert.ok((await buyer.innerText('header')).includes('Pat Buyer') && (await buyer.innerText('header')).includes('Sign out'));
+
+  // add the key (lower case on purpose) and see the license, its product/developer and servers
+  const seen = problems.length;
+  await buyer.fill('#key', 'nope');
+  await buyer.click('#addBtn');
+  await buyer.waitForSelector('#addErr:not([hidden])');
+  assert.ok((await buyer.innerText('#addErr')).includes('License not found'), 'a wrong key says so, inline');
+  const miss = problems.findIndex((m, i) => i >= seen && /status of 404/.test(m));
+  if (miss >= 0) problems.splice(miss, 1);   // the browser logs the 404 we just provoked on purpose
+  await buyer.fill('#key', lic.key.toLowerCase());
+  await buyer.click('#addBtn');
+  await buyer.waitForSelector('article.lic');
+  text = await buyer.innerText('article.lic');
+  for (const part of [lic.key, 'Active', 'LicenseX', 'Survival', 'Creative', '2 of 3', 'Pat Buyer', '127.0.0.x']) assert.ok(text.includes(part), `license card shows ${part}`);
+  assert.equal(await buyer.locator('article.lic .srv').count(), 2);
+  assert.equal(await buyer.locator('article.lic button:has-text("Unlink")').count(), 1, 'key-linked licenses can be unlinked');
+
+  // removing a server goes through the confirm dialog and really frees the slot
+  const removed = (await buyer.innerText('article.lic .srv')).includes('Survival') ? 'u1' : 'u2';
+  await buyer.locator('article.lic .srv button:has-text("Remove")').first().click();
+  await buyer.waitForSelector('dialog[open]');
+  await buyer.click('dialog button.danger');
+  await buyer.waitForFunction(() => document.querySelectorAll('article.lic .srv').length === 1);
+  assert.ok((await buyer.innerText('article.lic')).includes('1 of 3'));
+  assert.equal((await check(removed)).code, 'SERVER_REMOVED', 'the plugin was told at its next check-in');
+  assert.equal((await check(removed === 'u1' ? 'u2' : 'u1')).ok, true, 'the other server is untouched');
+  // cancelling the dialog changes nothing
+  await buyer.locator('article.lic .srv button:has-text("Remove")').click();
+  await buyer.waitForSelector('dialog[open]');
+  await buyer.click('dialog button:has-text("Cancel")');
+  await buyer.waitForSelector('dialog', { state: 'detached' });
+  assert.equal(await buyer.locator('article.lic .srv').count(), 1);
+
+  // unlinking empties the list again, and the license (and its server) is still there
+  await buyer.click('article.lic button:has-text("Unlink")');
+  await buyer.waitForSelector('dialog[open]');
+  await buyer.click('dialog button.primary');
+  await buyer.waitForSelector('.state');
+  assert.ok((await buyer.innerText('#list')).includes('No licenses yet'));
+  assert.equal((await check(removed === 'u1' ? 'u2' : 'u1')).ok, true, 'unlinking does not touch the license');
+  await buyer.fill('#key', lic.key);
+  await buyer.click('#addBtn');
+  await buyer.waitForSelector('article.lic');
+
+  // signed in: the buyer sign-in goes straight to the portal; the chooser and the home page know who you are
+  await buyer.goto(base + '/login/buyer');
+  await buyer.waitForURL('**/account');
+  await buyer.goto(base + '/login');
+  await buyer.waitForSelector('.who');
+  assert.ok((await buyer.innerText('.card')).includes('Pat Buyer') && (await buyer.innerText('.card')).includes('Sign out'));
+  await buyer.goto(base + '/');
+  await buyer.waitForSelector('nav.top a[href="/account"]');
+  assert.equal(await buyer.locator('nav.top a[href="/dashboard"]').count(), 0, 'a buyer without a workspace gets no Dashboard button');
+  await buyer.goto(base + '/pricing');
+  await buyer.waitForSelector('nav.top a[href="/account"]');
+
+  // 3. the same portal at phone width: no sideways scrolling anywhere
+  const phone = await newPage(await withCookie(await signIn(base, mock, googleUser('pat@buyers.io')), { width: 375, height: 760 }), 'phone');
+  for (const path of ['/account', '/login', '/login/buyer', '/login/creator']) {
+    await phone.goto(base + path);
+    await phone.waitForLoadState('networkidle');
+    assert.ok(await phone.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), `${path} fits a 375px screen`);
+    if (path === '/account') assert.equal(await phone.locator('article.lic').count(), 1);
+  }
+
+  // 4. creators: the creator sign-in sends a signed-in visitor to the dashboard (or the page they came for)
+  const maker = await newPage(await withCookie(await signIn(base, mock, googleUser('maker@studio.io'))), 'maker');
+  await maker.goto(base + '/login/creator');
+  await maker.waitForURL('**/dashboard');
+  await maker.waitForSelector('nav a');
+  await maker.goto(base + '/login/creator?next=/pricing');
+  await maker.waitForURL('**/pricing');
+  await maker.goto(base + '/login/buyer');
+  await maker.waitForURL('**/account');
+  await maker.waitForSelector('.state');
+  assert.equal(await maker.locator('article.lic').count(), 0, 'a creator\'s own workspace licenses are not in her buyer list');
+  assert.ok((await maker.locator('nav.top a[href="/dashboard"]').count()) === 1, 'the portal links a creator to the dashboard');
 }

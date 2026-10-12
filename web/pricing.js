@@ -21,7 +21,7 @@ function cta(p) {
   if (p.price_cents === 0)
     return signedIn
       ? h('button', { class: 'btn', onclick: async () => { try { await api('POST', '/api/workspace/ensure'); location.href = '/dashboard'; } catch (e) { showErr(e.message); } } }, me.user.workspace ? 'Open dashboard' : 'Get started free')
-      : h('a', { class: 'btn', href: '/login?next=/dashboard' }, 'Get started free');
+      : h('a', { class: 'btn', href: '/login/creator' }, 'Get started free');
   if (!pricing.payments) {
     const s = pricing.site, discord = s.discord_url, mail = s.support_email;
     if (discord) return h('a', { class: 'btn primary', href: discord, ...ext }, `Buy ${p.name} on Discord`);
@@ -33,7 +33,7 @@ function cta(p) {
 
 async function buy(p) {
   showErr('');
-  if (!me.user) { store.set(p.key); location.href = '/login?next=/pricing'; return; }
+  if (!me.user) { store.set(p.key); location.href = '/login/creator?next=/pricing'; return; }
   try { const r = await api('POST', '/api/billing/checkout', { plan: p.key }); location.href = r.url; }
   catch (e) { showErr(e.message); }
 }
@@ -69,9 +69,10 @@ function chrome(site) {
 
 function authNav() {
   const slot = document.getElementById('authNav');
-  if (!me.user) { if (me.providers.length) slot.append(h('a', { href: '/login?next=/pricing', class: 'pill' }, 'Sign in')); return; }
+  if (!me.user) { if (me.providers.length) slot.append(h('a', { href: '/login', class: 'pill' }, 'Sign in')); return; }
   const u = me.user;
   slot.append(...[
+    h('a', { href: '/account', class: 'pill' }, 'My licenses'),
     u.isAdmin ? h('a', { href: '/admin', class: 'admin' }, 'Admin') : u.workspace ? h('a', { href: '/dashboard', class: 'admin' }, 'Dashboard') : null,
     h('button', { class: 'linklike', onclick: async () => { await api('POST', '/api/auth/logout'); location.reload(); } }, 'Sign out')].filter(Boolean));
 }
