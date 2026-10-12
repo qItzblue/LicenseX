@@ -1,5 +1,4 @@
 import { h, api, toast, confirmDialog, ago, date, limitText, copy, currentWs, setWs, wsHeaders, wsq } from '/lib.js';
-import { paymentsCard } from '/admin-payments.js';
 import { teamPage } from '/admin-team.js';
 
 const $ = id => document.getElementById(id);
@@ -106,8 +105,7 @@ function banner() {
   const me = window.__me, box = $('banner'), items = [];
   if (me.role === 'platform' && !WS.house) items.push(['warn', h('span', null, h('b', null, `Viewing ${WS.name}'s workspace`), ` (${WS.owner_email}) as the site owner. What you change here changes their account. `), h('button', { class: 'btn sm', onclick: () => { setWs(''); location.hash = 'overview'; location.reload(); } }, 'Back to my workspace')]);
   if (WS.suspended) items.push(['bad', h('span', null, h('b', null, 'This account is suspended. '), WS.suspended_reason || 'Contact support.', ' You can look around, but nothing can be changed and its licenses are blocked.')]);
-  else if (WS.lapsed) items.push(['warn', h('span', null, h('b', null, 'Your paid plan has ended. '), 'Existing licenses keep working, but you cannot add more than the Free plan allows. '), h('a', { class: 'btn sm primary', href: '#billing' }, 'Renew')]);
-  else if (WS.plan_status === 'past_due') items.push(['warn', h('span', null, h('b', null, 'Your last payment failed. '), 'Update your card before the period ends to keep your plan. '), WS.billing.can_portal ? h('a', { class: 'btn sm primary', href: '#billing' }, 'Fix billing') : null]);
+  else if (WS.lapsed) items.push(['warn', h('span', null, h('b', null, 'Your paid plan has ended. '), 'Existing licenses keep working, but you cannot add more than the Free plan allows. '), h('a', { class: 'btn sm primary', href: '#billing' }, 'Renew with a new key')]);
   box.replaceChildren(...items.map(([kind, ...kids]) => h('div', { class: 'notice ' + kind }, ...kids)));
 }
 const head = (title, ...actions) => h('div', { class: 'page-head' }, h('h1', null, title), h('div', { class: 'row' }, actions));
@@ -220,7 +218,7 @@ async function licenseDrawer(id, refresh) {
     h('div', { class: 'row wrap', style: { margin: '10px 0 18px' } }, h('span', { class: 'chip ' + l.state }, l.state), groupTag(l.group_id), h('span', { class: 'muted' }, `${l.used} / ${limitText(l.limit)} servers`)),
     l.block_reason && h('div', { class: 'err' }, 'Blocked: ' + l.block_reason),
     h('div', { class: 'muted', style: { marginBottom: '16px' } }, `${l.owner || 'No owner'} · issued ${date(l.created_at)} via ${l.source}${l.issued_ip ? ' from ' + l.issued_ip : ''}${l.expires_at ? ' · expires ' + date(l.expires_at) : ''}`,
-      l.product_name && h('div', { class: 'faint' }, 'Product: ' + l.product_name), l.buyer_email && h('div', { class: 'faint' }, 'Buyer: ' + l.buyer_email), l.note && h('div', { class: 'faint' }, l.note)),
+      l.product_name && h('div', { class: 'faint' }, 'Product: ' + l.product_name), l.redeemed && h('div', { class: 'faint' }, `Plan key: used by ${l.redeemed.workspace} for ${l.redeemed.plan_key} on ${date(l.redeemed.redeemed_at)}`), l.buyer_email && h('div', { class: 'faint' }, 'Buyer: ' + l.buyer_email), l.note && h('div', { class: 'faint' }, l.note)),
     h('div', { class: 'row wrap', style: { marginBottom: '22px' } },
       h('button', { class: 'btn sm', onclick: () => copy(l.key) }, 'Copy key'),
       can('licenses.edit') && h('button', { class: 'btn sm', onclick: () => licenseForm(l, reload) }, 'Edit / set limit'),
@@ -474,43 +472,42 @@ const untilText = w => {
   const d = w.plan_until ? date(w.plan_until) : '';
   if (w.plan_key === 'free') return 'Free plan';
   if (w.lapsed) return `Ended ${d}. Free plan limits apply.`;
-  if (w.plan_source === 'manual') return w.plan_until ? `Granted by the site owner until ${d}` : 'Granted by the site owner, no end date';
-  if (w.plan_status === 'canceled') return `Canceled. You keep this plan until ${d}`;
-  if (w.plan_status === 'past_due') return `Payment failed. Plan active until ${d}`;
-  return w.plan_until ? `Paid through ${d}` : 'Paid once, no end date';
+  const how = w.plan_note ? 'Activated with a BuiltByBit key' : 'Granted by the site owner';
+  return w.plan_until ? `${how}, active until ${d}` : `${how}, no end date`;
 };
 
 async function billingPage() {
   const pricing = await api('GET', '/api/public/pricing');
-  const w = WS, paid = new URLSearchParams(location.search).get('paid') === '1';
-  const go = async (path, body) => { try { const r = await api('POST', path, body); location.href = r.url; } catch (e) { toast(e.message, true); } };
-  const site = pricing.site;
+  const w = WS, site = pricing.site;
   const contact = p => site.discord_url ? h('a', { class: 'btn sm primary', href: site.discord_url, target: '_blank', rel: 'noopener noreferrer' }, 'Buy on Discord')
     : site.support_email ? h('a', { class: 'btn sm primary', href: `mailto:${site.support_email}?subject=${encodeURIComponent(p.name + ' plan')}` }, 'Contact us to buy') : h('span', { class: 'muted' }, 'Coming soon');
+  const buy = p => p.buy_url ? h('a', { class: 'btn sm primary', href: p.buy_url, target: '_blank', rel: 'noopener noreferrer' }, p.interval === 'once' ? 'Buy on BuiltByBit' : 'Subscribe on BuiltByBit') : contact(p);
 
-  if (paid && w.plan_key === 'free') {            // the payment webhook can take a few seconds to arrive
-    let tries = 0;
-    buildTimer = setInterval(async () => { tries++; try { const n = await api('GET', '/api/workspace'); if (n.plan_key !== 'free' || tries > 12) { clearInterval(buildTimer); history.replaceState(null, '', '/dashboard#billing'); WS = n; billingPage(); } } catch { clearInterval(buildTimer); } }, 2000);
-  }
-  const statusChip = w.lapsed ? ['blocked', 'Ended'] : w.plan_status === 'past_due' ? ['idle', 'Payment failed'] : w.plan_status === 'canceled' ? ['idle', 'Canceled'] : ['active', 'Active'];
+  const input = h('input', { id: 'redeem-key', placeholder: 'LX-XXXX-XXXX-XXXX-XXXX', autocomplete: 'off', spellcheck: 'false', class: 'mono' });
+  const activate = async e => {
+    e?.preventDefault();
+    try { const r = await api('POST', '/api/billing/redeem', { key: input.value }); toast(r.message); WS = r.workspace; billingPage(); }
+    catch (err) { toast(err.message, true); }
+  };
+  const statusChip = w.lapsed ? ['blocked', 'Ended'] : ['active', 'Active'];
   render(head('Billing'),
-    paid ? h('div', { class: 'notice ok' }, h('b', null, w.plan_key === 'free' ? 'Payment received. ' : 'Thank you! '), w.plan_key === 'free' ? 'Your plan is being activated, this takes a few seconds…' : `Your ${w.plan.name} plan is active.`) : null,
     h('div', { class: 'card', style: { marginBottom: '16px' } },
       h('div', { class: 'row spread wrap' },
         h('div', null, h('div', { class: 'muted', style: { fontSize: '12px', textTransform: 'uppercase', letterSpacing: '.06em' } }, 'Current plan'),
           h('div', { style: { fontSize: '26px', fontWeight: 700, letterSpacing: '-.02em' } }, w.plan.name, ' ', h('span', { class: 'muted', style: { fontSize: '15px', fontWeight: 500 } }, money(w.plan))),
           h('div', { class: 'muted', style: { marginTop: '4px' } }, untilText(w))),
-        h('div', { class: 'row wrap' }, w.plan_key !== 'free' ? h('span', { class: 'chip ' + statusChip[0] }, statusChip[1]) : null,
-          w.billing.can_portal ? h('button', { class: 'btn primary', onclick: () => go('/api/billing/portal') }, 'Manage billing') : null)),
+        w.plan_key !== 'free' ? h('span', { class: 'chip ' + statusChip[0] }, statusChip[1]) : null),
       h('div', { class: 'meters' }, meter('Plugins', w.usage.products, w.plan.max_products), meter('Licenses', w.usage.licenses, w.plan.max_licenses))),
+    h('form', { class: 'card', style: { marginBottom: '16px', maxWidth: '680px' }, onsubmit: activate },
+      h('h3', { style: { marginBottom: '4px' } }, 'Activate a key'),
+      h('p', { class: 'muted', style: { marginTop: 0, fontSize: '14px' } }, 'Bought a plan on BuiltByBit? Download the file you got there: it contains your access key. Paste it here to switch the plan on.'),
+      h('div', { class: 'url-row' }, input, h('button', { class: 'btn primary', type: 'submit' }, 'Activate'))),
     h('h3', { style: { margin: '24px 0 10px' } }, 'Plans'),
     h('div', { class: 'plan-rows' }, pricing.plans.map(p => h('div', { class: 'card plan-row' + (p.key === w.plan.key ? ' current' : '') },
       h('div', null, h('b', null, p.name), p.highlight ? h('span', { class: 'tag', style: { marginLeft: '8px' } }, 'Popular') : null, h('div', { class: 'muted', style: { fontSize: '13px' } }, `${plugins(p.max_products)} · ${cap(p.max_licenses)} licenses`)),
       h('div', { style: { fontWeight: 600 } }, money(p)),
-      p.key === w.plan.key ? h('span', { class: 'chip active' }, 'Current')
-        : p.price_cents === 0 ? h('span', { class: 'muted', style: { fontSize: '13px' } }, w.billing.can_portal ? 'Cancel in billing' : '')
-        : pricing.payments ? h('button', { class: 'btn sm primary', onclick: () => go('/api/billing/checkout', { plan: p.key }) }, p.interval === 'once' ? 'Buy' : 'Choose') : contact(p)))),
-    h('p', { class: 'muted', style: { fontSize: '13px', marginTop: '14px' } }, 'If your plan ends, existing licenses keep working. You just cannot add more than the Free plan allows.'));
+      p.key === w.plan.key ? h('span', { class: 'chip active' }, 'Current') : p.price_cents === 0 ? h('span') : buy(p)))),
+    h('p', { class: 'muted', style: { fontSize: '13px', marginTop: '14px' } }, 'If your plan ends, existing licenses keep working. You just cannot add more than the Free plan allows. A monthly plan gives you a new key each month on BuiltByBit.'));
 }
 
 // --- customers (owner) ----------------------------------------------------------
@@ -519,7 +516,7 @@ async function customersPage() {
   const reload = () => customersPage();
   const call = async (method, path, body, msg) => { try { await api(method, path, body); if (msg) toast(msg); reload(); } catch (e) { toast(e.message, true); } };
   const rows = list.filter(c => !c.house);
-  const statusOf = c => c.suspended ? ['blocked', 'Suspended'] : c.lapsed ? ['idle', 'Lapsed'] : c.plan_status === 'past_due' ? ['idle', 'Past due'] : c.plan_status === 'canceled' ? ['idle', 'Canceled'] : ['active', 'Active'];
+  const statusOf = c => c.suspended ? ['blocked', 'Suspended'] : c.lapsed ? ['idle', 'Lapsed'] : c.plan_status === 'canceled' ? ['idle', 'Canceled'] : ['active', 'Active'];
 
   const invite = () => {
     const dlg = h('dialog', null, h('h3', { style: { marginBottom: '4px' } }, 'Invite a customer'),
@@ -536,7 +533,7 @@ async function customersPage() {
       h('div', { class: 'field' }, h('label', null, 'Plan'), h('select', { id: 'g-plan' }, plans.map(p => h('option', { value: p.key, selected: p.key === c.plan_key }, `${p.name}${p.active ? '' : ' (hidden)'} · ${money(p)}`)))),
       h('div', { class: 'field' }, h('label', { class: 'trustbox' }, h('input', { type: 'checkbox', id: 'g-forever', checked: !c.plan_until }), 'No end date')),
       h('div', { class: 'field', id: 'g-until-box', hidden: !c.plan_until }, h('label', null, 'Until'), h('input', { type: 'date', id: 'g-until', value: new Date((c.plan_until || Date.now() / 1000 + 30 * 86400) * 1000).toISOString().slice(0, 10) })),
-      h('div', { class: 'hint' }, 'A hand-given plan is never changed by Stripe events. Choosing Free ends it.'),
+      h('div', { class: 'hint' }, 'A hand-given plan does not renew by itself. Choosing Free ends it.'),
       h('div', { class: 'row', style: { 'justify-content': 'flex-end', marginTop: '14px' } }, h('button', { class: 'btn', onclick: () => dlg.close() }, 'Cancel'),
         h('button', { class: 'btn primary', onclick: async () => {
           const forever = dlg.querySelector('#g-forever').checked, d = dlg.querySelector('#g-until').value;
@@ -552,7 +549,7 @@ async function customersPage() {
       h('thead', null, h('tr', null, ['Customer', 'Plan', 'Status', 'Plugins', 'Licenses', 'Joined', ''].map(t => h('th', null, t)))),
       h('tbody', null, rows.length ? rows.map(c => h('tr', null,
         h('td', null, h('b', null, c.name), h('div', { class: 'muted keycell' }, c.owner_email)),
-        h('td', null, h('b', null, c.plan.name), h('div', { class: 'faint', style: { fontSize: '12px' } }, c.plan_source === 'manual' ? 'given by you' : c.plan_source === 'stripe' ? 'Stripe' : '')),
+        h('td', null, h('b', null, c.plan.name), h('div', { class: 'faint', style: { fontSize: '12px' } }, c.plan_note ? 'BuiltByBit key' : c.plan_source === 'manual' ? 'given by you' : c.plan_source === 'stripe' ? 'paid by card (old)' : '')),
         h('td', null, h('span', { class: 'chip ' + statusOf(c)[0] }, statusOf(c)[1])),
         h('td', { class: 'muted' }, `${c.products} / ${cap(c.plan.max_products)}`), h('td', { class: 'muted' }, `${c.licenses} / ${cap(c.plan.max_licenses)}`), h('td', { class: 'muted' }, date(c.created_at)),
         h('td', null, h('div', { class: 'row', style: { 'justify-content': 'flex-end', flexWrap: 'wrap' } },
@@ -560,13 +557,12 @@ async function customersPage() {
           h('button', { class: 'btn sm', onclick: () => grant(c) }, 'Plan'),
           c.suspended ? h('button', { class: 'btn sm', onclick: () => call('POST', `/api/admin/customers/${c.id}/suspend`, { suspended: false }, 'Unsuspended') }, 'Unsuspend')
             : h('button', { class: 'btn sm danger', onclick: () => { const r = prompt('Reason (shown to their buyers\' plugins):', 'Terms violation'); if (r !== null) call('POST', `/api/admin/customers/${c.id}/suspend`, { suspended: true, reason: r }, 'Suspended'); } }, 'Suspend'),
-          h('button', { class: 'btn sm danger', onclick: async () => { if (await confirmDialog('Delete this customer?', `${c.owner_email}: all of their licenses, products, files and servers are removed permanently, and their buyers' plugins stop working. This does not cancel a Stripe subscription.`, 'Delete everything')) call('DELETE', `/api/admin/customers/${c.id}`, null, 'Deleted'); } }, 'Delete'))))) : h('tr', null, h('td', { colspan: 7, class: 'muted' }, 'No customers yet. They appear here when someone signs up from the pricing page.'))))));
+          h('button', { class: 'btn sm danger', onclick: async () => { if (await confirmDialog('Delete this customer?', `${c.owner_email}: all of their licenses, products, files and servers are removed permanently, and their buyers' plugins stop working.`, 'Delete everything')) call('DELETE', `/api/admin/customers/${c.id}`, null, 'Deleted'); } }, 'Delete'))))) : h('tr', null, h('td', { colspan: 7, class: 'muted' }, 'No customers yet. They appear here when someone signs up from the pricing page.'))))));
 }
 
 // --- plans (owner) ----------------------------------------------------------------
 async function plansPage() {
   const [plans, s] = await Promise.all([api('GET', '/api/admin/plans'), api('GET', '/api/admin/settings')]);
-  const st = s.stripe || {};
   const edit = p => {
     const isNew = !p, f = id => dlg.querySelector('#' + id);
     const dlg = h('dialog', { style: { width: 'min(560px, calc(100vw - 32px))' } }, h('h3', { style: { marginBottom: '14px' } }, isNew ? 'New plan' : `Edit ${p.name}`),
@@ -582,6 +578,9 @@ async function plansPage() {
         h('div', { class: 'field' }, h('label', null, 'Plugins allowed'), h('input', { id: 'p-prod', type: 'number', min: -1, value: p?.max_products ?? 5 }), h('div', { class: 'hint' }, '-1 = unlimited')),
         h('div', { class: 'field' }, h('label', null, 'Licenses allowed'), h('input', { id: 'p-lic', type: 'number', min: -1, value: p?.max_licenses ?? 1000 }))),
       h('div', { class: 'field' }, h('label', null, 'Feature bullets (one per line)'), h('textarea', { id: 'p-feat', rows: 5 }, p?.features || '')),
+      p?.key === 'free' ? null : h('div', { class: 'grid2' },
+        h('div', { class: 'field' }, h('label', null, 'BuiltByBit buy link'), h('input', { id: 'p-buy', value: p?.buy_url || '', placeholder: 'https://builtbybit.com/resources/...' }), h('div', { class: 'hint' }, 'The Buy button on the pricing page goes here.')),
+        h('div', { class: 'field' }, h('label', null, 'BuiltByBit resource id'), h('input', { id: 'p-rid', value: p?.bbb_resource_id || '', inputmode: 'numeric', placeholder: 'e.g. 123456' }), h('div', { class: 'hint' }, 'The number in that resource\'s address. Keys from it switch this plan on.'))),
       h('div', { class: 'row wrap' },
         h('label', { class: 'trustbox' }, h('input', { type: 'checkbox', id: 'p-hot', checked: !!p?.highlight }), 'Mark as "Most popular"'),
         p?.key === 'free' ? null : h('label', { class: 'trustbox' }, h('input', { type: 'checkbox', id: 'p-active', checked: p ? !!p.active : true }), 'For sale (shown on the pricing page)')),
@@ -589,22 +588,22 @@ async function plansPage() {
       h('div', { class: 'row', style: { 'justify-content': 'flex-end', marginTop: '10px' } }, h('button', { class: 'btn', onclick: () => dlg.close() }, 'Cancel'),
         h('button', { class: 'btn primary', onclick: async () => {
           const body = { name: f('p-name').value, description: f('p-desc').value, interval: f('p-interval').value, price_cents: Math.round(Number(f('p-price').value) * 100), currency: f('p-cur').value,
-            max_products: Number(f('p-prod').value), max_licenses: Number(f('p-lic').value), features: f('p-feat').value, highlight: f('p-hot').checked, active: f('p-active') ? f('p-active').checked : true, sort: Number(f('p-sort').value) };
+            max_products: Number(f('p-prod').value), max_licenses: Number(f('p-lic').value), features: f('p-feat').value, ...(f('p-buy') ? { buy_url: f('p-buy').value.trim(), bbb_resource_id: f('p-rid').value.trim() } : {}), highlight: f('p-hot').checked, active: f('p-active') ? f('p-active').checked : true, sort: Number(f('p-sort').value) };
           try { isNew ? await api('POST', '/api/admin/plans', { ...body, key: f('p-key').value }) : await api('PATCH', `/api/admin/plans/${p.key}`, body); dlg.close(); toast('Saved'); plansPage(); } catch (e) { toast(e.message, true); }
         } }, 'Save')));
     dlg.addEventListener('close', () => dlg.remove()); document.body.append(dlg); dlg.showModal();
   };
   render(head('Plans', h('button', { class: 'btn primary', onclick: () => edit(null) }, '+ New plan')),
     h('div', { class: 'card', style: { marginBottom: '16px' } },
-      h('div', { class: 'row spread wrap' }, h('h3', null, 'Card payments (Stripe)'), h('span', { class: 'chip ' + (st.configured && st.webhook_configured ? 'active' : st.configured ? 'idle' : 'blocked') }, st.configured && st.webhook_configured ? 'Ready' : st.configured ? 'Add the webhook secret' : 'Not set up')),
-      h('p', { class: 'muted', style: { fontSize: '14px', margin: '6px 0 12px' } }, st.configured ? 'Customers can buy from the pricing page. Plans you give by hand under Customers work either way.' : 'Without Stripe, the pricing page shows a contact button instead of Buy, and you give plans by hand under Customers. Setup steps: docs/BILLING.md'),
-      h('label', null, 'Webhook address to enter in Stripe'), h('div', { class: 'url-row' }, h('input', { class: 'mono', readonly: true, value: st.webhook_url || '', onclick: e => e.target.select() }), h('button', { class: 'btn sm', onclick: () => copy(st.webhook_url) }, 'Copy')),
-      h('div', { class: 'hint' }, 'Events to send: checkout.session.completed, customer.subscription.created, customer.subscription.updated, customer.subscription.deleted, invoice.paid, invoice.payment_failed.')),
+      h('h3', { style: { marginBottom: '4px' } }, 'Selling plans on BuiltByBit'),
+      h('p', { class: 'muted', style: { fontSize: '14px', margin: '6px 0 10px' } }, 'Plans are bought on BuiltByBit: one monthly and one one-time resource. Each resource contains a small file with the "External license key" placeholder; whoever downloads it gets an access key and pastes it under Billing in their dashboard to switch the plan on. Enter each plan\'s BuiltByBit link and resource id below (Edit). Step by step: docs/BILLING.md.'),
+      h('label', null, 'URL for the placeholder (same for every resource)'), h('div', { class: 'url-row' }, h('input', { class: 'mono', readonly: true, value: s.bbb_callback_url || '', onclick: e => e.target.select() }), h('button', { class: 'btn sm', onclick: () => copy(s.bbb_callback_url) }, 'Copy')),
+      h('div', { class: 'hint' }, 'The secret is the one under Settings, BuiltByBit integration. Without a buy link the pricing page shows your Discord or email instead.')),
     h('div', { class: 'card table-card' }, h('table', null,
       h('thead', null, h('tr', null, ['Plan', 'Price', 'Plugins', 'Licenses', 'Customers', ''].map(t => h('th', null, t)))),
       h('tbody', null, plans.map(p => h('tr', null,
         h('td', null, h('b', null, p.name), ' ', h('span', { class: 'faint keycell' }, p.key), p.highlight ? h('span', { class: 'tag', style: { marginLeft: '8px' } }, 'Popular') : null, !p.active ? h('span', { class: 'chip idle', style: { marginLeft: '8px' } }, 'Hidden') : null),
-        h('td', null, money(p)), h('td', { class: 'muted' }, cap(p.max_products)), h('td', { class: 'muted' }, cap(p.max_licenses)), h('td', { class: 'muted' }, p.customers),
+        h('td', null, money(p), p.bbb_resource_id ? h('div', { class: 'faint', style: { fontSize: '12px' } }, `BuiltByBit resource ${p.bbb_resource_id}`) : p.key !== 'free' ? h('div', { class: 'faint', style: { fontSize: '12px' } }, 'no resource id yet') : null), h('td', { class: 'muted' }, cap(p.max_products)), h('td', { class: 'muted' }, cap(p.max_licenses)), h('td', { class: 'muted' }, p.customers),
         h('td', null, h('div', { class: 'row', style: { 'justify-content': 'flex-end' } }, h('button', { class: 'btn sm', onclick: () => edit(p) }, 'Edit'),
           p.key === 'free' ? null : h('button', { class: 'btn sm danger', onclick: async () => { if (await confirmDialog('Delete this plan?', `"${p.name}" is removed. Plans customers are on cannot be deleted: hide them instead.`, 'Delete')) { try { await api('DELETE', `/api/admin/plans/${p.key}`); toast('Deleted'); plansPage(); } catch (e) { toast(e.message, true); } } } }, 'Delete')))))))));
 }
@@ -699,7 +698,7 @@ async function settings() {
     s.password_login === false ? h('div', { class: 'hint' }, 'Password login is turned off in the server config.') : h('div', { class: 'hint' }, 'The admin password still works as a backup way in.'));
 
   const site = window.__me.role === 'platform' && WS.house;   // site-wide cards are the owner's, in the owner's own workspace
-  render(head('Settings'), site && !s.public_url_set && !/^(localhost|127\.0\.0\.1)$/.test(location.hostname) ? h('div', { class: 'notice warn' }, h('b', null, 'Set LICENSEX_PUBLIC_URL. '), 'Without it, download links, the address baked into plugins and the sign-in callbacks below are guessed from the browser request and can be wrong behind a proxy. Set it to your real https address (see DEPLOY.md).') : null, site ? h('div', { class: 'notice ok' }, 'Site-wide settings (branding, sign-in, backups) are below the workspace settings. Customers only see the workspace settings.') : null, site ? access : null, bbb, site ? paymentsCard(s, settings) : null, site || (WS.house && s.site_access) ? brand : null, site ? backup : null, h('div', { class: 'card', style: { maxWidth: '680px' } },
+  render(head('Settings'), site && !s.public_url_set && !/^(localhost|127\.0\.0\.1)$/.test(location.hostname) ? h('div', { class: 'notice warn' }, h('b', null, 'Set LICENSEX_PUBLIC_URL. '), 'Without it, download links, the address baked into plugins and the sign-in callbacks below are guessed from the browser request and can be wrong behind a proxy. Set it to your real https address (see DEPLOY.md).') : null, site ? h('div', { class: 'notice ok' }, 'Site-wide settings (branding, sign-in, backups) are below the workspace settings. Customers only see the workspace settings.') : null, site ? access : null, bbb, site || (WS.house && s.site_access) ? brand : null, site ? backup : null, h('div', { class: 'card', style: { maxWidth: '680px' } },
     num('default_limit', 'Default server limit', 'Applies to licenses with no group and no override. -1 = unlimited.', -1),
     num('heartbeat_minutes', 'Plugin check-in interval (minutes)', 'How often running plugins re-validate. Removals and blocks take effect within this window.', 1),
     toggle('claims_enabled', 'Issue licenses on download', 'When off, new downloads cannot claim a license (existing licenses keep working).'),

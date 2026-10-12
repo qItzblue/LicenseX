@@ -100,6 +100,7 @@ export function openDb(path) {
       plan_status            TEXT NOT NULL DEFAULT 'active' CHECK (plan_status IN ('active','past_due','canceled')),
       plan_until             INTEGER,                    -- end of the paid period; NULL = no end (free, lifetime, manual forever)
       plan_source            TEXT NOT NULL DEFAULT 'free' CHECK (plan_source IN ('free','manual','stripe')),
+      -- the two stripe_* columns and the stripe_events table are unused since plans are sold on BuiltByBit; they stay so older databases and backups still open
       stripe_customer_id     TEXT,
       stripe_subscription_id TEXT,
       suspended              INTEGER NOT NULL DEFAULT 0,
@@ -159,6 +160,14 @@ export function openDb(path) {
       member_id  INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
       product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
       PRIMARY KEY (member_id, product_id)
+    );
+    -- Plans sold on BuiltByBit: a BuiltByBit access key (a license in the owner's workspace) can switch a plan on once.
+    CREATE TABLE IF NOT EXISTS plan_redemptions (
+      license_id   INTEGER PRIMARY KEY REFERENCES licenses(id) ON DELETE CASCADE,
+      workspace_id INTEGER NOT NULL,
+      plan_key     TEXT NOT NULL,
+      redeemed_at  INTEGER NOT NULL,
+      period_end   INTEGER
     );
     -- Buyer accounts: a signed-in buyer (user_key = "<provider>:<provider user id>") has these licenses in "My licenses".
     CREATE TABLE IF NOT EXISTS buyer_links (
@@ -221,6 +230,10 @@ export function migrate(db) {
   }
   if (!hasCol(db, 'licenses', 'buyer_email')) db.exec("ALTER TABLE licenses ADD COLUMN buyer_email TEXT NOT NULL DEFAULT ''");
   if (!hasCol(db, 'products', 'bbb_resource_id')) db.exec("ALTER TABLE products ADD COLUMN bbb_resource_id TEXT NOT NULL DEFAULT ''");
+  // plans are bought on BuiltByBit: where to buy, and which BuiltByBit resource hands out the key for this plan
+  if (!hasCol(db, 'plans', 'buy_url')) db.exec("ALTER TABLE plans ADD COLUMN buy_url TEXT NOT NULL DEFAULT ''");
+  if (!hasCol(db, 'plans', 'bbb_resource_id')) db.exec("ALTER TABLE plans ADD COLUMN bbb_resource_id TEXT NOT NULL DEFAULT ''");
+  if (!hasCol(db, 'workspaces', 'plan_note')) db.exec("ALTER TABLE workspaces ADD COLUMN plan_note TEXT NOT NULL DEFAULT ''");
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_licenses_product ON licenses(product_id);
     CREATE INDEX IF NOT EXISTS idx_licenses_buyer ON licenses(buyer_email);

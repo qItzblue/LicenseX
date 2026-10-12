@@ -22,17 +22,19 @@ const problems = [];
 async function newPage(context, label) {
   const page = await context.newPage();
   page.on('pageerror', e => problems.push(`${label}: script error: ${e.message}`));
-  page.on('console', m => { if (m.type() === 'error' && !/favicon|fonts\.g|status of 401/.test(m.text())) problems.push(`${label}: console: ${m.text()}`); });
+  page.on('console', m => { if (m.type() === 'error' && !/favicon|fonts\.g|status of 4\d\d/.test(m.text())) problems.push(`${label}: console: ${m.text()}`); });
   return page;
 }
 async function walk(page, label, expected) {
   await page.waitForSelector('nav a', { timeout: 5000 });
   const pages = await page.$$eval('nav a', as => as.map(a => a.dataset.page));
   assert.deepEqual(pages, expected, `${label}: sidebar pages`);
+  let previous = '';
   for (const p of pages) {
     await page.evaluate(h => { location.hash = h; }, p);
-    await page.waitForFunction(h => document.querySelector('nav a.on')?.dataset.page === h, p);
-    await page.waitForSelector('#view h1', { timeout: 5000 });
+    // a page is drawn once #view shows a heading different from the previous page's (the old heading would satisfy a plain selector)
+    await page.waitForFunction(prev => { const t = document.querySelector('#view h1')?.innerText.trim(); return !!t && t !== prev; }, previous, { timeout: 8000 });
+    previous = await page.evaluate(() => document.querySelector('#view h1').innerText.trim());
     const text = await page.$eval('#view', v => v.innerText);
     assert.ok(text.trim().length > 10, `${label}/${p}: page is empty`);
     assert.ok(!/\b(undefined|null|\[object Object\])\b/.test(text), `${label}/${p}: shows a raw value: ${text.match(/.{0,30}\b(undefined|null|\[object Object\])\b.{0,30}/)?.[0]}`);
@@ -92,6 +94,21 @@ try {
   // 3. the public pages
   const pub = await newPage(await browser.newContext(), 'public');
   for (const path of ['/', '/pricing', '/login']) { await pub.goto(base + path); await pub.waitForLoadState('networkidle'); }
+
+  // 3b. plans are bought on BuiltByBit: the pricing page links there, and the dashboard has the key form
+  const adminCookie = (await owner.cookies()).map(c => `${c.name}=${c.value}`).join('; ');
+  const plans = await api('GET', '/api/admin/plans', null, adminCookie);
+  for (const [key, rid] of [['pro', '7001'], ['lifetime', '7002']]) await api('PATCH', `/api/admin/plans/${key}`, { ...plans.find(p => p.key === key), buy_url: `https://builtbybit.com/resources/${key}.${rid}/`, bbb_resource_id: rid }, adminCookie);
+  await pub.goto(base + '/pricing');
+  await pub.waitForSelector('a:has-text("on BuiltByBit")');
+  assert.deepEqual(await pub.$$eval('a:has-text("on BuiltByBit")', as => as.map(a => a.getAttribute('href'))), ['https://builtbybit.com/resources/pro.7001/', 'https://builtbybit.com/resources/lifetime.7002/']);
+  assert.match(await pub.$eval('#payNote', n => n.textContent), /bought on BuiltByBit/);
+  await b.goto(base + '/dashboard#billing');
+  await b.waitForSelector('#redeem-key');
+  assert.match(await b.$eval('#view', v => v.innerText), /Activate a key[\s\S]*Plans[\s\S]*BuiltByBit/);
+  await b.fill('#redeem-key', 'LX-AAAA-BBBB-CCCC-DDDD'); await b.click('#view button:has-text("Activate")');
+  await b.waitForSelector('.toast.err');
+  assert.match(await b.$eval('.toast.err', n => n.textContent), /not a valid access key/);
 
   await buyerFlows();   // sign-in pages, buyer portal, redirects (defined at the end of the file)
 
@@ -168,7 +185,9 @@ async function buyerFlows() {
   await pub.goto(base + '/pricing');
   await pub.waitForSelector('.plan');
   assert.equal(await pub.getAttribute('#ctaBtn', 'href'), '/login/creator');
-  assert.ok((await pub.$$eval('.plan a.btn', as => as.map(a => a.getAttribute('href')))).every(h => h === '/login/creator'), 'pricing buttons lead through the creator sign-in');
+  const planLinks = await pub.$$eval('.plan a.btn', as => as.map(a => a.getAttribute('href')));
+  assert.equal(planLinks[0], '/login/creator', 'the free plan leads through the creator sign-in');
+  assert.ok(planLinks.slice(1).every(h => h.startsWith('https://builtbybit.com/')), 'the paid plans are bought on BuiltByBit');
 
   // 2. a buyer signs in through the page (real redirect flow against the fake provider) and lands on the portal
   const buyerCtx = await withCookie(null);

@@ -23,8 +23,9 @@ Settings can come from `licensex.config.json` or environment variables (variable
 proxies are in front; default 1, use 2 for Cloudflare in front of Render).
 
 **Run it as a paid service:** other plugin developers sign up for a private workspace (their own plugins, licenses and
-settings), pick a plan on **/pricing**, and pay with Stripe or get a plan from you. You edit the plans, see every
-customer, and can open their workspace to help. Set up in **[docs/BILLING.md](docs/BILLING.md)**.
+settings), pick a plan on **/pricing**, buy it on **BuiltByBit** (one monthly plan, one one-time plan) and activate the key
+they get there, or get a plan from you. You edit the plans, see every customer, and can open their workspace to help.
+Set up in **[docs/BILLING.md](docs/BILLING.md)**.
 
 **Build from source:** upload a Maven/Gradle project as a zip, get the compiled jar (after an inspection report), and turn it
 into a product in one click. Needs a JDK and Maven on the server. See **[docs/BUILD.md](docs/BUILD.md)**.
@@ -49,7 +50,8 @@ longer run (if you allow self-service removal). Details in [docs/LOGIN.md](docs/
 | `server/auth.js` | Google / Discord / GitHub OAuth sign-in and the verified-email admin check. |
 | `server/buyers.js` | Buyer accounts: `/api/account` (list, link a key, unlink, remove a server). |
 | `web/login.html`, `web/account.html` | Sign-in pages (chooser, creator, buyer) and the buyer portal "My licenses". |
-| `server/billing.js` | Stripe Checkout, billing portal and webhook handling (no SDK), and plan entitlements. |
+| `server/plansales.js` | Plans sold on BuiltByBit: access keys, activation, monthly/one-time periods. |
+| `server/rbac.js`, `team.js` | Roles, permissions and product-limited team members. |
 | `server/builder.js`, `zipx.js` | Source inspection (risk scan) and the Maven/Gradle build runner; safe zip extraction. |
 | `server/backup.js` | Backup / restore (admin -> Settings -> Backup & move) for moving between hosts. |
 | `plugin/` | `LicenseClient` (drop-in, no deps) + an example Bukkit/Paper plugin (`mvn package`). |

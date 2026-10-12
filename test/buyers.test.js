@@ -340,7 +340,7 @@ test('buyers are isolated from each other and from the creators\' admin API', as
 
   // a buyer account is no admin account, even for the very license it has linked
   for (const [m, p, b] of [['GET', '/api/admin/licenses'], ['GET', `/api/admin/licenses/${la.id}`], ['PATCH', `/api/admin/licenses/${la.id}`, { owner: 'x' }], ['DELETE', `/api/admin/licenses/${la.id}`],
-    ['GET', '/api/admin/servers'], ['DELETE', `/api/admin/servers/${sa.id}`], ['GET', '/api/admin/stats'], ['GET', '/api/admin/settings'], ['POST', '/api/billing/portal'], ['GET', '/api/admin/audit']])
+    ['GET', '/api/admin/servers'], ['DELETE', `/api/admin/servers/${sa.id}`], ['GET', '/api/admin/stats'], ['GET', '/api/admin/settings'], ['GET', '/api/admin/audit']])
     assert.equal((await call(m, p, b, ann)).status, 401, `${m} ${p}`);
 
   // and a creator is only a buyer for what is linked or emailed to HER: her own workspace's licenses do not appear

@@ -6,12 +6,11 @@ import { randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
 import { openDb, DatabaseSync } from './db.js';
 import { createBackup, restoreBackup, RestoreError } from './backup.js';
 import { createBuildService, BuildError } from './builder.js';
-import { createBilling, verifySignature, StripeError } from './billing.js';
+import { planForResource, periodTag, lookupKey, redeemKey, RedeemError } from './plansales.js';
 import { providerDefs, authorizeUrl, exchangeCode, fetchProfile, parseEmails, normEmail, EMAIL_RE } from './auth.js';
 import { createCore, normalizeKey, KEY_RE, hash, now, PlanError, HOUSE } from './core.js';
 import { injectFiles } from './jarstamp.js';
 import { wrapJar, checkWrappable, WrapError } from './wrapjar.js';
-import { registerStripeConnect } from './stripe-connect.js';
 import { registerBuyers } from './buyers.js';
 import { registerTeam } from './team.js';
 import { accessFor, slotsFor } from './rbac.js';
@@ -44,13 +43,6 @@ for (const p of Object.keys(PROVIDERS)) {
   const secret = process.env[`LICENSEX_${p.toUpperCase()}_CLIENT_SECRET`] || fileConfig.oauth?.[p]?.clientSecret;
   if (id && secret) oauthConf[p] = { clientId: String(id), clientSecret: String(secret) };
 }
-// Stripe (optional): without a secret key the pricing page just offers "contact us" and plans are granted by hand.
-const STRIPE = {
-  secretKey: process.env.LICENSEX_STRIPE_SECRET_KEY || fileConfig.stripe?.secretKey || '',
-  webhookSecret: process.env.LICENSEX_STRIPE_WEBHOOK_SECRET || fileConfig.stripe?.webhookSecret || '',
-  apiBase: process.env.LICENSEX_STRIPE_API_BASE || 'https://api.stripe.com',   // only overridden by the tests
-};
-if (STRIPE.secretKey && !/^(sk|rk)_(test|live)_/.test(STRIPE.secretKey)) console.error('[LicenseX] The Stripe secret key should start with sk_test_ or sk_live_ (a "restricted" rk_ key also works).');
 // Emails that are admins no matter what the database says (so you can never lock yourself out of the settings page).
 const CONFIG_ADMIN_EMAILS = parseEmails(process.env.LICENSEX_ADMIN_EMAILS ?? fileConfig.adminEmails ?? '');
 // 'closed' = only people you give a plan to by hand can have a workspace (no self-service signup)
@@ -231,7 +223,9 @@ route('POST', '/api/v1/builtbybit/license', async ctx => {
   const gid = Number(core.getSetting('bbb_group_id', w.id)) || null;
   // when the developer told us which product this BuiltByBit resource is, the license is linked to it
   const linked = rid ? db.prepare('SELECT id FROM products WHERE workspace_id=? AND bbb_resource_id=?').get(w.id, rid) : null;
-  const r = core.claim({ ws: w.id, user: uid, name: `BuiltByBit #${uid}`, product: `BuiltByBit resource ${rid || '?'}`, product_id: linked?.id ?? null,
+  // a resource that is one of the owner's PLANS hands out access keys (see plansales.js); a repeating plan gets a fresh key every period
+  const sold = w.id === HOUSE ? planForResource(db, rid) : null, tag = sold ? periodTag(sold.interval) : '';
+  const r = core.claim({ ws: w.id, user: uid, name: `BuiltByBit #${uid}`, product: `BuiltByBit resource ${rid || '?'}${tag ? ' ' + tag : ''}`, product_id: linked?.id ?? null,
     group_id: gid && db.prepare('SELECT 1 FROM license_groups WHERE id=? AND workspace_id=?').get(gid, w.id) ? gid : null, ip: ctx.ip, device: hash('bbb') });
   if (!r.ok) return [r.code === 'PLAN_LIMIT' ? 402 : 503, r.message];
   return [200, r.key];
@@ -436,7 +430,9 @@ route('GET', '/api/admin/licenses/:id', async ctx => {
     .all(ctx.wsId, lic.issued_ip, lic.id, ...scopeSql(ctx, 'l.product_id')[1]) : [];
   const product_name = lic.product_id ? db.prepare('SELECT name FROM products WHERE id=?').get(lic.product_id)?.name || '' : '';
   const servers = can(ctx, 'servers.view') ? db.prepare('SELECT * FROM servers WHERE license_id = ? ORDER BY first_seen').all(lic.id) : [];
-  return [200, { ...licenseRow({ ...lic, product_name }), servers, same_ip }];
+  // a key that switches on a LicenseX plan (the owner's workspace only): who used it, and for which plan
+  const redeemed = ctx.wsId === HOUSE ? db.prepare('SELECT r.plan_key, r.redeemed_at, r.period_end, w.name workspace FROM plan_redemptions r JOIN workspaces w ON w.id = r.workspace_id WHERE r.license_id = ?').get(lic.id) || null : null;
+  return [200, { ...licenseRow({ ...lic, product_name }), servers, same_ip, redeemed }];
 }, { perm: 'licenses.view' });
 
 const LICENSE_EDIT_FIELDS = ['owner', 'note', 'group_id', 'max_servers', 'expires_at', 'buyer_email', 'product_id'];
@@ -763,7 +759,6 @@ route('GET', '/api/admin/settings', async ctx => {
   if (ctx.admin.role === 'platform') Object.assign(out, {
     admin_emails: parseEmails(core.getSetting('admin_emails')), admin_emails_config: CONFIG_ADMIN_EMAILS, password_login: !DISABLE_PASSWORD_LOGIN,
     oauth: Object.fromEntries(Object.keys(PROVIDERS).map(p => [p, { label: PROVIDERS[p].label, configured: !!oauthConf[p], callback_url: `${publicBase(ctx.req)}/auth/${p}/callback` }])),
-    stripe: { configured: !!STRIPE.secretKey, webhook_configured: !!STRIPE.webhookSecret, webhook_url: `${publicBase(ctx.req)}/api/stripe/webhook` },
   });
   return [200, out];
 }, { perm: 'settings.manage' });
@@ -807,35 +802,33 @@ route('PUT', '/api/admin/settings', async ctx => {
 route('GET', '/api/admin/audit', async ctx => [200, db.prepare('SELECT * FROM audit WHERE workspace_id=? ORDER BY id DESC LIMIT ?').all(ctx.wsId, Math.max(1, Math.min(Number(ctx.url.searchParams.get('limit')) || 100, 500)))], { perm: 'audit.view' });
 
 // Workspaces, plans and billing ----------------------------------------------------
-const billing = createBilling({ db, core, cfg: STRIPE, log: (a, t, d) => console.error(`[LicenseX] ${a} ${t} ${d}`) });
 const slugKey = /^[a-z0-9][a-z0-9-]{1,23}$/;
 const planView = p => ({ key: p.key, name: p.name, description: p.description, price_cents: p.price_cents, currency: p.currency, interval: p.interval,
-  max_products: p.max_products, max_licenses: p.max_licenses, features: p.features.split('\n').map(x => x.trim()).filter(Boolean), highlight: !!p.highlight });
-const asStripeHttp = async fn => { try { return await fn(); } catch (e) { if (e instanceof StripeError) throw new HttpError(e.status, e.message); throw e; } };
+  max_products: p.max_products, max_licenses: p.max_licenses, features: p.features.split('\n').map(x => x.trim()).filter(Boolean), highlight: !!p.highlight,
+  buy_url: p.buy_url || '' });
 
 function workspaceSummary(w) {
   const plan = core.planOf(w.id), entitled = core.entitledPlanKey(w);
   return { id: w.id, name: w.name, house: w.id === HOUSE, owner_email: w.owner_email, created_at: w.created_at,
     suspended: !!w.suspended, suspended_reason: w.suspended_reason,
     plan: planView({ features: '', currency: 'usd', description: '', highlight: 0, ...plan }),
-    plan_key: w.plan_key, plan_status: w.plan_status, plan_until: w.plan_until, plan_source: w.plan_source,
+    plan_key: w.plan_key, plan_status: w.plan_status, plan_until: w.plan_until, plan_source: w.plan_source, plan_note: w.plan_note || '',
     lapsed: w.plan_key !== 'free' && entitled === 'free', usage: core.usage(w.id),
-    heartbeat_minutes: Number(core.getSetting('heartbeat_minutes', w.id)) || 1,
-    billing: { stripe: billing.enabled(), can_portal: billing.enabled() && !!w.stripe_customer_id } };
+    heartbeat_minutes: Number(core.getSetting('heartbeat_minutes', w.id)) || 1 };
 }
 route('GET', '/api/workspace', async ctx => [200, workspaceSummary(db.prepare('SELECT * FROM workspaces WHERE id=?').get(ctx.wsId))], { admin: true, allowSuspended: true });
 
-// Public pricing: the plans that are for sale, whether card payments are on, and how else to reach the owner.
+// Public pricing: the plans that are for sale (bought on BuiltByBit, where each plan's link points) and how else to reach the owner.
 route('GET', '/api/public/pricing', async ctx => {
   const plans = db.prepare('SELECT * FROM plans WHERE active=1 ORDER BY sort, price_cents').all().map(planView);
   const u = sessionUser(ctx.req), w = workspaceOfUser(u);
-  return [200, { plans, payments: billing.enabled(), signups: SIGNUPS_OPEN, site: Object.fromEntries(SITE_KEYS.map(k => [k, core.getSetting(k)])),
+  return [200, { plans, signups: SIGNUPS_OPEN, site: Object.fromEntries(SITE_KEYS.map(k => [k, core.getSetting(k)])),
     current: w ? { plan_key: core.entitledPlanKey(w), status: w.plan_status, until: w.plan_until } : null }];
 });
 
 // A signed-in person gets their own private workspace (on the Free plan). Needs a verified email: that is who owns it.
-const createWorkspaceFor = u => {
-  if (!SIGNUPS_OPEN) throw new HttpError(403, 'Signups are closed. Contact the site owner for an invitation.');
+const createWorkspaceFor = (u, { force = false } = {}) => {
+  if (!SIGNUPS_OPEN && !force) throw new HttpError(403, 'Signups are closed. Contact the site owner for an invitation.');
   if (!u.email) throw new HttpError(400, `${u.p} did not share a verified email address, so we cannot create an account. Sign in with a provider that does.`);
   const r = db.prepare('INSERT INTO workspaces (name, owner_email, owner_name, bbb_secret, created_at) VALUES (?,?,?,?,?)')
     .run(str(u.name, 60) || u.email.split('@')[0], u.email, str(u.name, 80), newSecret(), now());
@@ -852,45 +845,30 @@ route('POST', '/api/workspace/ensure', async ctx => {
   return [201, workspaceSummary(createWorkspaceFor(u))];
 });
 
-route('POST', '/api/billing/checkout', async ctx => {
+// Activating a plan that was bought on BuiltByBit: the buyer pastes the access key from the file they downloaded there.
+// Only the owner of a workspace can switch its plan on. See server/plansales.js.
+route('POST', '/api/billing/redeem', async ctx => {
   const u = sessionUser(ctx.req);
   if (!u) throw new HttpError(401, 'Sign in first.');
-  if (!rateLimit('checkout:' + (u.email || u.id), 10, 60e3)) throw new HttpError(429, 'Slow down a little.');
+  if (!rateLimit('redeem:' + (u.email || u.id), 10, 60e3) || !rateLimit('redeem-ip:' + ctx.ip, 30, 60e3)) throw new HttpError(429, 'Too many attempts. Wait a minute.');
   const b = await body(ctx.req);
-  const plan = db.prepare('SELECT * FROM plans WHERE key=? AND active=1').get(str(b.plan, 30));
-  if (!plan || plan.price_cents <= 0) throw new HttpError(400, 'That plan is not for sale.');
-  if (!billing.enabled()) throw new HttpError(503, 'Online payments are not set up yet. Please contact us to buy this plan.');
   let w = workspaceOfUser(u);
-  if (!w) w = createWorkspaceFor(u);
-  const entitled = core.entitledPlanKey(w);
-  if (entitled === plan.key && plan.interval === 'once') throw new HttpError(409, `You already have the ${plan.name} plan.`);
-  if (w.stripe_subscription_id && w.plan_source === 'stripe' && entitled !== 'free' && w.plan_status !== 'canceled')
-    throw new HttpError(409, 'You already have an active subscription. Open Billing in your dashboard to change or cancel it.');
-  const url = await asStripeHttp(() => billing.checkout({ ws: w, plan, email: u.email, siteName: core.getSetting('site_name'), base: publicBase(ctx.req) }));
-  core.log('user', 'billing.checkout', plan.key, u.email, w.id);
-  return [200, { url }];
-});
-route('POST', '/api/billing/portal', async ctx => {
-  const u = sessionUser(ctx.req), w = workspaceOfUser(u);
-  if (!w) throw new HttpError(401, 'Sign in first.');
-  return [200, { url: await asStripeHttp(() => billing.portal({ ws: w, base: publicBase(ctx.req) })) }];
-});
-
-// Stripe calls this. The signature is checked against the exact bytes received, and nothing is trusted before that.
-route('POST', '/api/stripe/webhook', async ctx => {
-  if (!STRIPE.webhookSecret) throw new HttpError(503, 'Webhook secret not configured');
-  const chunks = []; let size = 0;
-  for await (const c of ctx.req) { size += c.length; if (size > 1024 * 1024) throw new HttpError(413, 'Too large'); chunks.push(c); }
-  const raw = Buffer.concat(chunks);
-  if (!verifySignature(raw, ctx.req.headers['stripe-signature'], STRIPE.webhookSecret)) throw new HttpError(400, 'Bad signature');
-  let event; try { event = JSON.parse(raw.toString('utf8')); } catch { throw new HttpError(400, 'Bad JSON'); }
-  try { return [200, { received: true, note: billing.handleEvent(event) }]; }
-  catch (e) { console.error('[LicenseX] stripe event failed:', e.message); throw new HttpError(500, 'Handler failed (Stripe will retry)'); }
+  try {
+    if (!w) {                          // a first-time buyer: a valid key is their invitation, so their account is created together with the plan (even when signups are closed)
+      lookupKey({ db, core, key: b.key });
+      if (!rateLimit('ws:' + ctx.ip, Number(process.env.LICENSEX_SIGNUPS_PER_IP_HOUR || 10), 3600e3)) throw new HttpError(429, 'Too many accounts created from this address. Try again later.');
+      w = createWorkspaceFor(u, { force: true });
+    }
+    const { plan, until } = redeemKey({ db, core, workspace: w, key: b.key });
+    return [200, { ok: true, message: `${plan.name} is active${until ? ` until ${new Date(until * 1000).toLocaleDateString('en-GB')}` : ', with no end date'}.`, workspace: workspaceSummary(db.prepare('SELECT * FROM workspaces WHERE id=?').get(w.id)) }];
+  } catch (e) {
+    if (e instanceof RedeemError) throw new HttpError(e.status, e.message, e.code);
+    throw e;
+  }
 });
 
 // Platform: customers ------------------------------------------------------------
-const customerRow = w => ({ ...workspaceSummary(w), licenses: core.usage(w.id).licenses, products: core.usage(w.id).products,
-  stripe_customer_id: w.stripe_customer_id, stripe_subscription_id: w.stripe_subscription_id });
+const customerRow = w => ({ ...workspaceSummary(w), licenses: core.usage(w.id).licenses, products: core.usage(w.id).products });
 route('GET', '/api/admin/customers', async () => [200, db.prepare('SELECT * FROM workspaces ORDER BY id').all().map(customerRow)], { perm: 'platform.customers' });
 // Invite: create a workspace for an email address. Whoever signs in with that VERIFIED email owns it, even when signups are closed.
 route('POST', '/api/admin/customers', async ctx => {
@@ -947,7 +925,12 @@ const planFields = (b, existing) => {
   const currency = str(b.currency || 'usd', 3).toLowerCase();
   if (!/^[a-z]{3}$/.test(currency)) throw new HttpError(400, 'Currency is a 3-letter code such as usd or eur.');
   const features = String(b.features ?? '').split('\n').map(x => x.trim().slice(0, 90)).filter(Boolean).slice(0, 14).join('\n');
-  return { key, name, description: str(b.description, 140).trim(), price_cents: price, currency, interval,
+  const buy_url = httpUrl(b.buy_url, 'Buy link');
+  const bbb_resource_id = str(b.bbb_resource_id, 12).trim();
+  if (bbb_resource_id && !/^\d{1,12}$/.test(bbb_resource_id)) throw new HttpError(400, 'The BuiltByBit resource id is the number in the resource\'s address.');
+  if (bbb_resource_id && key === 'free') throw new HttpError(400, 'The Free plan is not sold.');
+  if (bbb_resource_id && db.prepare('SELECT 1 FROM plans WHERE bbb_resource_id=? AND key!=?').get(bbb_resource_id, key)) throw new HttpError(409, 'Another plan already uses that BuiltByBit resource id.');
+  return { key, name, description: str(b.description, 140).trim(), price_cents: price, currency, interval, buy_url: key === 'free' ? '' : buy_url, bbb_resource_id,
     max_products: int(b.max_products, { min: -1, max: 100000 }), max_licenses: int(b.max_licenses, { min: -1, max: 10000000 }),
     features, highlight: b.highlight ? 1 : 0, active: b.active === false ? 0 : 1, sort: int(b.sort ?? 0, { min: 0, max: 1000 }) };
 };
@@ -955,8 +938,8 @@ route('GET', '/api/admin/plans', async () => [200, db.prepare('SELECT p.*, (SELE
 route('POST', '/api/admin/plans', async ctx => {
   const f = planFields(await body(ctx.req), null);
   if (db.prepare('SELECT 1 FROM plans WHERE key=?').get(f.key)) throw new HttpError(409, 'A plan with that key exists');
-  db.prepare('INSERT INTO plans (key,name,description,price_cents,currency,interval,max_products,max_licenses,features,highlight,active,sort) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
-    .run(f.key, f.name, f.description, f.price_cents, f.currency, f.interval, f.max_products, f.max_licenses, f.features, f.highlight, f.active, f.sort);
+  db.prepare('INSERT INTO plans (key,name,description,price_cents,currency,interval,max_products,max_licenses,features,highlight,active,sort,buy_url,bbb_resource_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+    .run(f.key, f.name, f.description, f.price_cents, f.currency, f.interval, f.max_products, f.max_licenses, f.features, f.highlight, f.active, f.sort, f.buy_url, f.bbb_resource_id);
   core.log('admin', 'plan.create', f.key, f.name);
   return [201, { ok: true }];
 }, { platform: true });
@@ -964,8 +947,8 @@ route('PATCH', '/api/admin/plans/:key', async ctx => {
   const cur = db.prepare('SELECT * FROM plans WHERE key=?').get(ctx.params.key);
   if (!cur) throw new HttpError(404, 'Not found');
   const f = planFields({ ...cur, ...(await body(ctx.req)) }, cur);
-  db.prepare('UPDATE plans SET name=?,description=?,price_cents=?,currency=?,interval=?,max_products=?,max_licenses=?,features=?,highlight=?,active=?,sort=? WHERE key=?')
-    .run(f.name, f.description, f.price_cents, f.currency, f.interval, f.max_products, f.max_licenses, f.features, f.highlight, f.key === 'free' ? 1 : f.active, f.sort, f.key);
+  db.prepare('UPDATE plans SET name=?,description=?,price_cents=?,currency=?,interval=?,max_products=?,max_licenses=?,features=?,highlight=?,active=?,sort=?,buy_url=?,bbb_resource_id=? WHERE key=?')
+    .run(f.name, f.description, f.price_cents, f.currency, f.interval, f.max_products, f.max_licenses, f.features, f.highlight, f.key === 'free' ? 1 : f.active, f.sort, f.buy_url, f.bbb_resource_id, f.key);
   core.log('admin', 'plan.update', f.key, `${f.price_cents}${f.currency}/${f.interval}`);
   return [200, { ok: true }];
 }, { platform: true });
@@ -1043,8 +1026,7 @@ function handleDownload(req, res, slug, url) {
 // --- feature modules: each registers its own routes -------------------------------
 // They get the pieces of this file they need through one object, so they can live (and be tested) in their own files.
 const app = { route, db, core, HttpError, body, int, str, rateLimit, recentCount, clientIp, publicBase, sessionUser, cookies, isHttps, secure, sign, signToken, readToken, safeEq,
-  PUBLIC_URL, DATA, SESSION_SECRET, HOUSE, now, hash, normalizeKey, KEY_RE, billing, STRIPE, fileConfig, CONFIG_ADMIN_EMAILS, isAdminUser, workspaceOfUser };
-registerStripeConnect(app);
+  PUBLIC_URL, DATA, SESSION_SECRET, HOUSE, now, hash, normalizeKey, KEY_RE, fileConfig, CONFIG_ADMIN_EMAILS, isAdminUser, workspaceOfUser };
 registerBuyers(app);
 registerTeam(app);
 

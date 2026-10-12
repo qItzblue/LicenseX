@@ -74,7 +74,7 @@ test('every admin route is guarded: no silent open doors', () => {
     const path = re.source;
     if (!/^\^\\\/api\\\/(admin|workspace|billing)\\\//.test(path) && !/^\^\\\/api\\\/workspace\$/.test(path)) continue;
     if (/\\\/api\\\/admin\\\/(login|logout)\$/.test(path)) continue;
-    if (/\\\/api\\\/(workspace\\\/ensure|billing\\\/(checkout|portal))\$/.test(path)) continue; // act for the signed-in OWNER only (checked in their handlers)
+    if (/\\\/api\\\/(workspace\\\/ensure|billing\\\/redeem)\$/.test(path)) continue; // act for the signed-in OWNER only (checked in their handlers)
     const label = `${method} ${path}`;
     const guarded = opts.platform || opts.perm || (opts.admin && OPEN.has(`${method} ${path.replace(/\\\//g, '/').replace(/^\^|\$$/g, '')}`));
     assert.ok(guarded, `${label} has no permission guard`);
@@ -356,7 +356,7 @@ test('members never get owner-only powers, and a suspended workspace freezes the
   const sam = people.sam;
   for (const [m, p] of [['GET', '/api/admin/customers'], ['GET', '/api/admin/plans'], ['GET', '/api/admin/builds'], ['GET', '/api/admin/backup'], ['POST', '/api/admin/restore']])
     assert.equal((await call(m, p, null, sam)).status, 403, `${m} ${p}`);
-  assert.equal((await call('POST', '/api/billing/portal', null, sam)).status, 401, 'billing belongs to the owner');
+  assert.equal((await call('POST', '/api/billing/redeem', { key: 'LX-AAAA-BBBB-CCCC-DDDD' }, sam)).status, 404, 'activating a plan is for workspace owners; a member gets nothing from a bad key');
   await call('POST', `/api/admin/customers/${aliceWs}/suspend`, { suspended: true, reason: 'test' }, boss);
   const l = (await call('GET', '/api/admin/licenses', null, sam)).body.find(x => x.owner === 'loose');
   assert.equal((await call('PATCH', `/api/admin/licenses/${l.id}`, { note: 'nope' }, sam)).status, 403);

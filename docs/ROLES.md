@@ -51,7 +51,7 @@ the page (Administrator, Support, Developer, Viewer); change or delete them free
 their role says. Permissions that another permission needs come along automatically (editing licenses includes seeing them).
 
 In the **site owner's own workspace** two more exist: *See and manage customers* (plans, suspend, invite) and *Edit the
-public site name, tagline and links*. Running builds, backups, plan prices, Stripe and the list of admin emails always
+public site name, tagline and links*. Running builds, backups, plan prices and the list of admin emails always
 stay with the site owner.
 
 ## Which license belongs to which product

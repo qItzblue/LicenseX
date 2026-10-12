@@ -12,7 +12,7 @@ const EMPTY_ZIP = Buffer.concat([Buffer.from([0x50, 0x4b, 0x05, 0x06]), Buffer.a
 // The first four hold the customers (workspaces), their plans and per-workspace settings; backups made before
 // workspaces existed do not have them, and restoring such a backup leaves them alone.
 const WORKSPACE_TABLES = ['workspaces', 'plans', 'ws_settings', 'stripe_events', 'roles', 'members'];
-const TABLES = ['workspaces', 'plans', 'settings', 'ws_settings', 'roles', 'members', 'license_groups', 'licenses', 'servers', 'products', 'member_products', 'buyer_links', 'audit', 'stripe_events'];
+const TABLES = ['workspaces', 'plans', 'settings', 'ws_settings', 'roles', 'members', 'license_groups', 'licenses', 'servers', 'products', 'member_products', 'buyer_links', 'plan_redemptions', 'audit', 'stripe_events'];
 const WORKSPACE_OWNED = ['license_groups', 'licenses', 'products', 'audit', 'ws_settings', 'roles', 'members']; // rows that carry a workspace_id
 const MAX_ENTRY = 256 * 1024 * 1024; // per file inside the backup (plugin jars can be tens of MB)
 const PRODUCT_FILE = /^[a-z0-9-]{1,48}\.bin$/;
