@@ -23,13 +23,13 @@ export const PERMISSIONS = [
   { key: 'licenses.delete', group: 'Licenses', label: 'Delete licenses', scoped: true },
   { key: 'servers.view', group: 'Servers', label: 'See servers', scoped: true },
   { key: 'servers.manage', group: 'Servers', label: 'Disable, enable and remove servers', scoped: true },
-  { key: 'products.view', group: 'Products', label: 'See products and their download links', scoped: true },
+  { key: 'products.view', group: 'Products', label: 'See products and their download links (anyone holding a link can download and gets a license)', scoped: true },
   { key: 'products.edit', group: 'Products', label: 'Edit products (upload a new jar, rename, switch on/off, new download link)', scoped: true },
   { key: 'products.create', group: 'Products', label: 'Create new products', scoped: false },
   { key: 'products.delete', group: 'Products', label: 'Delete products', scoped: true },
   { key: 'groups.view', group: 'Groups', label: 'See license groups', scoped: true },
   { key: 'groups.manage', group: 'Groups', label: 'Create, change and delete license groups', scoped: false },
-  { key: 'audit.view', group: 'Workspace', label: 'See the activity log', scoped: false },
+  { key: 'audit.view', group: 'Workspace', label: 'See the activity log (it shows license keys)', scoped: false },
   { key: 'settings.manage', group: 'Workspace', label: 'Change workspace settings (includes the BuiltByBit secret)', scoped: false },
   { key: 'team.manage', group: 'Workspace', label: 'Manage roles and team members', scoped: false },
   { key: 'platform.customers', group: 'Whole service', label: 'See and manage customers (plans, suspend, invite)', scoped: false, house: true },
@@ -67,9 +67,9 @@ export function cleanPermissions(input, { house = false } = {}) {
 /** Roles every workspace starts with (the owner can change or delete them). */
 export const TEMPLATES = [
   { name: 'Administrator', description: 'Everything in the workspace except the plan and billing, which only the owner controls.', permissions: WORKSPACE_KEYS },
-  { name: 'Support', description: 'Looks up licenses and servers, blocks bad ones, removes servers.', permissions: ['licenses.view', 'licenses.edit', 'licenses.block', 'servers.view', 'servers.manage', 'products.view', 'groups.view'] },
+  { name: 'Support', description: 'Looks up licenses and servers, blocks bad ones, removes servers.', permissions: ['licenses.view', 'licenses.edit', 'licenses.block', 'servers.view', 'servers.manage', 'groups.view'] },
   { name: 'Developer', description: 'Manages plugin files and download links, can look at licenses.', permissions: ['products.view', 'products.edit', 'products.create', 'licenses.view', 'servers.view', 'groups.view'] },
-  { name: 'Viewer', description: 'Read-only.', permissions: ['licenses.view', 'servers.view', 'products.view', 'groups.view', 'audit.view'] },
+  { name: 'Viewer', description: 'Read-only: licenses, servers, groups and the activity log.', permissions: ['licenses.view', 'servers.view', 'groups.view', 'audit.view'] },
 ];
 
 /** The permission set one member really has: what the role says, minus what does not apply to them. */

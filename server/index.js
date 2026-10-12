@@ -225,7 +225,7 @@ route('POST', '/api/v1/builtbybit/license', async ctx => {
   const linked = rid ? db.prepare('SELECT id FROM products WHERE workspace_id=? AND bbb_resource_id=?').get(w.id, rid) : null;
   // a resource that is one of the owner's PLANS hands out access keys (see plansales.js); a repeating plan gets a fresh key every period
   const sold = w.id === HOUSE ? planForResource(db, rid) : null, tag = sold ? periodTag(sold.interval) : '';
-  const r = core.claim({ ws: w.id, user: uid, name: `BuiltByBit #${uid}`, product: `BuiltByBit resource ${rid || '?'}${tag ? ' ' + tag : ''}`, product_id: linked?.id ?? null,
+  const r = core.claim({ ws: w.id, user: uid, name: `BuiltByBit #${uid}`, product: `BuiltByBit resource ${rid || '?'}${tag ? ' ' + tag : ''}`, product_id: linked?.id ?? null, relink: true,
     group_id: gid && db.prepare('SELECT 1 FROM license_groups WHERE id=? AND workspace_id=?').get(gid, w.id) ? gid : null, ip: ctx.ip, device: hash('bbb') });
   if (!r.ok) return [r.code === 'PLAN_LIMIT' ? 402 : 503, r.message];
   return [200, r.key];
@@ -502,10 +502,12 @@ route('POST', '/api/admin/licenses/purge-unused', async ctx => {
 route('GET', '/api/admin/servers', async ctx => {
   const text = ctx.url.searchParams.get('q')?.trim();
   const [sw, sa] = scopeSql(ctx, 'l.product_id');
+  // a license key is a credential: it is only shown (and searchable) to people who may see licenses
+  const withKeys = can(ctx, 'licenses.view');
   const rows = db.prepare(`SELECT s.*, l.key license_key, l.owner FROM servers s JOIN licenses l ON l.id = s.license_id
-    WHERE l.workspace_id = ? AND ${sw} AND s.status != 'removed' ${text ? 'AND (s.name LIKE ? OR s.ip LIKE ? OR l.key LIKE ? OR l.owner LIKE ?)' : ''} ORDER BY s.last_seen DESC LIMIT 500`)
-    .all(ctx.wsId, ...sa, ...(text ? Array(4).fill(`%${text}%`) : []));
-  return [200, rows];
+    WHERE l.workspace_id = ? AND ${sw} AND s.status != 'removed' ${text ? (withKeys ? 'AND (s.name LIKE ? OR s.ip LIKE ? OR l.key LIKE ? OR l.owner LIKE ?)' : 'AND (s.name LIKE ? OR s.ip LIKE ?)') : ''} ORDER BY s.last_seen DESC LIMIT 500`)
+    .all(ctx.wsId, ...sa, ...(text ? Array(withKeys ? 4 : 2).fill(`%${text}%`) : []));
+  return [200, withKeys ? rows : rows.map(r => ({ ...r, license_key: '', owner: '' }))];
 }, { perm: 'servers.view' });
 /** A server of this workspace that the caller may touch (for a limited member: only on licenses of their products). */
 const ownServer = (ctx, id) => {
@@ -559,13 +561,13 @@ const productRow = (req, p) => {
 route('GET', '/api/admin/products', async ctx => {
   const [sw, sa] = scopeSql(ctx, 'p.id');
   const rows = db.prepare(`SELECT p.*, (SELECT COUNT(*) FROM licenses l WHERE l.product_id = p.id) licenses FROM products p WHERE p.workspace_id=? AND ${sw} ORDER BY p.id DESC`).all(ctx.wsId, ...sa);
-  return [200, rows.map(p => productRow(ctx.req, p))];
+  return [200, rows.map(p => productRow(ctx.req, can(ctx, 'licenses.view') ? p : { ...p, licenses: null }))];
 }, { perm: 'products.view' });
 // Names of the products the caller may link a license to (a limited member only gets theirs).
 route('GET', '/api/admin/products/options', async ctx => {
   const [sw, sa] = scopeSql(ctx, 'id');
   return [200, db.prepare(`SELECT id, name FROM products WHERE workspace_id=? AND ${sw} ORDER BY name`).all(ctx.wsId, ...sa)];
-}, { perm: ['licenses.view', 'licenses.create', 'products.view'] });
+}, { perm: ['licenses.create', 'licenses.edit', 'products.view'] });
 route('POST', '/api/admin/products', async ctx => {
   const b = await body(ctx.req);
   const name = str(b.name, 60).trim();
@@ -616,6 +618,8 @@ route('PATCH', '/api/admin/products/:id', async ctx => {
   if ('group_id' in b) f.group_id = ownGroup(ctx, b.group_id ? int(b.group_id, { min: 1 }) : null);
   if (b.regenerate_token) f.token = randomBytes(12).toString('base64url');
   if ('bbb_resource_id' in b) {
+    // linking a resource re-links licenses across the whole workspace and reveals which ids other products use, so it is not for people limited to some products
+    if (ctx.access.scope) throw new HttpError(403, 'Only people with access to all products can link a BuiltByBit resource.', 'FORBIDDEN');
     // which BuiltByBit resource this product is, so licenses BuiltByBit asks for are linked to it (and to the people limited to it)
     const rid = str(b.bbb_resource_id, 12).trim();
     if (rid && !/^\d{1,12}$/.test(rid)) throw new HttpError(400, 'The BuiltByBit resource id is the number in the resource\'s address.');
@@ -718,7 +722,8 @@ const groupFields = b => {
 };
 route('GET', '/api/admin/groups', async ctx => {
   const [sw, sa] = scopeSql(ctx, 'l.product_id');
-  return [200, db.prepare(`SELECT g.*, (SELECT COUNT(*) FROM licenses l WHERE l.group_id=g.id AND ${sw}) licenses FROM license_groups g WHERE g.workspace_id=? ORDER BY g.id`).all(...sa, ctx.wsId)];
+  const rows = db.prepare(`SELECT g.*, (SELECT COUNT(*) FROM licenses l WHERE l.group_id=g.id AND ${sw}) licenses FROM license_groups g WHERE g.workspace_id=? ORDER BY g.id`).all(...sa, ctx.wsId);
+  return [200, can(ctx, 'licenses.view') ? rows : rows.map(g => ({ ...g, licenses: null }))];
 }, { perm: 'groups.view' });
 route('POST', '/api/admin/groups', async ctx => {
   const [name, max, color] = groupFields(await body(ctx.req));
@@ -816,7 +821,13 @@ function workspaceSummary(w) {
     lapsed: w.plan_key !== 'free' && entitled === 'free', usage: core.usage(w.id),
     heartbeat_minutes: Number(core.getSetting('heartbeat_minutes', w.id)) || 1 };
 }
-route('GET', '/api/workspace', async ctx => [200, workspaceSummary(db.prepare('SELECT * FROM workspaces WHERE id=?').get(ctx.wsId))], { admin: true, allowSuspended: true });
+route('GET', '/api/workspace', async ctx => {
+  const summary = workspaceSummary(db.prepare('SELECT * FROM workspaces WHERE id=?').get(ctx.wsId));
+  if (ctx.admin.role !== 'member') return [200, summary];
+  // a team member needs to know where they are and whether it is frozen, not the owner's plan, billing or workspace-wide totals
+  const { id, name, house, suspended, suspended_reason, lapsed, heartbeat_minutes } = summary;
+  return [200, { id, name, house, suspended, suspended_reason, lapsed, heartbeat_minutes, plan: { key: '', name: '', max_products: -1, max_licenses: -1, price_cents: 0, interval: 'free' }, usage: null }];
+}, { admin: true, allowSuspended: true });
 
 // Public pricing: the plans that are for sale (bought on BuiltByBit, where each plan's link points) and how else to reach the owner.
 route('GET', '/api/public/pricing', async ctx => {
@@ -1001,7 +1012,7 @@ function handleDownload(req, res, slug, url) {
   // opening the raw link - there is nothing to match on, so that download gets a fresh license.
   const nonce = str(url.searchParams.get('nonce'), 128).trim();
   const r = core.claim({ ws: p.workspace_id, nonce: nonce.includes('%%') || !nonce ? 'anon-' + randomBytes(12).toString('hex') : nonce,
-    user: str(url.searchParams.get('user'), 64), name: str(url.searchParams.get('name'), 64), product: p.name, product_id: p.id, group_id: p.group_id, ip, device: hash(ip + req.headers['user-agent']),
+    user: str(url.searchParams.get('user'), 64), name: str(url.searchParams.get('name'), 64), product: p.name, product_id: p.id, scope: 'p#' + p.id, group_id: p.group_id, ip, device: hash(ip + req.headers['user-agent']),
     canMint: () => recentCount('mint:p' + p.id, 3600e3) < MINT_PER_PRODUCT_HOUR && recentCount('mint:ip' + ip, 3600e3) < MINT_PER_IP_HOUR });
   if (!r.ok) {
     if (r.code === 'PLAN_LIMIT') { // the public must not learn which plan the developer is on; the developer sees why in the audit log

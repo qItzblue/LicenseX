@@ -26,7 +26,8 @@ request; there is no waiting for a session to expire.
 ## Designing roles
 
 **Team -> + New role** shows every permission with a checkbox. Starter roles are created for you the first time you open
-the page (Administrator, Support, Developer, Viewer); change or delete them freely.
+the page (Administrator, Support, Developer, Viewer); change or delete them freely. Support and Viewer do not include the
+products page, because it shows the download links.
 
 | Permission | Lets them | Works for product-limited people |
 |---|---|---|
@@ -37,13 +38,13 @@ the page (Administrator, Support, Developer, Viewer); change or delete them free
 | Delete licenses | delete one license, or clean up unused download licenses | yes |
 | See servers | the Servers page | yes |
 | Disable, enable and remove servers | manage servers | yes |
-| See products and their download links | the Products page (shows the secret download link) | yes |
+| See products and their download links | the Products page. The download link is a credential: anyone holding it can download the plugin and gets a license, so give this to people you trust with that | yes |
 | Edit products | upload a new jar, rename, switch on/off, new download link, BuiltByBit resource id | yes |
 | Create new products | add a product | no |
 | Delete products | delete a product | yes |
 | See license groups | read groups (and pick one on a license) | yes |
 | Create, change and delete license groups | manage groups | no |
-| See the activity log | the Audit log page | no |
+| See the activity log | the Audit log page (it shows license keys) | no |
 | Change workspace settings | server limit default, heartbeat, the BuiltByBit secret and group | no |
 | Manage roles and team members | the Team page | no |
 
@@ -62,10 +63,14 @@ Product limits work through the link between a license and a product:
 - licenses made by hand are linked by choosing a product in the license form;
 - licenses **BuiltByBit** asks for are linked when the product knows its BuiltByBit resource id: open the product,
   **Edit**, and enter the number from the resource's address. Licenses issued earlier for that resource are linked at the same time;
-- anything not linked to a product is only visible to people with access to *all* products.
+- anything not linked to a product is only visible to people with access to *all* products. Only those people can enter a
+  BuiltByBit resource id on a product (it re-links licenses across the whole workspace).
 
 ## Guard rails
 
+- Seeing servers does not reveal license keys or owner names unless the person may also see licenses.
+- A person on the team gets no workspace-wide totals or billing details; the owner's plan stays the owner's business.
+- A product's name can be changed and is not unique, so it never decides whose license a download returns (the product's id does).
 - You can only give out permissions you have yourself, and only change roles or people who do not have more access than you.
 - Nobody can change their own access or remove themselves.
 - At most 20 roles and 50 people per workspace.

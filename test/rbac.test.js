@@ -126,7 +126,7 @@ test('starter roles exist, and who may do what follows the role', async () => {
   const srv = (await call('GET', '/api/admin/servers', null, sam)).body[0];
   assert.equal((await call('PATCH', `/api/admin/servers/${srv.id}`, { status: 'disabled' }, sam)).status, 200);
   assert.equal((await call('PATCH', `/api/admin/servers/${srv.id}`, { status: 'active' }, sam)).status, 200);
-  assert.equal((await call('GET', '/api/admin/products', null, sam)).status, 200);
+  assert.equal((await call('GET', '/api/admin/products', null, sam)).status, 403, 'Support has no products.view: a download link is a credential that mints licenses');
   assert.equal((await call('PATCH', `/api/admin/products/${prodA.id}`, { name: 'Hacked' }, sam)).status, 403);
   assert.equal((await call('POST', '/api/admin/products', { name: 'Mine' }, sam)).status, 403);
   assert.equal((await call('GET', '/api/admin/team', null, sam)).status, 403);
@@ -187,7 +187,13 @@ test('a member limited to a product only ever sees and touches that product\'s l
   assert.equal((await call('DELETE', `/api/admin/servers/${bServer.id}`, null, lee)).status, 404);
 
   // products
-  assert.deepEqual((await call('GET', '/api/admin/products', null, lee)).body.map(p => p.name), ['Plugin A']);
+  assert.equal((await call('GET', '/api/admin/products', null, lee)).status, 403, 'Support has no products.view');
+  // the same limit for a role that does see products
+  const dev = (await call('POST', '/api/admin/team/members', { email: 'dev@devs.io', role_id: roleIds.Developer, all_products: false, product_ids: [prodA.id] }, alice));
+  assert.equal(dev.status, 201);
+  people.dev = await login('dev@devs.io');
+  assert.deepEqual((await call('GET', '/api/admin/products', null, people.dev)).body.map(p => p.name), ['Plugin A']);
+  assert.equal((await call('GET', '/api/admin/products', null, people.dev)).body[0].licenses, 2, 'and only counts its own licenses');
 
   // overview numbers count only their product; the activity log is not theirs to read
   const st = (await call('GET', '/api/admin/stats', null, lee)).body;

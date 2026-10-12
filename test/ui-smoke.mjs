@@ -83,7 +83,7 @@ try {
   await help.addCookies([{ name: 'lx_user', value: (await signIn(base, mock, googleUser('help@studio.io'))).split('=').slice(1).join('='), url: base }]);
   const c = await newPage(help, 'member');
   await c.goto(base + '/dashboard');
-  await walk(c, 'member', ['overview', 'licenses', 'servers', 'products', 'groups']);
+  await walk(c, 'member', ['overview', 'licenses', 'servers', 'groups']);
   await c.evaluate(() => { location.hash = 'licenses'; });
   await c.waitForFunction(() => /alpha-buyer/.test(document.querySelector('#view').innerText));
   const seen = await c.$eval('#view', v => v.innerText);
