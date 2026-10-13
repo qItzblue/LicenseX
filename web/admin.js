@@ -218,7 +218,7 @@ async function licenseDrawer(id, refresh) {
     h('div', { class: 'row wrap', style: { margin: '10px 0 18px' } }, h('span', { class: 'chip ' + l.state }, l.state), groupTag(l.group_id), h('span', { class: 'muted' }, `${l.used} / ${limitText(l.limit)} servers`)),
     l.block_reason && h('div', { class: 'err' }, 'Blocked: ' + l.block_reason),
     h('div', { class: 'muted', style: { marginBottom: '16px' } }, `${l.owner || 'No owner'} · issued ${date(l.created_at)} via ${l.source}${l.issued_ip ? ' from ' + l.issued_ip : ''}${l.expires_at ? ' · expires ' + date(l.expires_at) : ''}`,
-      l.product_name && h('div', { class: 'faint' }, 'Product: ' + l.product_name), l.redeemed && h('div', { class: 'faint' }, `Plan key: used by ${l.redeemed.workspace} for ${l.redeemed.plan_key} on ${date(l.redeemed.redeemed_at)}`), l.buyer_email && h('div', { class: 'faint' }, 'Buyer: ' + l.buyer_email), l.note && h('div', { class: 'faint' }, l.note)),
+      l.product_name && h('div', { class: 'faint' }, 'Product: ' + l.product_name),  l.buyer_email && h('div', { class: 'faint' }, 'Buyer: ' + l.buyer_email), l.note && h('div', { class: 'faint' }, l.note)),
     h('div', { class: 'row wrap', style: { marginBottom: '22px' } },
       h('button', { class: 'btn sm', onclick: () => copy(l.key) }, 'Copy key'),
       can('licenses.edit') && h('button', { class: 'btn sm', onclick: () => licenseForm(l, reload) }, 'Edit / set limit'),
@@ -562,7 +562,7 @@ async function customersPage() {
 
 // --- plans (owner) ----------------------------------------------------------------
 async function plansPage() {
-  const [plans, s] = await Promise.all([api('GET', '/api/admin/plans'), api('GET', '/api/admin/settings')]);
+  const [plans, sales] = await Promise.all([api('GET', '/api/admin/plans'), api('GET', '/api/admin/plan-sales')]);
   const edit = p => {
     const isNew = !p, f = id => dlg.querySelector('#' + id);
     const dlg = h('dialog', { style: { width: 'min(560px, calc(100vw - 32px))' } }, h('h3', { style: { marginBottom: '14px' } }, isNew ? 'New plan' : `Edit ${p.name}`),
@@ -596,9 +596,19 @@ async function plansPage() {
   render(head('Plans', h('button', { class: 'btn primary', onclick: () => edit(null) }, '+ New plan')),
     h('div', { class: 'card', style: { marginBottom: '16px' } },
       h('h3', { style: { marginBottom: '4px' } }, 'Selling plans on BuiltByBit'),
-      h('p', { class: 'muted', style: { fontSize: '14px', margin: '6px 0 10px' } }, 'Plans are bought on BuiltByBit: one monthly and one one-time resource. Each resource contains a small file with the "External license key" placeholder; whoever downloads it gets an access key and pastes it under Billing in their dashboard to switch the plan on. Enter each plan\'s BuiltByBit link and resource id below (Edit). Step by step: docs/BILLING.md.'),
-      h('label', null, 'URL for the placeholder (same for every resource)'), h('div', { class: 'url-row' }, h('input', { class: 'mono', readonly: true, value: s.bbb_callback_url || '', onclick: e => e.target.select() }), h('button', { class: 'btn sm', onclick: () => copy(s.bbb_callback_url) }, 'Copy')),
-      h('div', { class: 'hint' }, 'The secret is the one under Settings, BuiltByBit integration. Without a buy link the pricing page shows your Discord or email instead.')),
+      h('p', { class: 'muted', style: { fontSize: '14px', margin: '6px 0 10px' } }, 'Plans are bought on BuiltByBit: one monthly and one one-time resource. Each resource contains a small file with the "External license key" placeholder using the URL and secret below; whoever downloads it gets an access key and pastes it under Billing in their dashboard to switch the plan on. Enter each plan\'s BuiltByBit link and resource id below (Edit). Step by step: docs/BILLING.md.'),
+      h('label', null, 'URL for the placeholder'), h('div', { class: 'url-row' }, h('input', { class: 'mono', readonly: true, value: sales.callback_url, onclick: e => e.target.select() }), h('button', { class: 'btn sm', onclick: () => copy(sales.callback_url) }, 'Copy')),
+      h('label', { style: { marginTop: '10px' } }, 'Secret for plan resources (only you can see this, not your team)'),
+      h('div', { class: 'url-row' }, h('input', { class: 'mono', readonly: true, value: sales.secret, onclick: e => e.target.select() }), h('button', { class: 'btn sm', onclick: () => copy(sales.secret) }, 'Copy'),
+        h('button', { class: 'btn sm danger', onclick: async () => { if (await confirmDialog('Generate a new secret?', 'BuiltByBit will be refused until you paste the new secret into the placeholder of your plan resources.', 'Generate', false)) { try { await api('POST', '/api/admin/plan-sales/secret'); plansPage(); } catch (e) { toast(e.message, true); } } } }, 'New secret')),
+      h('div', { class: 'hint' }, 'Without a buy link the pricing page shows your Discord or email instead.'),
+      sales.keys.length ? h('details', { style: { marginTop: '14px' } }, h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, `Access keys handed out (${sales.keys.length})`),
+        h('div', { class: 'table-card', style: { marginTop: '8px' } }, h('table', null,
+          h('thead', null, h('tr', null, ['Key', 'Plan', 'Buyer', 'Status', ''].map(t => h('th', null, t)))),
+          h('tbody', null, sales.keys.map(k => h('tr', null,
+            h('td', { class: 'keycell' }, k.key), h('td', null, k.plan_key, k.period ? h('span', { class: 'faint' }, ' ' + k.period) : null), h('td', { class: 'muted' }, `BuiltByBit #${k.bbb_user}`),
+            h('td', null, k.redeemed_at ? h('span', { class: 'chip active' }, `used by ${k.workspace || 'a deleted account'}`) : h('span', { class: 'chip ' + (k.status === 'active' ? 'idle' : 'blocked') }, k.status === 'active' ? 'not used yet' : 'cancelled')),
+            h('td', null, !k.redeemed_at && k.status === 'active' ? h('button', { class: 'btn sm danger', title: 'Refund: this key will stop working', onclick: async () => { if (await confirmDialog('Cancel this key?', 'It can no longer be used to activate a plan.', 'Cancel key')) { try { await api('POST', `/api/admin/plan-keys/${k.id}/revoke`); plansPage(); } catch (e) { toast(e.message, true); } } } }, 'Cancel') : null))))))) : null),
     h('div', { class: 'card table-card' }, h('table', null,
       h('thead', null, h('tr', null, ['Plan', 'Price', 'Plugins', 'Licenses', 'Customers', ''].map(t => h('th', null, t)))),
       h('tbody', null, plans.map(p => h('tr', null,

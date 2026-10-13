@@ -142,3 +142,94 @@ test('the starter roles no longer hand out download links', async () => {
   const roles = (await call('GET', '/api/admin/team', null, fresh)).body.roles;
   for (const name of ['Support', 'Viewer']) assert.ok(!roles.find(r => r.name === name).permissions.includes('products.view'), name);
 });
+
+// ---- the second review round ---------------------------------------------------------------------------------------
+import net from 'node:net';
+import { mkdirSync } from 'node:fs';
+import { openDb, DatabaseSync } from '../server/db.js';
+import { createBackup, restoreBackup, RestoreError } from '../server/backup.js';
+
+/** Opens a request, sends the headers and keeps the body back until `release(bodyText)` is called. */
+function pendingRequest(method, path, cookie, length) {
+  const url = new URL(base);
+  const sock = net.connect(Number(url.port), '127.0.0.1');
+  sock.write(`${method} ${path} HTTP/1.1\r\nHost: x\r\nCookie: ${cookie}\r\nContent-Type: application/json\r\nContent-Length: ${length}\r\nConnection: close\r\n\r\n`);
+  const done = new Promise(res => { let buf = ''; sock.on('data', d => { buf += d; }); sock.on('close', () => res({ status: Number(/^HTTP\/1\.1 (\d+)/.exec(buf)?.[1]), body: buf.split('\r\n\r\n')[1] || '' })); });
+  return { release: text => sock.write(text), done };
+}
+const tick = ms => new Promise(r => setTimeout(r, ms));
+
+test('a team member who is switched off while their request is still uploading does not get through', async () => {
+  const manager = await role('Manager', ['team.manage', 'licenses.view']);
+  await member('mgr@devs.io', manager);
+  const mgr = await login('mgr@devs.io');
+  assert.equal((await call('GET', '/api/admin/team', null, mgr)).status, 200);
+  const payload = JSON.stringify({ email: 'backdoor@devs.io', role_id: manager });
+  const pending = pendingRequest('POST', '/api/admin/team/members', mgr, Buffer.byteLength(payload));
+  await tick(150);                                                  // the server has accepted the request and waits for the body
+  const row = (await call('GET', '/api/admin/team', null, alice)).body.members.find(m => m.email === 'mgr@devs.io');
+  assert.equal((await call('PATCH', `/api/admin/team/members/${row.id}`, { disabled: true }, alice)).status, 200);
+  pending.release(payload);
+  assert.equal((await pending.done).status, 401, 'refused: access is checked again when the body has arrived');
+  assert.ok(!(await call('GET', '/api/admin/team', null, alice)).body.members.some(m => m.email === 'backdoor@devs.io'), 'nobody was added');
+});
+
+test('an edit that was waiting for its body cannot undo a switch-off or a demotion made in the meantime', async () => {
+  const manager = await role('Manager2', ['team.manage', 'licenses.view', 'licenses.edit']);
+  const target = await role('Target', ['licenses.view', 'licenses.edit']);
+  await member('mgr2@devs.io', manager); await member('tgt@devs.io', target);
+  const mgr = await login('mgr2@devs.io');
+  const t = (await call('GET', '/api/admin/team', null, alice)).body;
+  const tgt = t.members.find(m => m.email === 'tgt@devs.io');
+  const payload = JSON.stringify({ name: 'renamed' });
+  const pending = pendingRequest('PATCH', `/api/admin/team/members/${tgt.id}`, mgr, Buffer.byteLength(payload));
+  await tick(150);
+  assert.equal((await call('PATCH', `/api/admin/team/members/${tgt.id}`, { disabled: true }, alice)).status, 200);
+  pending.release(payload);
+  assert.equal((await pending.done).status, 200);
+  const after = (await call('GET', '/api/admin/team', null, alice)).body.members.find(m => m.email === 'tgt@devs.io');
+  assert.deepEqual([after.name, after.disabled], ['renamed', true], 'the rename applied, the switch-off stayed');
+
+  // same for a role: an owner's permission removal survives a peer's pending edit of the description
+  const roleRow = (await call('GET', '/api/admin/team', null, alice)).body.roles.find(r => r.name === 'Target');
+  const body2 = JSON.stringify({ description: 'edited' });
+  const p2 = pendingRequest('PATCH', `/api/admin/team/roles/${roleRow.id}`, mgr, Buffer.byteLength(body2));
+  await tick(150);
+  assert.equal((await call('PATCH', `/api/admin/team/roles/${roleRow.id}`, { permissions: ['licenses.view'] }, alice)).status, 200);
+  p2.release(body2);
+  await p2.done;
+  const roleAfter = (await call('GET', '/api/admin/team', null, alice)).body.roles.find(r => r.name === 'Target');
+  assert.deepEqual(roleAfter.permissions, ['licenses.view'], 'the owner\'s removal of licenses.edit stayed');
+});
+
+test('a restore that attaches a role or product limit from another customer is refused', () => {
+  const mk = () => { const dir = mkdtempSync(join(tmpdir(), 'lx-rr-')); mkdirSync(join(dir, 'products')); return { products: join(dir, 'products'), db: openDb(join(dir, 'x.db')) }; };
+  const a = mk();
+  const ws = n => Number(a.db.prepare("INSERT INTO workspaces (name, owner_email, created_at) VALUES (?, ?, 1)").run(n, n + '@x.io').lastInsertRowid);
+  const w2 = ws('w2'), w3 = ws('w3');
+  const power = Number(a.db.prepare("INSERT INTO roles (workspace_id, name, permissions, created_at) VALUES (?, 'Power', '[\"team.manage\"]', 1)").run(w2).lastInsertRowid);
+  const low = Number(a.db.prepare("INSERT INTO roles (workspace_id, name, permissions, created_at) VALUES (?, 'Low', '[]', 1)").run(w3).lastInsertRowid);
+  const m = Number(a.db.prepare("INSERT INTO members (workspace_id, email, role_id, all_products, created_at) VALUES (?, 'evil@x.io', ?, 0, 1)").run(w3, low).lastInsertRowid);
+  const p2 = Number(a.db.prepare("INSERT INTO products (workspace_id, slug, name, token, created_at) VALUES (?, 'p2', 'P2', 't', 1)").run(w2).lastInsertRowid);
+  // a legitimate backup restores
+  assert.doesNotThrow(() => restoreBackup(mk().db, mk().products, createBackup(a.db, a.products), DatabaseSync));
+  // the member's role moved to another customer's role
+  a.db.prepare('UPDATE members SET role_id = ? WHERE id = ?').run(power, m);
+  assert.throws(() => restoreBackup(mk().db, mk().products, createBackup(a.db, a.products), DatabaseSync), RestoreError);
+  a.db.prepare('UPDATE members SET role_id = ? WHERE id = ?').run(low, m);
+  // the member's product limit points at another customer's product
+  a.db.prepare('INSERT INTO member_products (member_id, product_id) VALUES (?, ?)').run(m, p2);
+  assert.throws(() => restoreBackup(mk().db, mk().products, createBackup(a.db, a.products), DatabaseSync), RestoreError);
+  // and at run time a member whose role is another customer's gets nothing from it
+  a.db.prepare('DELETE FROM member_products').run();
+  a.db.prepare('UPDATE members SET role_id = ? WHERE id = ?').run(power, m);
+  return import('../server/rbac.js').then(({ slotsFor }) => assert.deepEqual(slotsFor(a.db, ['evil@x.io']), []));
+});
+
+test('wrong-secret calls to the BuiltByBit endpoint cannot flood the audit log', async () => {
+  const count = async () => (await call('GET', '/api/admin/audit?limit=500', null, alice)).body.filter(a => a.action === 'bbb.denied').length;
+  for (let i = 0; i < 40; i++) await fetch(`${base}/api/v1/builtbybit/license`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '10.50.0.1' }, body: JSON.stringify({ secret: 'wrong-secret-' + i + '-xxxxxxxxxxxx', user_id: '1' }) });
+  const houseDenied = (await call('GET', '/api/admin/audit?limit=500', null, boss)).body.filter(a => a.action === 'bbb.denied').length;
+  assert.ok(houseDenied <= 5, `at most 5 rows a minute per address, got ${houseDenied}`);
+  assert.ok(await count() >= 0);
+});

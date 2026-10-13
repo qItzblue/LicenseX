@@ -12,7 +12,7 @@ const EMPTY_ZIP = Buffer.concat([Buffer.from([0x50, 0x4b, 0x05, 0x06]), Buffer.a
 // The first four hold the customers (workspaces), their plans and per-workspace settings; backups made before
 // workspaces existed do not have them, and restoring such a backup leaves them alone.
 const WORKSPACE_TABLES = ['workspaces', 'plans', 'ws_settings', 'stripe_events', 'roles', 'members'];
-const TABLES = ['workspaces', 'plans', 'settings', 'ws_settings', 'roles', 'members', 'license_groups', 'licenses', 'servers', 'products', 'member_products', 'buyer_links', 'plan_redemptions', 'audit', 'stripe_events'];
+const TABLES = ['workspaces', 'plans', 'settings', 'ws_settings', 'roles', 'members', 'license_groups', 'licenses', 'servers', 'products', 'member_products', 'buyer_links', 'plan_keys', 'audit', 'stripe_events'];
 const WORKSPACE_OWNED = ['license_groups', 'licenses', 'products', 'audit', 'ws_settings', 'roles', 'members']; // rows that carry a workspace_id
 const MAX_ENTRY = 256 * 1024 * 1024; // per file inside the backup (plugin jars can be tens of MB)
 const PRODUCT_FILE = /^[a-z0-9-]{1,48}\.bin$/;
@@ -80,8 +80,10 @@ export function restoreBackup(db, productsDir, zip, DatabaseSync) {
         // Every row must belong to a customer that exists, or the next person to sign up could be handed someone else's data.
         if (!db.prepare('SELECT 1 FROM main.workspaces WHERE id = 1').get()) throw new RestoreError('The backup has no owner workspace, so it cannot be restored.');
         // team access must point at a role and products that exist
-        if (db.prepare('SELECT 1 FROM main.members WHERE role_id NOT IN (SELECT id FROM main.roles) LIMIT 1').get())
-          throw new RestoreError('The backup is inconsistent: a team member has a role that is not in it.');
+        if (db.prepare('SELECT 1 FROM main.members m WHERE NOT EXISTS (SELECT 1 FROM main.roles r WHERE r.id = m.role_id AND r.workspace_id = m.workspace_id) LIMIT 1').get())
+          throw new RestoreError('The backup is inconsistent: a team member has a role that is missing or belongs to another customer.');
+        if (db.prepare('SELECT 1 FROM main.member_products mp WHERE NOT EXISTS (SELECT 1 FROM main.members m JOIN main.products p ON p.workspace_id = m.workspace_id WHERE m.id = mp.member_id AND p.id = mp.product_id) LIMIT 1').get())
+          throw new RestoreError('The backup is inconsistent: a team member is limited to a product that belongs to another customer.');
         for (const t of WORKSPACE_OWNED) {
           if (db.prepare(`SELECT 1 FROM main.${t} WHERE workspace_id NOT IN (SELECT id FROM main.workspaces) LIMIT 1`).get())
             throw new RestoreError(`The backup is inconsistent: some ${t.replace('_', ' ')} belong to a customer that is not in it.`);

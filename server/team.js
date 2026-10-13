@@ -96,7 +96,8 @@ export function registerTeam(app) {
     return [201, { ok: true, id }];
   }, perm);
   route('PATCH', '/api/admin/team/roles/:id', async ctx => {
-    const role = roleOf(ctx, ctx.params.id), b = await body(ctx.req);
+    const b = await body(ctx.req);              // first the body (access is re-checked once it has arrived), then the row: nothing stale gets written back
+    const role = roleOf(ctx, ctx.params.id);
     if (!covers(ctx, role.permissions)) throw new HttpError(403, 'This role has more access than you do, so you cannot change it.', 'FORBIDDEN');
     const name = 'name' in b ? cleanName(b.name, 'Name') : role.name;
     const description = 'description' in b ? str(b.description, 140).trim() : role.description;
@@ -146,7 +147,8 @@ export function registerTeam(app) {
     return [201, { ok: true, id }];
   }, perm);
   route('PATCH', '/api/admin/team/members/:id', async ctx => {
-    const m = memberOf(ctx, ctx.params.id), b = await body(ctx.req);
+    const b = await body(ctx.req);
+    const m = memberOf(ctx, ctx.params.id);
     if (m.id === ctx.admin.member?.id) throw new HttpError(403, 'You cannot change your own access.', 'FORBIDDEN');
     if (!covers(ctx, parsePerms(m.role_permissions))) throw new HttpError(403, 'This person has more access than you do, so you cannot change it.', 'FORBIDDEN');
     let roleId = m.role_id;

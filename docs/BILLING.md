@@ -26,12 +26,14 @@ top of what is left.
 
 ## Setting it up (once)
 
-1. **Put LicenseX online** and sign in as the owner ([DEPLOY.md](../DEPLOY.md)). Open **Settings -> BuiltByBit
-   integration** and note the **URL** and **Secret**.
+1. **Put LicenseX online** and sign in as the owner ([DEPLOY.md](../DEPLOY.md)). Open **Plans** and note the **URL** and the
+   **Secret for plan resources** in the "Selling plans on BuiltByBit" card. This secret is separate from the one under Settings
+   (which your team can see): only you can read or change it, and only it hands out plan keys.
 2. **Create two resources on BuiltByBit**: a monthly one and a one-time one. Each contains one small text file, for example
    `ACCESS-KEY.txt`, with a single line: `%%__BBB_LICENSE__%%`.
 3. On each resource add the **External license key** placeholder (`%%__BBB_LICENSE__%%`) pointing at the **URL** from step 1,
-   with your **Secret**. (This is the same setup as for selling a plugin, see [BUILTBYBIT.md](BUILTBYBIT.md).)
+   with that **Secret**. (It is the same kind of placeholder as for selling a plugin, see [BUILTBYBIT.md](BUILTBYBIT.md), just with
+   the plan-sales secret.)
 4. In **Admin -> Plans**, edit **Pro** and **Lifetime**: paste the resource's **BuiltByBit buy link** and **resource id**
    (the number in the resource's address). The id is how LicenseX knows which plan a key is for.
 5. **Test it** with a real purchase (or a free test copy) before you announce anything: download, copy the key, activate it
@@ -41,20 +43,25 @@ Without a buy link, the pricing page shows your Discord or support email instead
 
 ## Looking after it
 
-- Every key is a license in **your** workspace (**Licenses**, search `BuiltByBit`). Opening one shows who used it and for
-  which plan.
-- **Refund:** block the key in Licenses before it is used and it can never be activated. If it was already used, change
+- **Plans -> Access keys handed out** lists every key with its buyer, the plan and whether it was used (and by whom).
+  Access keys are not licenses: they never show up under Licenses, a plugin or the public license page does not accept them,
+  and your team members cannot see them.
+- **Refund:** press **Cancel** on the key before it is used and it can never be activated. If it was already used, change
   the customer's plan under **Customers -> Plan** (Free ends it).
+- **New secret:** if the secret leaks, press **New secret** on the Plans page and put the new one into your plan resources.
 - **Gifts / other payment methods:** give a plan by hand under **Customers -> Plan**; it needs no key.
-- Customers you delete stay on the used-keys list, so their key cannot be used again. Backups include it.
+- A used key stays on record when its customer is deleted, so it cannot be used again. Backups include the list.
+- A plan with no end date (Lifetime, or one you granted by hand) is never replaced or shortened by a key; such a key is refused
+  and stays unused.
 
 ## What I could not verify
 
 I could not open BuiltByBit's own pages while writing this, so two things come from its public placeholder descriptions and
-third-party guides rather than from testing against BuiltByBit: that a **monthly** resource lets a subscriber download the
-file again each month (which hands them the new key), and the exact fields BuiltByBit sends to the placeholder URL. Do the
-test purchase in step 5. If a subscription resource on BuiltByBit does not work the way this assumes, sell the monthly plan
-as a series of one-month purchases, or give it by hand under Customers.
+third-party guides rather than from testing against BuiltByBit: the exact fields BuiltByBit sends to the placeholder URL, and
+how a **monthly** resource behaves. LicenseX gives a fresh key for every calendar month in which someone downloads, so the
+monthly plan is only as paid as BuiltByBit's download access is: **if BuiltByBit lets people download after they stop paying,
+they get a new key every month for free.** In your test purchase, cancel the subscription and check that the file can no longer
+be downloaded. If it still can, sell the monthly plan as a series of one-month purchases, or give it by hand under Customers.
 
 ## Customers you invite
 

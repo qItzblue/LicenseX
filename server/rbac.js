@@ -96,7 +96,7 @@ export function slotsFor(db, emails, primary = '') {
   if (own) slots.push({ wsId: own.id, kind: 'owner', name: own.name, role: 'Owner' });
   const seen = new Set(slots.map(s => s.wsId));
   const rows = db.prepare(`SELECT m.id, m.workspace_id, m.email, m.all_products, r.name role_name, r.permissions role_permissions, w.name workspace_name
-    FROM members m JOIN roles r ON r.id = m.role_id JOIN workspaces w ON w.id = m.workspace_id
+    FROM members m JOIN roles r ON r.id = m.role_id AND r.workspace_id = m.workspace_id JOIN workspaces w ON w.id = m.workspace_id
     WHERE m.email IN (${marks}) AND m.disabled = 0 ORDER BY m.id`).all(...emails);
   for (const m of rows) {
     if (seen.has(m.workspace_id)) continue;

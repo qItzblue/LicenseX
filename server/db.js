@@ -161,13 +161,21 @@ export function openDb(path) {
       product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
       PRIMARY KEY (member_id, product_id)
     );
-    -- Plans sold on BuiltByBit: a BuiltByBit access key (a license in the owner's workspace) can switch a plan on once.
-    CREATE TABLE IF NOT EXISTS plan_redemptions (
-      license_id   INTEGER PRIMARY KEY REFERENCES licenses(id) ON DELETE CASCADE,
-      workspace_id INTEGER NOT NULL,
-      plan_key     TEXT NOT NULL,
-      redeemed_at  INTEGER NOT NULL,
-      period_end   INTEGER
+    -- Plans sold on BuiltByBit: the access keys handed out for them (see server/plansales.js). Not licenses on purpose.
+    CREATE TABLE IF NOT EXISTS plan_keys (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      key         TEXT NOT NULL UNIQUE,
+      identity    TEXT NOT NULL UNIQUE,            -- hash of plan, resource, BuiltByBit buyer and period: the same buyer and period always get the same key
+      plan_key    TEXT NOT NULL,
+      resource_id TEXT NOT NULL DEFAULT '',
+      bbb_user    TEXT NOT NULL DEFAULT '',
+      period      TEXT NOT NULL DEFAULT '',
+      status      TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','revoked')),
+      issued_ip   TEXT NOT NULL DEFAULT '',
+      issued_at   INTEGER NOT NULL,
+      redeemed_by INTEGER,                         -- workspace id, kept even when that workspace is deleted: a used key can never be used again
+      redeemed_at INTEGER,
+      period_end  INTEGER
     );
     -- Buyer accounts: a signed-in buyer (user_key = "<provider>:<provider user id>") has these licenses in "My licenses".
     CREATE TABLE IF NOT EXISTS buyer_links (

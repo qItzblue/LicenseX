@@ -6,7 +6,7 @@ import { randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
 import { openDb, DatabaseSync } from './db.js';
 import { createBackup, restoreBackup, RestoreError } from './backup.js';
 import { createBuildService, BuildError } from './builder.js';
-import { planForResource, periodTag, lookupKey, redeemKey, RedeemError } from './plansales.js';
+import { planForResource, planSalesSecret, issuePlanKey, lookupKey, redeemKey, registerPlanSales, RedeemError } from './plansales.js';
 import { providerDefs, authorizeUrl, exchangeCode, fetchProfile, parseEmails, normEmail, EMAIL_RE } from './auth.js';
 import { createCore, normalizeKey, KEY_RE, hash, now, PlanError, HOUSE } from './core.js';
 import { injectFiles } from './jarstamp.js';
@@ -151,6 +151,7 @@ const json = (res, status, body, headers = {}) => {
 async function body(req) {
   let size = 0; const chunks = [];
   for await (const c of req) { size += c.length; if (size > 32768) throw new HttpError(413, 'Body too large'); chunks.push(c); }
+  req.lxRecheck?.();   // signed-in routes: the caller's access may have changed while the body was on its way
   if (!chunks.length) return {};
   const text = Buffer.concat(chunks).toString();
   if (/x-www-form-urlencoded/i.test(req.headers['content-type'] || '')) return Object.fromEntries(new URLSearchParams(text)); // BuiltByBit posts a form
@@ -182,6 +183,7 @@ async function saveUpload(req, destPath, max = MAX_UPLOAD) {
     check();
     await new Promise(r => out.end(r));
     check();
+    req.lxRecheck?.();
   } catch (e) { out.destroy(); try { rmSync(tmp, { force: true }); } catch {} throw e; }
   if (size === 0) { try { rmSync(tmp, { force: true }); } catch {} throw new HttpError(400, 'Empty upload'); }
   renameSync(tmp, destPath);
@@ -217,15 +219,20 @@ route('POST', '/api/v1/builtbybit/license', async ctx => {
   // the secret identifies the developer (workspace) whose buyer this is
   const secret = typeof b.secret === 'string' ? b.secret : '';
   const w = secret.length >= 16 ? db.prepare('SELECT * FROM workspaces WHERE bbb_secret = ?').get(secret) : null;
-  if (!w) { core.log('system', 'bbb.denied', ctx.ip, 'bad secret'); return [403, 'Forbidden']; }
+  const sales = !w && secret.length >= 16 && safeEq(secret, planSalesSecret(db));   // the owner's secret for selling plans (never shown to staff)
+  if (!w && !sales) { if (rateLimit('bbb-deny:' + ctx.ip, 5, 60e3)) core.log('system', 'bbb.denied', ctx.ip, 'bad secret'); return [403, 'Forbidden']; }
   const uid = str(b.user_id, 32).trim(), rid = str(b.resource_id, 32).trim();
   if (!/^\d+$/.test(uid)) return [400, 'Missing user_id'];
+  if (sales) {                         // a plan resource hands out an access key (see plansales.js); a repeating plan gets a fresh key every period
+    const plan = planForResource(db, rid);
+    if (!plan) return [404, 'No plan is sold under that resource id'];
+    const key = issuePlanKey({ db, plan, user: uid, ip: ctx.ip });
+    return [200, key];
+  }
   const gid = Number(core.getSetting('bbb_group_id', w.id)) || null;
   // when the developer told us which product this BuiltByBit resource is, the license is linked to it
   const linked = rid ? db.prepare('SELECT id FROM products WHERE workspace_id=? AND bbb_resource_id=?').get(w.id, rid) : null;
-  // a resource that is one of the owner's PLANS hands out access keys (see plansales.js); a repeating plan gets a fresh key every period
-  const sold = w.id === HOUSE ? planForResource(db, rid) : null, tag = sold ? periodTag(sold.interval) : '';
-  const r = core.claim({ ws: w.id, user: uid, name: `BuiltByBit #${uid}`, product: `BuiltByBit resource ${rid || '?'}${tag ? ' ' + tag : ''}`, product_id: linked?.id ?? null, relink: true,
+  const r = core.claim({ ws: w.id, user: uid, name: `BuiltByBit #${uid}`, product: `BuiltByBit resource ${rid || '?'}`, product_id: linked?.id ?? null, relink: true,
     group_id: gid && db.prepare('SELECT 1 FROM license_groups WHERE id=? AND workspace_id=?').get(gid, w.id) ? gid : null, ip: ctx.ip, device: hash('bbb') });
   if (!r.ok) return [r.code === 'PLAN_LIMIT' ? 402 : 503, r.message];
   return [200, r.key];
@@ -273,7 +280,7 @@ route('GET', '/api/admin/me', async ctx => {
     permissions: [...ctx.access.perms], limited: !!sc, products: sc ? [...sc] : null,
     member_role: ctx.admin.member?.role_name || (ctx.access.owner ? 'Owner' : ''),
     workspaces: ctx.admin.workspaces || null,
-    workspace: { id: w.id, name: w.name, house: w.id === HOUSE, suspended: !!w.suspended, plan: core.planOf(w.id) } }];
+    workspace: { id: w.id, name: w.name, house: w.id === HOUSE, suspended: !!w.suspended, plan: ctx.admin.role === 'member' ? null : (({ key, name, max_products, max_licenses, interval, price_cents, currency }) => ({ key, name, max_products, max_licenses, interval, price_cents, currency }))(core.planOf(w.id)) } }];
 }, { admin: true });
 
 // Who is signed in with Google/Discord/GitHub, and are they an admin? (public: the site header uses it)
@@ -430,9 +437,7 @@ route('GET', '/api/admin/licenses/:id', async ctx => {
     .all(ctx.wsId, lic.issued_ip, lic.id, ...scopeSql(ctx, 'l.product_id')[1]) : [];
   const product_name = lic.product_id ? db.prepare('SELECT name FROM products WHERE id=?').get(lic.product_id)?.name || '' : '';
   const servers = can(ctx, 'servers.view') ? db.prepare('SELECT * FROM servers WHERE license_id = ? ORDER BY first_seen').all(lic.id) : [];
-  // a key that switches on a LicenseX plan (the owner's workspace only): who used it, and for which plan
-  const redeemed = ctx.wsId === HOUSE ? db.prepare('SELECT r.plan_key, r.redeemed_at, r.period_end, w.name workspace FROM plan_redemptions r JOIN workspaces w ON w.id = r.workspace_id WHERE r.license_id = ?').get(lic.id) || null : null;
-  return [200, { ...licenseRow({ ...lic, product_name }), servers, same_ip, redeemed }];
+  return [200, { ...licenseRow({ ...lic, product_name }), servers, same_ip }];
 }, { perm: 'licenses.view' });
 
 const LICENSE_EDIT_FIELDS = ['owner', 'note', 'group_id', 'max_servers', 'expires_at', 'buyer_email', 'product_id'];
@@ -866,7 +871,7 @@ route('POST', '/api/billing/redeem', async ctx => {
   let w = workspaceOfUser(u);
   try {
     if (!w) {                          // a first-time buyer: a valid key is their invitation, so their account is created together with the plan (even when signups are closed)
-      lookupKey({ db, core, key: b.key });
+      lookupKey({ db, key: b.key });
       if (!rateLimit('ws:' + ctx.ip, Number(process.env.LICENSEX_SIGNUPS_PER_IP_HOUR || 10), 3600e3)) throw new HttpError(429, 'Too many accounts created from this address. Try again later.');
       w = createWorkspaceFor(u, { force: true });
     }
@@ -1040,6 +1045,7 @@ const app = { route, db, core, HttpError, body, int, str, rateLimit, recentCount
   PUBLIC_URL, DATA, SESSION_SECRET, HOUSE, now, hash, normalizeKey, KEY_RE, fileConfig, CONFIG_ADMIN_EMAILS, isAdminUser, workspaceOfUser };
 registerBuyers(app);
 registerTeam(app);
+registerPlanSales(app);
 
 // --- static + dispatch -----------------------------------------------------
 const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
@@ -1079,19 +1085,27 @@ export const server = createServer(async (req, res) => {
     for (const [method, re, handler, opts] of routes) {
       const m = req.method === method && re.exec(url.pathname);
       if (!m) continue;
-      const admin = adminIdentity(req, url);
-      let wsId = HOUSE, access = null;
-      if (opts.admin || opts.platform || opts.perm) {
+      const guarded = !!(opts.admin || opts.platform || opts.perm);
+      /** Who is calling and what they may do. Run again once the request body has arrived (see body()): a person who was switched off while their request was still uploading must not get through. */
+      const authorize = () => {
+        const admin = adminIdentity(req, url);
+        if (!guarded) return { admin, wsId: HOUSE, access: null };
         if (!admin) throw new HttpError(401, 'Not signed in');
         if (opts.platform && admin.role !== 'platform') throw new HttpError(403, 'Only the site owner can do that.');
-        wsId = resolveWorkspace(admin, req, url);
-        access = accessFor(db, admin, wsId);
+        const wsId = resolveWorkspace(admin, req, url), access = accessFor(db, admin, wsId);
         const needed = opts.perm ? [].concat(opts.perm) : [];
         if (needed.length && !needed.some(k => access.perms.has(k))) throw new HttpError(403, 'You do not have permission to do that.', 'FORBIDDEN');
         // A suspended customer can still look around (and read their data), but nothing can be changed.
         if (admin.role !== 'platform' && req.method !== 'GET' && core.isSuspended(wsId) && !opts.allowSuspended) throw new HttpError(403, 'This account is suspended. Contact support.');
-      }
-      const [status, payload, headers] = await handler({ req, url, params: m.groups || {}, ip: clientIp(req), admin, wsId, access });
+        return { admin, wsId, access };
+      };
+      const ctx = { req, url, params: m.groups || {}, ip: clientIp(req), ...authorize() };
+      if (guarded) req.lxRecheck = () => {
+        const now = authorize();
+        if (now.wsId !== ctx.wsId) throw new HttpError(401, 'Not signed in');
+        ctx.admin = now.admin; ctx.access = now.access;
+      };
+      const [status, payload, headers] = await handler(ctx);
       return json(res, status, payload, headers);
     }
     throw new HttpError(404, 'Not found');

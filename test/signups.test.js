@@ -54,7 +54,7 @@ test('the owner can invite someone: whoever signs in with that verified email ow
 test('with signups closed, a valid BuiltByBit key is still an invitation: the buyer gets an account with the plan', async () => {
   const plans = (await call('GET', '/api/admin/plans', null, boss)).body, life = plans.find(p => p.key === 'lifetime');
   assert.equal((await call('PATCH', '/api/admin/plans/lifetime', { ...life, bbb_resource_id: '4242', buy_url: 'https://builtbybit.com/resources/x.4242/' }, boss)).status, 200);
-  const secret = (await call('GET', '/api/admin/settings', null, boss)).body.bbb_secret;
+  const secret = (await call('GET', '/api/admin/plan-sales', null, boss)).body.secret;
   const key = await fetch(`${base}/api/v1/builtbybit/license`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ secret, user_id: '99', resource_id: '4242' }) }).then(r => r.text());
   const buyer = await signIn(base, mock, googleUser('buyer@elsewhere.io'));
   assert.equal((await call('POST', '/api/workspace/ensure', null, buyer)).status, 403, 'plain signup is still closed');

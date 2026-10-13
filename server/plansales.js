@@ -1,19 +1,24 @@
 // Selling LicenseX plans on BuiltByBit.
 //
 // The owner lists the paid plans (one monthly, one one-time) as resources on BuiltByBit. Each resource contains a small file
-// with the "External license key" placeholder pointing at the owner's own LicenseX. Everybody who buys (or renews) and
-// downloads it gets an access key, issued as a license in the owner's workspace. The buyer pastes that key into their
-// dashboard (Billing -> Activate a key), and the plan is switched on for their workspace.
+// with the "External license key" placeholder pointing at the owner's LicenseX and carrying the PLAN-SALES SECRET. Everybody who
+// buys (or renews) and downloads it gets an access key. The buyer pastes it into their dashboard (Billing -> Activate a key) and
+// the plan is switched on for their workspace.
 //
-//  - A key can be used once, by one workspace. Blocking the license (a refund) stops an unused key from working.
-//  - A one-time plan never ends. A monthly plan runs for 31 days per key (a yearly one for 366); keys of a repeating plan
-//    carry the month/year in their identity, so a buyer who renews and downloads again gets a fresh key.
-//  - Nothing here talks to BuiltByBit: it only ever answers BuiltByBit's own request for a key and the buyer's activation.
-import { HOUSE, KEY_RE, normalizeKey, now } from './core.js';
+//  - Access keys live in their own table (plan_keys). They are not licenses: nothing a team member can name, edit, list, search or
+//    delete in the owner's workspace can create or reveal one, and a key opens no plugin or portal.
+//  - Keys are issued only for the plan-sales secret, which only the site owner can read or regenerate (it is not the workspace's
+//    ordinary BuiltByBit secret, which staff with settings access can see).
+//  - A key is used at most once, by one workspace. Revoking an unused key (a refund) stops it. A used key stays on record even if the
+//    workspace is deleted, so it can never be used again.
+//  - A one-time plan never ends. A monthly plan runs for 31 days per key (a yearly one for 366); keys of a repeating plan carry the
+//    month/year in their identity, so a buyer who renews and downloads again gets a fresh key.
+//  - Nothing here talks to BuiltByBit: it only answers BuiltByBit's own request for a key and the buyer's activation.
+import { randomBytes } from 'node:crypto';
+import { HOUSE, KEY_RE, normalizeKey, generateKey, hash, now } from './core.js';
 
 const DAY = 86400;
 export const PERIOD_DAYS = { month: 31, year: 366 };
-const PRODUCT_RE = /^BuiltByBit resource (\d{1,12})(?: (\d{4}(?:-\d{2})?))?$/;
 
 export class RedeemError extends Error {
   constructor(status, message, code) { super(message); this.status = status; this.code = code; }
@@ -29,18 +34,45 @@ export function periodTag(interval, date = new Date()) {
   return '';
 }
 
-/** Checks a key without using it: the license and the plan it is for, or a RedeemError saying why not. */
-export function lookupKey({ db, core, key }) {
+const SECRET_SETTING = 'plan_sales_secret';
+/** The secret that BuiltByBit's placeholder sends for plan resources (created on first use). */
+export function planSalesSecret(db, { regenerate = false } = {}) {
+  let s = regenerate ? null : db.prepare('SELECT value FROM settings WHERE key = ?').get(SECRET_SETTING)?.value;
+  if (!s) {
+    s = randomBytes(24).toString('base64url');
+    db.prepare('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(SECRET_SETTING, s);
+  }
+  return s;
+}
+
+/** The key for this BuiltByBit buyer, plan and period: the same one every time, a new one for a new period. */
+export function issuePlanKey({ db, plan, user, ip = '', date = new Date() }) {
+  const period = periodTag(plan.interval, date);
+  const identity = hash(['plankey', plan.key, plan.bbb_resource_id, user, period].join('\0'));
+  const have = db.prepare('SELECT key FROM plan_keys WHERE identity = ?').get(identity);
+  if (have) return have.key;
+  for (let i = 0; i < 5; i++) {
+    const key = generateKey();
+    try {
+      db.prepare('INSERT INTO plan_keys (key, identity, plan_key, resource_id, bbb_user, period, issued_ip, issued_at) VALUES (?,?,?,?,?,?,?,?)')
+        .run(key, identity, plan.key, plan.bbb_resource_id, String(user), period, ip, now());
+      return key;
+    } catch (e) { if (!/UNIQUE.*plan_keys\.key/.test(e.message)) throw e; }
+  }
+  throw new Error('could not generate a unique key');
+}
+
+/** Checks a key without using it: the key row and the plan it is for, or a RedeemError saying why not. */
+export function lookupKey({ db, key }) {
   const k = normalizeKey(key);
   const refuse = () => new RedeemError(404, 'That is not a valid access key. Copy it again from the file you downloaded on BuiltByBit.', 'BAD_KEY');
   if (!KEY_RE.test(k)) throw refuse();
-  const lic = core.q.licenseByKey.get(k);
-  const m = lic && lic.workspace_id === HOUSE && lic.source === 'claim' ? PRODUCT_RE.exec(lic.product) : null;
-  const plan = m ? planForResource(db, m[1]) : null;
+  const row = db.prepare('SELECT * FROM plan_keys WHERE key = ?').get(k);
+  const plan = row ? db.prepare("SELECT * FROM plans WHERE key = ? AND key != 'free'").get(row.plan_key) : null;
   if (!plan) throw refuse();
-  if (lic.status === 'blocked') throw new RedeemError(403, 'This key has been cancelled (for example after a refund), so it cannot be used.', 'KEY_REVOKED');
-  if (db.prepare('SELECT 1 FROM plan_redemptions WHERE license_id = ?').get(lic.id)) throw new RedeemError(409, 'This key has already been used.', 'KEY_USED');
-  return { lic, plan };
+  if (row.redeemed_at) throw new RedeemError(409, 'This key has already been used.', 'KEY_USED');
+  if (row.status !== 'active') throw new RedeemError(403, 'This key has been cancelled (for example after a refund), so it cannot be used.', 'KEY_REVOKED');
+  return { row, plan };
 }
 
 /**
@@ -50,21 +82,47 @@ export function lookupKey({ db, core, key }) {
 export function redeemKey({ db, core, workspace, key }) {
   db.exec('BEGIN IMMEDIATE');
   try {
-    const { lic, plan } = lookupKey({ db, core, key });   // looked up inside the transaction: two tabs cannot both use one key
+    const { row, plan } = lookupKey({ db, key });   // looked up inside the transaction: two tabs cannot both use one key
     const w = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspace.id);
     const t = now(), entitled = core.entitledPlanKey(w, t), current = entitled === 'free' ? null : db.prepare('SELECT * FROM plans WHERE key = ?').get(entitled);
+    // a plan with no end date (one-time, or granted by hand without one) cannot be improved by a key that would only add time
+    if (current && !w.plan_until && (plan.interval !== 'once' || current.key === plan.key))
+      throw new RedeemError(409, `You already have the ${current.name} plan with no end date, so this key was not used. Keep it for another account.`, 'ALREADY_PERMANENT');
     let until = null;
     if (plan.interval !== 'once') {
-      if (current?.interval === 'once') throw new RedeemError(409, `You already have the ${current.name} plan, which never ends, so this key was not used. Keep it for another account.`, 'ALREADY_LIFETIME');
       // renewing the same plan adds time on top of what is left; anything else starts now
       const base = current && current.key === plan.key && w.plan_until && w.plan_until > t ? w.plan_until : t;
       until = base + (PERIOD_DAYS[plan.interval] || 31) * DAY;
     }
     db.prepare("UPDATE workspaces SET plan_key = ?, plan_status = 'active', plan_until = ?, plan_source = 'manual', plan_note = ? WHERE id = ?")
-      .run(plan.key, until, `BuiltByBit key ${lic.key}`, w.id);
-    db.prepare('INSERT INTO plan_redemptions (license_id, workspace_id, plan_key, redeemed_at, period_end) VALUES (?,?,?,?,?)').run(lic.id, w.id, plan.key, t, until);
+      .run(plan.key, until, `BuiltByBit key #${row.id}`, w.id);
+    const used = db.prepare('UPDATE plan_keys SET redeemed_by = ?, redeemed_at = ?, period_end = ? WHERE id = ? AND redeemed_at IS NULL').run(w.id, t, until, row.id);
+    if (used.changes !== 1) throw new RedeemError(409, 'This key has already been used.', 'KEY_USED');
     db.exec('COMMIT');
-    core.log('user', 'plan.redeem', plan.key, `key ${lic.key}${until ? ' until ' + new Date(until * 1000).toISOString().slice(0, 10) : ' (no end date)'}`, w.id);
+    core.log('user', 'plan.redeem', plan.key, `access key #${row.id}${until ? ' until ' + new Date(until * 1000).toISOString().slice(0, 10) : ' (no end date)'}`, w.id);
     return { plan, until };
   } catch (e) { try { db.exec('ROLLBACK'); } catch { /* already rolled back */ } throw e; }
+}
+
+/** The owner's side: the secret for the BuiltByBit placeholder, the keys that were handed out, and revoking one. Site owner only. */
+export function registerPlanSales(app) {
+  const { route, db, core, HttpError, publicBase } = app;
+  route('GET', '/api/admin/plan-sales', async ctx => {
+    const keys = db.prepare(`SELECT k.id, k.key, k.plan_key, k.period, k.bbb_user, k.status, k.issued_at, k.redeemed_at, k.period_end, w.name workspace, w.owner_email
+      FROM plan_keys k LEFT JOIN workspaces w ON w.id = k.redeemed_by ORDER BY k.id DESC LIMIT 200`).all();
+    return [200, { callback_url: `${publicBase(ctx.req)}/api/v1/builtbybit/license`, secret: planSalesSecret(db), keys }];
+  }, { platform: true });
+  route('POST', '/api/admin/plan-sales/secret', async ctx => {
+    planSalesSecret(db, { regenerate: true });
+    core.log(ctx.admin.email || 'admin', 'plan-sales.secret', '', 'new secret', HOUSE);
+    return [200, { secret: planSalesSecret(db) }];
+  }, { platform: true });
+  route('POST', '/api/admin/plan-keys/:id/revoke', async ctx => {
+    const row = db.prepare('SELECT * FROM plan_keys WHERE id = ?').get(ctx.params.id);
+    if (!row) throw new HttpError(404, 'Not found');
+    if (row.redeemed_at) throw new HttpError(409, 'This key was already used. Change the customer\'s plan under Customers instead.');
+    db.prepare("UPDATE plan_keys SET status = 'revoked' WHERE id = ?").run(row.id);
+    core.log(ctx.admin.email || 'admin', 'plan-key.revoke', row.plan_key, `access key #${row.id}`, HOUSE);
+    return [200, { ok: true }];
+  }, { platform: true });
 }
