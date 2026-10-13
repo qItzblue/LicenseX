@@ -63,6 +63,7 @@ longer run (if you allow self-service removal). Details in [docs/LOGIN.md](docs/
 | `server/backup.js` | Backup / restore (admin -> Settings -> Backup & move) for moving between hosts. |
 | `server/offsite.js` | Off-site copies (S3 signature v4, Discord webhook, AES-256-GCM) and the restore on an empty start. |
 | `server/twofa.js` | Two-factor sign-in (TOTP, recovery codes). |
+| `web/ds/`, `web/lx.css`, `web/lx.js` | "Redstone & Obsidian" design system: tokens (colors, type, spacing, effects), Lucide icons, and the shared components (header, console, hotbar, license key chip, server slots, code boxes). |
 | `web/admin-extra.js`, `web/vendor/qrcode.mjs` | Security page, leak tracer, off-site backup card; QR codes (qrcode-generator, MIT). |
 | `plugin/` | `LicenseClient` (drop-in, no deps) + an example Bukkit/Paper plugin (`mvn package`). |
 
