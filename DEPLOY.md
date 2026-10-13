@@ -22,9 +22,9 @@ sign-in callbacks all use it.
 
 ## Offering it to other developers (optional)
 
-LicenseX can also be a paid service: customers get private workspaces and you take payments with Stripe. Environment
-variables / config keys: `LICENSEX_STRIPE_SECRET_KEY`, `LICENSEX_STRIPE_WEBHOOK_SECRET`, `LICENSEX_SIGNUPS=closed` (invite
-only). Everything is in **[docs/BILLING.md](docs/BILLING.md)**. Run a single instance.
+LicenseX can also be a paid service: customers get private workspaces, and you sell the plans on BuiltByBit (one monthly,
+one one-time). Set `LICENSEX_SIGNUPS=closed` for invite-only (a valid BuiltByBit key still creates the buyer's account).
+Everything is in **[docs/BILLING.md](docs/BILLING.md)**. Run a single instance.
 
 ## Where to host it
 

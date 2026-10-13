@@ -44,7 +44,7 @@ export function wrapJar(jar, { url, key = '', product = '' }) {
   if (has('dev/licensex/client/LicenseClient.class')) throw new WrapError('ALREADY_INTEGRATED', 'This plugin already contains the LicenseX client, so it is not wrapped.');
 
   let yml;
-  try { yml = readEntry(jar, 'plugin.yml').toString('utf8').replace(/^\uFEFF/, ''); }
+  try { yml = readEntry(jar, 'plugin.yml', 256 * 1024).toString('utf8').replace(/^\uFEFF/, ''); }
   catch { throw new WrapError('BAD_JAR', 'The plugin.yml inside this jar could not be read (corrupt or too large).'); }
   const m = MAIN_RE.exec(yml);
   if (!m) throw new WrapError('NO_MAIN', 'Could not find a "main:" line in plugin.yml.');

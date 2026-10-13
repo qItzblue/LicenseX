@@ -100,6 +100,7 @@ export function openDb(path) {
       plan_status            TEXT NOT NULL DEFAULT 'active' CHECK (plan_status IN ('active','past_due','canceled')),
       plan_until             INTEGER,                    -- end of the paid period; NULL = no end (free, lifetime, manual forever)
       plan_source            TEXT NOT NULL DEFAULT 'free' CHECK (plan_source IN ('free','manual','stripe')),
+      -- the two stripe_* columns and the stripe_events table are unused since plans are sold on BuiltByBit; they stay so older databases and backups still open
       stripe_customer_id     TEXT,
       stripe_subscription_id TEXT,
       suspended              INTEGER NOT NULL DEFAULT 0,
@@ -130,6 +131,58 @@ export function openDb(path) {
     CREATE TABLE IF NOT EXISTS stripe_events (
       id TEXT PRIMARY KEY,
       at INTEGER NOT NULL
+    );
+    -- Team access: a role is a named set of permissions inside one workspace; a member is a person (identified by a
+    -- provider-verified email) holding a role, either for every product or only for the ones listed in member_products.
+    CREATE TABLE IF NOT EXISTS roles (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      workspace_id INTEGER NOT NULL,
+      name         TEXT NOT NULL,
+      description  TEXT NOT NULL DEFAULT '',
+      permissions  TEXT NOT NULL DEFAULT '[]',     -- JSON array of permission keys (see server/rbac.js)
+      created_at   INTEGER NOT NULL,
+      UNIQUE (workspace_id, name)
+    );
+    CREATE TABLE IF NOT EXISTS members (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      workspace_id INTEGER NOT NULL,
+      email        TEXT NOT NULL,                  -- lower-case; matched against the verified emails of whoever signs in
+      name         TEXT NOT NULL DEFAULT '',
+      role_id      INTEGER NOT NULL REFERENCES roles(id),
+      all_products INTEGER NOT NULL DEFAULT 1,     -- 0 = limited to the products in member_products
+      disabled     INTEGER NOT NULL DEFAULT 0,
+      invited_by   TEXT NOT NULL DEFAULT '',
+      last_login   INTEGER,
+      created_at   INTEGER NOT NULL,
+      UNIQUE (workspace_id, email)
+    );
+    CREATE TABLE IF NOT EXISTS member_products (
+      member_id  INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+      product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+      PRIMARY KEY (member_id, product_id)
+    );
+    -- Plans sold on BuiltByBit: the access keys handed out for them (see server/plansales.js). Not licenses on purpose.
+    CREATE TABLE IF NOT EXISTS plan_keys (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      key         TEXT NOT NULL UNIQUE,
+      identity    TEXT NOT NULL UNIQUE,            -- hash of plan, resource, BuiltByBit buyer and period: the same buyer and period always get the same key
+      plan_key    TEXT NOT NULL,
+      resource_id TEXT NOT NULL DEFAULT '',
+      bbb_user    TEXT NOT NULL DEFAULT '',
+      period      TEXT NOT NULL DEFAULT '',
+      status      TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','revoked')),
+      issued_ip   TEXT NOT NULL DEFAULT '',
+      issued_at   INTEGER NOT NULL,
+      redeemed_by INTEGER,                         -- workspace id, kept even when that workspace is deleted: a used key can never be used again
+      redeemed_at INTEGER,
+      period_end  INTEGER
+    );
+    -- Buyer accounts: a signed-in buyer (user_key = "<provider>:<provider user id>") has these licenses in "My licenses".
+    CREATE TABLE IF NOT EXISTS buyer_links (
+      user_key   TEXT NOT NULL,
+      license_id INTEGER NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (user_key, license_id)
     );
     CREATE INDEX IF NOT EXISTS idx_servers_license ON servers(license_id);
     CREATE INDEX IF NOT EXISTS idx_audit_at ON audit(at DESC);
@@ -176,6 +229,26 @@ export function migrate(db) {
     } catch (e) { try { db.exec('ROLLBACK'); } catch {} throw e; }
     finally { db.exec('PRAGMA foreign_keys = ON'); }
   }
+  // roles & buyers (v0.7): which product a license belongs to, who it was sold to, and which BuiltByBit resource a product is
+  if (!hasCol(db, 'licenses', 'product_id')) {
+    db.exec('ALTER TABLE licenses ADD COLUMN product_id INTEGER');
+    // best effort for what already exists: licenses issued by a download carry the product's name
+    db.exec(`UPDATE licenses SET product_id = (SELECT MIN(p.id) FROM products p WHERE p.workspace_id = licenses.workspace_id AND p.name = licenses.product)
+             WHERE product_id IS NULL AND product != ''`);
+  }
+  if (!hasCol(db, 'licenses', 'buyer_email')) db.exec("ALTER TABLE licenses ADD COLUMN buyer_email TEXT NOT NULL DEFAULT ''");
+  if (!hasCol(db, 'products', 'bbb_resource_id')) db.exec("ALTER TABLE products ADD COLUMN bbb_resource_id TEXT NOT NULL DEFAULT ''");
+  // plans are bought on BuiltByBit: where to buy, and which BuiltByBit resource hands out the key for this plan
+  if (!hasCol(db, 'plans', 'buy_url')) db.exec("ALTER TABLE plans ADD COLUMN buy_url TEXT NOT NULL DEFAULT ''");
+  if (!hasCol(db, 'plans', 'bbb_resource_id')) db.exec("ALTER TABLE plans ADD COLUMN bbb_resource_id TEXT NOT NULL DEFAULT ''");
+  if (!hasCol(db, 'workspaces', 'plan_note')) db.exec("ALTER TABLE workspaces ADD COLUMN plan_note TEXT NOT NULL DEFAULT ''");
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_licenses_product ON licenses(product_id);
+    CREATE INDEX IF NOT EXISTS idx_licenses_buyer ON licenses(buyer_email);
+    CREATE INDEX IF NOT EXISTS idx_members_email ON members(email);
+    CREATE INDEX IF NOT EXISTS idx_roles_ws ON roles(workspace_id);
+    CREATE INDEX IF NOT EXISTS idx_buyer_links_license ON buyer_links(license_id);
+  `);
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_licenses_ws ON licenses(workspace_id);
     CREATE INDEX IF NOT EXISTS idx_products_ws ON products(workspace_id);
@@ -209,7 +282,7 @@ export function migrate(db) {
  */
 export function reserveWorkspaceIds(db) {
   let top = 0;
-  for (const t of ['workspaces', 'licenses', 'products', 'license_groups', 'audit', 'ws_settings']) {
+  for (const t of ['workspaces', 'licenses', 'products', 'license_groups', 'audit', 'ws_settings', 'roles', 'members']) {
     const col = t === 'workspaces' ? 'id' : 'workspace_id';
     top = Math.max(top, db.prepare(`SELECT COALESCE(MAX(${col}), 0) AS m FROM ${t}`).get().m);
   }

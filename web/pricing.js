@@ -3,8 +3,6 @@ import { h, api } from '/lib.js';
 const plansEl = document.getElementById('plans');
 const errEl = document.getElementById('err');
 const ext = { target: '_blank', rel: 'noopener noreferrer' };
-const BUY_KEY = 'lx-buy';
-const store = { get: () => { try { return sessionStorage.getItem(BUY_KEY); } catch { return null; } }, set: v => { try { sessionStorage.setItem(BUY_KEY, v); } catch {} }, clear: () => { try { sessionStorage.removeItem(BUY_KEY); } catch {} } };
 
 const money = p => new Intl.NumberFormat(undefined, { style: 'currency', currency: p.currency.toUpperCase(), minimumFractionDigits: p.price_cents % 100 ? 2 : 0, maximumFractionDigits: 2 }).format(p.price_cents / 100);
 const per = p => ({ month: '/ month', year: '/ year', once: 'one-time payment', free: 'forever' }[p.interval]);
@@ -17,25 +15,17 @@ function cta(p) {
   const signedIn = !!me.user, current = pricing.current;
   const isCurrent = current && current.plan_key === p.key;
   if (isCurrent) return h('button', { class: 'btn', disabled: true }, p.price_cents ? 'Your current plan' : (me.user?.workspace ? 'Your current plan' : 'Free'));
-  if (!pricing.signups && !me.user?.workspace) return h('button', { class: 'btn', disabled: true }, 'Invite only');
+  if (p.price_cents === 0 && !pricing.signups && !me.user?.workspace) return h('button', { class: 'btn', disabled: true }, 'Invite only');
   if (p.price_cents === 0)
     return signedIn
       ? h('button', { class: 'btn', onclick: async () => { try { await api('POST', '/api/workspace/ensure'); location.href = '/dashboard'; } catch (e) { showErr(e.message); } } }, me.user.workspace ? 'Open dashboard' : 'Get started free')
-      : h('a', { class: 'btn', href: '/login?next=/dashboard' }, 'Get started free');
-  if (!pricing.payments) {
-    const s = pricing.site, discord = s.discord_url, mail = s.support_email;
-    if (discord) return h('a', { class: 'btn primary', href: discord, ...ext }, `Buy ${p.name} on Discord`);
-    if (mail) return h('a', { class: 'btn primary', href: `mailto:${mail}?subject=${encodeURIComponent(`${s.site_name || 'LicenseX'} ${p.name} plan`)}` }, `Contact us to buy`);
-    return h('button', { class: 'btn', disabled: true }, 'Coming soon');
-  }
-  return h('button', { class: 'btn primary' + (p.highlight ? '' : ''), onclick: () => buy(p) }, p.interval === 'once' ? `Buy ${p.name}` : `Get ${p.name}`);
-}
-
-async function buy(p) {
-  showErr('');
-  if (!me.user) { store.set(p.key); location.href = '/login?next=/pricing'; return; }
-  try { const r = await api('POST', '/api/billing/checkout', { plan: p.key }); location.href = r.url; }
-  catch (e) { showErr(e.message); }
+      : h('a', { class: 'btn', href: '/login/creator' }, 'Get started free');
+  // Paid plans are bought on BuiltByBit; the buyer then activates the key from the downloaded file in their dashboard.
+  if (p.buy_url) return h('a', { class: 'btn primary', href: p.buy_url, ...ext }, p.interval === 'once' ? `Buy ${p.name} on BuiltByBit` : `Get ${p.name} on BuiltByBit`);
+  const s = pricing.site, discord = s.discord_url, mail = s.support_email;
+  if (discord) return h('a', { class: 'btn primary', href: discord, ...ext }, `Buy ${p.name} on Discord`);
+  if (mail) return h('a', { class: 'btn primary', href: `mailto:${mail}?subject=${encodeURIComponent(`${s.site_name || 'LicenseX'} ${p.name} plan`)}` }, `Contact us to buy`);
+  return h('button', { class: 'btn', disabled: true }, 'Coming soon');
 }
 
 function planCard(p) {
@@ -69,9 +59,10 @@ function chrome(site) {
 
 function authNav() {
   const slot = document.getElementById('authNav');
-  if (!me.user) { if (me.providers.length) slot.append(h('a', { href: '/login?next=/pricing', class: 'pill' }, 'Sign in')); return; }
+  if (!me.user) { if (me.providers.length) slot.append(h('a', { href: '/login', class: 'pill' }, 'Sign in')); return; }
   const u = me.user;
   slot.append(...[
+    h('a', { href: '/account', class: 'pill' }, 'My licenses'),
     u.isAdmin ? h('a', { href: '/admin', class: 'admin' }, 'Admin') : u.workspace ? h('a', { href: '/dashboard', class: 'admin' }, 'Dashboard') : null,
     h('button', { class: 'linklike', onclick: async () => { await api('POST', '/api/auth/logout'); location.reload(); } }, 'Sign out')].filter(Boolean));
 }
@@ -82,11 +73,8 @@ function authNav() {
   chrome(pricing.site); authNav();
   plansEl.replaceChildren(...pricing.plans.map(planCard));
   if (pricing.plans.length > 1) comparison(pricing.plans);
-  document.getElementById('payNote').textContent = pricing.payments ? 'Secure checkout by Stripe. Cancel monthly plans any time.' : '';
+  document.getElementById('payNote').textContent = pricing.plans.some(p => p.buy_url) ? 'Plans are bought on BuiltByBit. Download the file you get there, then activate the key in your dashboard under Billing.' : '';
   const cta2 = document.getElementById('ctaBtn');
   if (!pricing.signups && !(me.user && (me.user.workspace || me.user.isAdmin))) { cta2.removeAttribute('href'); cta2.textContent = 'Invite only'; cta2.classList.remove('primary'); cta2.setAttribute('aria-disabled', 'true'); }
   if (me.user) { cta2.href = '/dashboard'; cta2.textContent = me.user.workspace || me.user.isAdmin ? 'Open dashboard' : 'Get started free'; if (!me.user.workspace && !me.user.isAdmin) cta2.onclick = async e => { e.preventDefault(); try { await api('POST', '/api/workspace/ensure'); location.href = '/dashboard'; } catch (err) { showErr(err.message); } }; }
-  // came back from signing in after pressing Buy: carry on to checkout
-  const pending = store.get();
-  if (pending && me.user) { store.clear(); const p = pricing.plans.find(x => x.key === pending); if (p && p.price_cents && pricing.payments) buy(p); }
 })();

@@ -1,13 +1,20 @@
 import { h, api, toast, confirmDialog, ago, date, limitText, copy, currentWs, setWs, wsHeaders, wsq } from '/lib.js';
+import { teamPage } from '/admin-team.js';
 
 const $ = id => document.getElementById(id);
 const view = $('view');
 /** Like replaceChildren, but skips null/false (the native one would print them as text). */
 const render = (...nodes) => view.replaceChildren(...nodes.flat().filter(n => n != null && n !== false));
 let groups = [];
-const PAGES_PLATFORM = { overview: 'Overview', licenses: 'Licenses', servers: 'Servers', products: 'Products', build: 'Build', groups: 'Groups', customers: 'Customers', plans: 'Plans', settings: 'Settings', audit: 'Audit log' };
-const PAGES_TENANT = { overview: 'Overview', licenses: 'Licenses', servers: 'Servers', products: 'Products', groups: 'Groups', billing: 'Billing', settings: 'Settings', audit: 'Audit log' };
-let PAGES = PAGES_TENANT;
+// Which pages exist for this person. The server enforces everything; this only hides what they could not use anyway.
+const can = perm => (window.__me?.permissions || []).includes(perm);
+const PAGE_DEFS = [
+  ['overview', 'Overview', () => true], ['licenses', 'Licenses', () => can('licenses.view')], ['servers', 'Servers', () => can('servers.view')],
+  ['products', 'Products', () => can('products.view')], ['build', 'Build', () => window.__me.role === 'platform'], ['groups', 'Groups', () => can('groups.view')],
+  ['team', 'Team', () => can('team.manage')], ['customers', 'Customers', () => can('platform.customers')], ['plans', 'Plans', () => window.__me.role === 'platform'],
+  ['billing', 'Billing', () => window.__me.role === 'tenant'], ['settings', 'Settings', () => can('settings.manage')], ['audit', 'Audit log', () => can('audit.view')],
+];
+let PAGES = { overview: 'Overview' };
 const isDash = location.pathname === '/dashboard';
 let WS = null;   // the workspace being shown (refreshed on every page change)
 
@@ -48,11 +55,12 @@ $('logout').addEventListener('click', async () => { await api('POST', '/api/auth
 function showApp() {
   $('app').hidden = false;
   const me = window.__me;
-  PAGES = me.role === 'platform' ? PAGES_PLATFORM : PAGES_TENANT;
+  PAGES = Object.fromEntries(PAGE_DEFS.filter(([, , ok]) => ok()).map(([k, label]) => [k, label]));
   document.title = me.role === 'platform' ? 'Admin' : 'Dashboard';
   if (me) $('whoami').textContent = me.email ? `${me.name} (${me.email})` : me.name;
   $('nav').replaceChildren(...Object.entries(PAGES).map(([k, label]) => h('a', { 'data-page': k, onclick: () => (location.hash = k) }, label)));
   if (me.role === 'platform') workspaceSwitcher();
+  else if ((me.workspaces || []).length > 1) membershipSwitcher(me);
   route();
 }
 window.addEventListener('hashchange', () => !$('app').hidden && route());
@@ -69,6 +77,15 @@ async function workspaceSwitcher() {
   box.hidden = false;
 }
 
+/** Somebody who belongs to several workspaces (their own plus teams they were added to) picks which one to work in. */
+function membershipSwitcher(me) {
+  const box = $('wsSwitch');
+  const sel = h('select', { style: { fontSize: '13px' }, onchange: e => { setWs(e.target.value); location.hash = 'overview'; location.reload(); } },
+    me.workspaces.map(w => h('option', { value: w.id, selected: w.id === me.workspace.id }, `${w.name} · ${w.role}`)));
+  box.replaceChildren(h('label', { style: { fontSize: '12px', marginBottom: '4px' } }, 'Workspace'), sel);
+  box.hidden = false;
+}
+
 let buildTimer;
 async function route() {
   clearInterval(buildTimer);
@@ -78,8 +95,8 @@ async function route() {
     WS = await api('GET', '/api/workspace');
     window.__me.workspace = { ...window.__me.workspace, ...WS };
     banner();
-    groups = await api('GET', '/api/admin/groups');
-    await { overview, licenses, servers, products, build: buildPage, groups: groupsPage, customers: customersPage, plans: plansPage, billing: billingPage, settings, audit }[page]();
+    groups = can('groups.view') ? await api('GET', '/api/admin/groups') : [];
+    await { overview, licenses, servers, products, build: buildPage, groups: groupsPage, team: () => teamPage({ render, head }), customers: customersPage, plans: plansPage, billing: billingPage, settings, audit }[page]();
   } catch (e) { if (e.status === 401) return location.reload(); toast(e.message, true); }
 }
 
@@ -88,8 +105,7 @@ function banner() {
   const me = window.__me, box = $('banner'), items = [];
   if (me.role === 'platform' && !WS.house) items.push(['warn', h('span', null, h('b', null, `Viewing ${WS.name}'s workspace`), ` (${WS.owner_email}) as the site owner. What you change here changes their account. `), h('button', { class: 'btn sm', onclick: () => { setWs(''); location.hash = 'overview'; location.reload(); } }, 'Back to my workspace')]);
   if (WS.suspended) items.push(['bad', h('span', null, h('b', null, 'This account is suspended. '), WS.suspended_reason || 'Contact support.', ' You can look around, but nothing can be changed and its licenses are blocked.')]);
-  else if (WS.lapsed) items.push(['warn', h('span', null, h('b', null, 'Your paid plan has ended. '), 'Existing licenses keep working, but you cannot add more than the Free plan allows. '), h('a', { class: 'btn sm primary', href: '#billing' }, 'Renew')]);
-  else if (WS.plan_status === 'past_due') items.push(['warn', h('span', null, h('b', null, 'Your last payment failed. '), 'Update your card before the period ends to keep your plan. '), WS.billing.can_portal ? h('a', { class: 'btn sm primary', href: '#billing' }, 'Fix billing') : null]);
+  else if (WS.lapsed) items.push(['warn', h('span', null, h('b', null, 'Your paid plan has ended. '), 'Existing licenses keep working, but you cannot add more than the Free plan allows. '), h('a', { class: 'btn sm primary', href: '#billing' }, 'Renew with a new key')]);
   box.replaceChildren(...items.map(([kind, ...kids]) => h('div', { class: 'notice ' + kind }, ...kids)));
 }
 const head = (title, ...actions) => h('div', { class: 'page-head' }, h('h1', null, title), h('div', { class: 'row' }, actions));
@@ -101,31 +117,44 @@ async function overview() {
   const s = await api('GET', '/api/admin/stats');
   const stat = (n, l) => h('div', { class: 'card stat' }, h('div', { class: 'n' }, n), h('div', { class: 'l' }, l));
   const max = Math.max(1, ...s.per_day.map(d => d.n));
-  render(head('Overview'), WS.house ? null : planCard(),
-    h('div', { class: 'stats' }, stat(s.licenses, 'Licenses'), stat(s.servers, 'Active servers'), stat(s.online, 'Online now'), stat(s.disabled, 'Disabled servers'), stat(s.blocked, 'Blocked licenses'), stat(s.issued_24h, 'Issued last 24h')),
-    h('div', { class: 'cols' },
-      h('div', { class: 'card' }, h('h3', null, 'Licenses issued · 14 days'), h('div', { class: 'bars' }, s.per_day.length ? s.per_day.map(d => h('div', { title: `${d.d}: ${d.n}`, style: { height: d.n / max * 100 + '%' } })) : h('span', { class: 'muted' }, 'No data yet'))),
-      h('div', { class: 'card' }, h('h3', { style: { marginBottom: '8px' } }, 'Recent activity'), s.recent.length ? s.recent.map(auditLine) : h('span', { class: 'muted' }, 'Nothing yet'))));
+  const me = window.__me, hide = k => s.hidden.includes(k);
+  let limitedNote = null;
+  if (me.limited) {
+    const names = can('products.view') ? (await api('GET', '/api/admin/products')).map(p => p.name) : [];
+    limitedNote = h('div', { class: 'notice' }, h('span', null, h('b', null, 'Your access is limited to '), names.length ? names.join(', ') : `${me.products.length} product${me.products.length === 1 ? '' : 's'}`, '. Everything below only counts what belongs to them.'));
+  }
+  const cards = [...(hide('licenses') ? [] : [stat(s.licenses, 'Licenses')]), ...(hide('servers') ? [] : [stat(s.servers, 'Active servers'), stat(s.online, 'Online now'), stat(s.disabled, 'Disabled servers')]),
+    ...(hide('licenses') ? [] : [stat(s.blocked, 'Blocked licenses'), stat(s.issued_24h, 'Issued last 24h')])];
+  render(head('Overview'), limitedNote, WS.house || me.role === 'member' ? null : planCard(),
+    me.role === 'member' && !cards.length ? h('div', { class: 'muted' }, `You are signed in as ${me.member_role} in ${WS.name}. Use the menu to open what you have access to.`) : null,
+    cards.length ? h('div', { class: 'stats' }, cards) : null,
+    cards.length || s.recent.length ? h('div', { class: 'cols' },
+      hide('licenses') ? null : h('div', { class: 'card' }, h('h3', null, 'Licenses issued · 14 days'), h('div', { class: 'bars' }, s.per_day.length ? s.per_day.map(d => h('div', { title: `${d.d}: ${d.n}`, style: { height: d.n / max * 100 + '%' } })) : h('span', { class: 'muted' }, 'No data yet'))),
+      can('audit.view') ? h('div', { class: 'card' }, h('h3', { style: { marginBottom: '8px' } }, 'Recent activity'), s.recent.length ? s.recent.map(auditLine) : h('span', { class: 'muted' }, 'Nothing yet')) : null) : null);
 }
 const auditLine = a => h('div', { class: 'audit-line' }, h('span', null, h('b', null, a.action), ' ', h('span', { class: 'muted keycell' }, a.target)), h('span', { class: 'faint' }, ago(a.at)));
 
 // --- licenses --------------------------------------------------------------
 async function licenses() {
-  const filters = { q: '', status: '', group: '' };
+  const filters = { q: '', status: '', group: '', product: '' };
   const body = h('div', { class: 'card table-card' });
+  const products = productOptions = await api('GET', '/api/admin/products/options').catch(() => []);
   async function load() {
     const qs = new URLSearchParams(Object.entries(filters).filter(([, v]) => v));
     const rows = await api('GET', '/api/admin/licenses?' + qs);
     body.replaceChildren(h('table', null,
-      h('thead', null, h('tr', null, ['License', 'Owner', 'Group', 'Servers', 'Status', 'Issued', 'IP'].map(t => h('th', null, t)))),
+      h('thead', null, h('tr', null, ['License', 'Owner', 'Product', 'Group', 'Servers', 'Status', 'Issued', 'IP'].map(t => h('th', null, t)))),
       h('tbody', null, rows.length ? rows.map(l => h('tr', { class: 'clickable', onclick: () => licenseDrawer(l.id, load) },
-        h('td', null, keyCell(l.key)), h('td', null, l.owner || h('span', { class: 'faint' }, '—')), h('td', null, groupTag(l.group_id)),
+        h('td', null, keyCell(l.key)), h('td', null, l.owner || h('span', { class: 'faint' }, '—'), l.buyer_email && h('div', { class: 'faint' }, l.buyer_email)),
+        h('td', null, l.product_name ? h('span', { class: 'chip' }, l.product_name) : h('span', { class: 'faint' }, '—')), h('td', null, groupTag(l.group_id)),
         h('td', null, `${l.used} / ${limitText(l.limit)}`), h('td', null, h('span', { class: 'chip ' + l.state }, l.state)),
-        h('td', { class: 'muted' }, date(l.created_at)), h('td', { class: 'keycell muted' }, l.issued_ip || '—'))) : h('tr', null, h('td', { colspan: 7, class: 'muted' }, 'No licenses found')))));
+        h('td', { class: 'muted' }, date(l.created_at)), h('td', { class: 'keycell muted' }, l.issued_ip || '—'))) : h('tr', null, h('td', { colspan: 8, class: 'muted' }, 'No licenses found')))));
   }
-  const search = h('input', { placeholder: 'Search key, owner, note, IP…', oninput: debounce(e => { filters.q = e.target.value; load(); }) });
+  const search = h('input', { placeholder: 'Search key, owner, buyer email, note, IP…', oninput: debounce(e => { filters.q = e.target.value; load(); }) });
   const status = h('select', { onchange: e => { filters.status = e.target.value; load(); } }, h('option', { value: '' }, 'All statuses'), h('option', { value: 'active' }, 'Active'), h('option', { value: 'blocked' }, 'Blocked'));
-  const grp = h('select', { onchange: e => { filters.group = e.target.value; load(); } }, h('option', { value: '' }, 'All groups'), groups.map(g => h('option', { value: g.id }, g.name)));
+  const grp = can('groups.view') ? h('select', { onchange: e => { filters.group = e.target.value; load(); } }, h('option', { value: '' }, 'All groups'), groups.map(g => h('option', { value: g.id }, g.name))) : null;
+  const prod = products.length > 1 || (products.length && !window.__me.limited) ? h('select', { onchange: e => { filters.product = e.target.value; load(); } }, h('option', { value: '' }, 'All products'),
+    products.map(p => h('option', { value: p.id }, p.name)), !window.__me.limited && h('option', { value: 'none' }, 'No product')) : null;
   async function cleanUp() {
     const days = 7, q = { older_than_days: days };
     const { count } = await api('POST', '/api/admin/licenses/purge-unused', { ...q, dry_run: true });
@@ -135,7 +164,9 @@ async function licenses() {
     toast(`Deleted ${r.count} unused license${r.count === 1 ? '' : 's'}.`);
     await load();
   }
-  render(head('Licenses', h('button', { class: 'btn', title: 'Delete licenses that downloads created but nobody ever used', onclick: () => cleanUp().catch(e => toast(e.message, true)) }, 'Clean up unused'), h('button', { class: 'btn primary', onclick: () => licenseForm(null, load) }, '+ New license')), h('div', { class: 'toolbar' }, search, status, grp), body);
+  render(head('Licenses',
+    can('licenses.delete') && h('button', { class: 'btn', title: 'Delete licenses that downloads created but nobody ever used', onclick: () => cleanUp().catch(e => toast(e.message, true)) }, 'Clean up unused'),
+    can('licenses.create') && h('button', { class: 'btn primary', onclick: () => licenseForm(null, load) }, '+ New license')), h('div', { class: 'toolbar' }, search, status, grp, prod), body);
   await load();
 }
 const debounce = (fn, ms = 250) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
@@ -143,12 +174,19 @@ const debounce = (fn, ms = 250) => { let t; return (...a) => { clearTimeout(t); 
 const groupSelect = sel => h('select', { id: 'f-group' }, h('option', { value: '' }, 'No group (default limit)'), groups.map(g => h('option', { value: g.id, selected: g.id === sel }, `${g.name} (${limitText(g.max_servers)} servers)`)));
 const toDateInput = ts => ts ? new Date(ts * 1000).toISOString().slice(0, 10) : '';
 
+let productOptions = []; // [{id, name}] the signed-in person may link a license to
 function licenseForm(lic, done) {
+  const limited = !!window.__me.limited;
+  const prodSel = productOptions.length || limited ? h('select', { id: 'f-product' },
+    !limited && h('option', { value: '' }, 'No product'), productOptions.map(p => h('option', { value: p.id, selected: p.id === lic?.product_id }, p.name))) : null;
   const dlg = h('dialog', null,
     h('h3', { style: { marginBottom: '16px' } }, lic ? 'Edit license' : 'New license'),
     h('div', { class: 'field' }, h('label', null, 'Owner'), h('input', { id: 'f-owner', value: lic?.owner || '', placeholder: 'Name, Discord or BuiltByBit user' })),
+    prodSel && h('div', { class: 'field' }, h('label', null, 'Product'), prodSel, h('div', { class: 'hint' }, limited ? 'Pick the product this license is for.' : 'Which plugin this license belongs to. People limited to a product only see licenses linked to it.')),
+    h('div', { class: 'field' }, h('label', null, 'Buyer email (optional)'), h('input', { id: 'f-buyer', type: 'email', value: lic?.buyer_email || '', placeholder: 'buyer@example.com' }),
+      h('div', { class: 'hint' }, 'When this buyer signs in at the site with that email, the license shows up in their account.')),
     h('div', { class: 'grid2' },
-      h('div', { class: 'field' }, h('label', null, 'Group'), groupSelect(lic?.group_id)),
+      can('groups.view') && h('div', { class: 'field' }, h('label', null, 'Group'), groupSelect(lic?.group_id)),
       h('div', { class: 'field' }, h('label', null, 'Server limit override'), h('input', { id: 'f-max', type: 'number', min: -1, value: lic?.max_servers ?? '', placeholder: 'inherit' }), h('div', { class: 'hint' }, 'Empty = inherit · -1 = unlimited'))),
     h('div', { class: 'field' }, h('label', null, 'Expires'), h('input', { id: 'f-exp', type: 'date', value: toDateInput(lic?.expires_at) })),
     h('div', { class: 'field' }, h('label', null, 'Note'), h('textarea', { id: 'f-note', rows: 2 }, lic?.note || '')),
@@ -156,7 +194,9 @@ function licenseForm(lic, done) {
       h('button', { class: 'btn', onclick: () => dlg.close() }, 'Cancel'),
       h('button', { class: 'btn primary', onclick: async () => {
         const v = id => dlg.querySelector('#' + id).value;
-        const payload = { owner: v('f-owner'), group_id: v('f-group') || null, max_servers: v('f-max') === '' ? null : Number(v('f-max')), expires_at: v('f-exp') ? Math.floor(new Date(v('f-exp') + 'T23:59:59Z') / 1000) : null, note: v('f-note') };
+        const payload = { owner: v('f-owner'), buyer_email: v('f-buyer'), max_servers: v('f-max') === '' ? null : Number(v('f-max')), expires_at: v('f-exp') ? Math.floor(new Date(v('f-exp') + 'T23:59:59Z') / 1000) : null, note: v('f-note') };
+        if (can('groups.view')) payload.group_id = v('f-group') || null;
+        if (prodSel) payload.product_id = v('f-product') || null;
         try {
           const r = lic ? await api('PATCH', `/api/admin/licenses/${lic.id}`, payload) : await api('POST', '/api/admin/licenses', payload);
           dlg.close(); toast(lic ? 'Saved' : `Created ${r.key}`); if (!lic) copy(r.key); done(r);
@@ -169,6 +209,7 @@ function licenseForm(lic, done) {
 async function licenseDrawer(id, refresh) {
   document.querySelector('.drawer')?.remove();
   const l = await api('GET', '/api/admin/licenses/' + id);
+  if (!productOptions.length) productOptions = await api('GET', '/api/admin/products/options').catch(() => []);
   const close = () => { drawer.remove(); refresh?.(); };
   const reload = () => { drawer.remove(); licenseDrawer(id, refresh); refresh?.(); };
   const act = (fn, msg) => async () => { try { await fn(); toast(msg); reload(); } catch (e) { toast(e.message, true); } };
@@ -176,20 +217,21 @@ async function licenseDrawer(id, refresh) {
     h('div', { class: 'row spread' }, h('h2', { class: 'keycell', style: { fontSize: '18px' } }, l.key), h('button', { class: 'btn ghost sm', onclick: close }, '✕')),
     h('div', { class: 'row wrap', style: { margin: '10px 0 18px' } }, h('span', { class: 'chip ' + l.state }, l.state), groupTag(l.group_id), h('span', { class: 'muted' }, `${l.used} / ${limitText(l.limit)} servers`)),
     l.block_reason && h('div', { class: 'err' }, 'Blocked: ' + l.block_reason),
-    h('div', { class: 'muted', style: { marginBottom: '16px' } }, `${l.owner || 'No owner'} · issued ${date(l.created_at)} via ${l.source}${l.issued_ip ? ' from ' + l.issued_ip : ''}${l.expires_at ? ' · expires ' + date(l.expires_at) : ''}`, l.note && h('div', { class: 'faint' }, l.note)),
+    h('div', { class: 'muted', style: { marginBottom: '16px' } }, `${l.owner || 'No owner'} · issued ${date(l.created_at)} via ${l.source}${l.issued_ip ? ' from ' + l.issued_ip : ''}${l.expires_at ? ' · expires ' + date(l.expires_at) : ''}`,
+      l.product_name && h('div', { class: 'faint' }, 'Product: ' + l.product_name),  l.buyer_email && h('div', { class: 'faint' }, 'Buyer: ' + l.buyer_email), l.note && h('div', { class: 'faint' }, l.note)),
     h('div', { class: 'row wrap', style: { marginBottom: '22px' } },
       h('button', { class: 'btn sm', onclick: () => copy(l.key) }, 'Copy key'),
-      h('button', { class: 'btn sm', onclick: () => licenseForm(l, reload) }, 'Edit / set limit'),
-      l.status === 'active'
+      can('licenses.edit') && h('button', { class: 'btn sm', onclick: () => licenseForm(l, reload) }, 'Edit / set limit'),
+      can('licenses.block') && (l.status === 'active'
         ? h('button', { class: 'btn sm danger', onclick: async () => { const r = prompt('Block reason (shown to the plugin owner):', ''); if (r !== null) act(() => api('PATCH', `/api/admin/licenses/${l.id}`, { status: 'blocked', block_reason: r }), 'Blocked')(); } }, 'Block')
-        : h('button', { class: 'btn sm', onclick: act(() => api('PATCH', `/api/admin/licenses/${l.id}`, { status: 'active' }), 'Unblocked') }, 'Unblock'),
-      h('button', { class: 'btn sm danger', onclick: async () => { if (await confirmDialog('Delete license?', 'The license and all its servers are removed permanently. Plugins using it will stop working.', 'Delete')) { await api('DELETE', `/api/admin/licenses/${l.id}`); toast('Deleted'); close(); } } }, 'Delete')),
-    h('h3', { style: { marginBottom: '8px' } }, 'Servers'),
-    l.servers.filter(s => s.status !== 'removed').length ? l.servers.filter(s => s.status !== 'removed').map(s => h('div', { class: 'audit-line' },
+        : h('button', { class: 'btn sm', onclick: act(() => api('PATCH', `/api/admin/licenses/${l.id}`, { status: 'active' }), 'Unblocked') }, 'Unblock')),
+      can('licenses.delete') && h('button', { class: 'btn sm danger', onclick: async () => { if (await confirmDialog('Delete license?', 'The license and all its servers are removed permanently. Plugins using it will stop working.', 'Delete')) { await api('DELETE', `/api/admin/licenses/${l.id}`); toast('Deleted'); close(); } } }, 'Delete')),
+    can('servers.view') && h('h3', { style: { marginBottom: '8px' } }, 'Servers'),
+    can('servers.view') && (l.servers.filter(s => s.status !== 'removed').length ? l.servers.filter(s => s.status !== 'removed').map(s => h('div', { class: 'audit-line' },
       h('div', null, h('b', null, s.name || 'Unnamed'), ' ', h('span', { class: 'chip ' + s.status }, s.status), h('div', { class: 'muted keycell' }, `${s.ip}:${s.port ?? '?'} · ${ago(s.last_seen)}`)),
-      h('div', { class: 'row' },
+      can('servers.manage') && h('div', { class: 'row' },
         h('button', { class: 'btn sm', onclick: act(() => api('PATCH', `/api/admin/servers/${s.id}`, { status: s.status === 'disabled' ? 'active' : 'disabled' }), 'Updated') }, s.status === 'disabled' ? 'Enable' : 'Disable'),
-        h('button', { class: 'btn sm danger', onclick: act(() => api('DELETE', `/api/admin/servers/${s.id}`), 'Removed') }, 'Remove')))) : h('div', { class: 'muted' }, 'No servers'),
+        h('button', { class: 'btn sm danger', onclick: act(() => api('DELETE', `/api/admin/servers/${s.id}`), 'Removed') }, 'Remove')))) : h('div', { class: 'muted' }, 'No servers')),
     l.same_ip.length > 0 && h('div', { style: { marginTop: '24px' } }, h('h3', { style: { marginBottom: '8px' } }, `Other licenses issued from ${l.issued_ip}`),
       l.same_ip.map(o => h('div', { class: 'audit-line', style: { cursor: 'pointer' }, onclick: () => licenseDrawer(o.id, refresh) }, keyCell(o.key), h('span', { class: 'faint' }, `${o.owner || '—'} · ${date(o.created_at)}`)))));
   document.body.append(drawer);
@@ -197,7 +239,7 @@ async function licenseDrawer(id, refresh) {
 
 // --- servers ---------------------------------------------------------------
 async function servers() {
-  const hb = Number((await api('GET', '/api/admin/settings')).heartbeat_minutes) || 1;
+  const hb = WS.heartbeat_minutes || 1;
   const body = h('div', { class: 'card table-card' });
   async function load(q = '') {
     const rows = await api('GET', '/api/admin/servers?q=' + encodeURIComponent(q));
@@ -205,9 +247,9 @@ async function servers() {
     body.replaceChildren(h('table', null, h('thead', null, h('tr', null, ['Server', 'Address', 'License', 'Version', 'Last seen', 'Status', ''].map(t => h('th', null, t)))),
       h('tbody', null, rows.length ? rows.map(s => h('tr', null,
         h('td', null, h('b', null, s.name || 'Unnamed')), h('td', { class: 'keycell' }, `${s.ip}:${s.port ?? '?'}`),
-        h('td', null, keyCell(s.license_key), s.owner && h('div', { class: 'faint' }, s.owner)), h('td', { class: 'muted' }, s.version || '—'), h('td', { class: 'muted' }, ago(s.last_seen)),
+        h('td', null, s.license_key ? keyCell(s.license_key) : h('span', { class: 'faint' }, '—'), s.owner && h('div', { class: 'faint' }, s.owner)), h('td', { class: 'muted' }, s.version || '—'), h('td', { class: 'muted' }, ago(s.last_seen)),
         h('td', null, h('span', { class: 'chip ' + (s.status === 'disabled' ? 'disabled' : s.last_seen > online ? 'online' : 'idle') }, s.status === 'disabled' ? 'disabled' : s.last_seen > online ? 'online' : 'idle')),
-        h('td', null, h('div', { class: 'row' },
+        h('td', null, can('servers.manage') && h('div', { class: 'row' },
           h('button', { class: 'btn sm', onclick: async () => { await api('PATCH', `/api/admin/servers/${s.id}`, { status: s.status === 'disabled' ? 'active' : 'disabled' }); load(q); } }, s.status === 'disabled' ? 'Enable' : 'Disable'),
           h('button', { class: 'btn sm danger', onclick: async () => { if (await confirmDialog('Remove server?', 'It will be shut down at its next check-in and the slot freed.', 'Remove')) { await api('DELETE', `/api/admin/servers/${s.id}`); load(q); } } }, 'Remove'))))) : h('tr', null, h('td', { colspan: 7, class: 'muted' }, 'No servers yet')))));
   }
@@ -252,10 +294,10 @@ async function products() {
     } catch (e) { toast(e.message, true); drop.classList.remove('busy'); }
   }
 
-  grid.replaceChildren(...(list.length ? list.map(productCard) : [h('div', { class: 'muted', style: { padding: '8px' } }, 'No products yet. Drop a plugin jar above to create your first licensed download.')]));
+  grid.replaceChildren(...(list.length ? list.map(productCard) : [h('div', { class: 'muted', style: { padding: '8px' } }, can('products.create') ? 'No products yet. Drop a plugin jar above to create your first licensed download.' : 'There are no products you can see yet.')]));
   render(head('Products'),
     h('p', { class: 'muted', style: { marginTop: '-12px' } }, 'Upload your finished plugin jar as it is. LicenseX wraps it so it checks its buyer\'s license before starting, and hands each buyer their own copy with the license built in. For BuiltByBit, use the BuiltByBit build button.'),
-    drop, grid);
+    can('products.create') ? drop : null, grid);
 }
 
 function productCard(p) {
@@ -274,18 +316,19 @@ function productCard(p) {
     integrationNote(p),
     h('div', { class: 'row wrap', style: { gap: '18px', margin: '14px 0', color: 'var(--muted)', fontSize: '13px' } },
       h('span', null, h('b', { style: { color: 'var(--text)', fontSize: '18px' } }, p.downloads), ' downloads'),
-      h('span', null, 'Licenses issued per download · ', p.group_id ? 'assigned to group' : 'default limit')),
+      p.licenses != null && h('span', null, h('b', { style: { color: 'var(--text)', fontSize: '18px' } }, p.licenses), ' licenses'),
+      p.bbb_resource_id && h('span', null, `BuiltByBit resource ${p.bbb_resource_id}`)),
     h('label', { style: { marginTop: '4px' } }, 'Direct download URL (your own site or Discord; add &user=<buyer id> to keep one license per buyer)'),
     h('div', { class: 'url-row' }, h('input', { class: 'mono', readonly: true, value: p.download_url, onclick: e => e.target.select() }),
       h('button', { class: 'btn sm', onclick: () => copy(p.download_url) }, 'Copy')),
     h('div', { class: 'row wrap', style: { marginTop: '14px', gap: '8px' } },
       h('a', { class: 'btn sm primary', href: p.download_url, target: '_blank' }, '⬇ Test download'),
-      p.has_file && p.integration && (p.integration.ok || p.integration.integrated) && h('a', { class: 'btn sm', href: wsq(`/api/admin/products/${p.id}/bbb-build`), title: 'The jar to upload to BuiltByBit. BuiltByBit fills in each buyer\'s key.' }, '⬇ BuiltByBit build'),
-      h('button', { class: 'btn sm', onclick: () => replaceInput.click() }, p.has_file ? 'Replace file' : 'Upload file'), replaceInput,
-      h('button', { class: 'btn sm', onclick: () => productEdit(p) }, 'Edit'),
-      h('button', { class: 'btn sm', onclick: patch({ enabled: !p.enabled }, p.enabled ? 'Disabled' : 'Enabled') }, p.enabled ? 'Disable' : 'Enable'),
-      h('button', { class: 'btn sm', onclick: async () => { if (await confirmDialog('Regenerate download token?', 'The old BuiltByBit URL stops working immediately. Update your resource with the new URL.', 'Regenerate', false)) patch({ regenerate_token: true }, 'New token generated')(); } }, 'New token'),
-      h('button', { class: 'btn sm danger', onclick: async () => { if (await confirmDialog('Delete product?', `"${p.name}" and its uploaded file are removed. Issued licenses are not affected.`, 'Delete')) { await api('DELETE', `/api/admin/products/${p.id}`); toast('Deleted'); refresh(); } } }, 'Delete')));
+      can('products.edit') && p.has_file && p.integration && (p.integration.ok || p.integration.integrated) && h('a', { class: 'btn sm', href: wsq(`/api/admin/products/${p.id}/bbb-build`), title: 'The jar to upload to BuiltByBit. BuiltByBit fills in each buyer\'s key.' }, '⬇ BuiltByBit build'),
+      can('products.edit') && h('button', { class: 'btn sm', onclick: () => replaceInput.click() }, p.has_file ? 'Replace file' : 'Upload file'), replaceInput,
+      can('products.edit') && h('button', { class: 'btn sm', onclick: () => productEdit(p) }, 'Edit'),
+      can('products.edit') && h('button', { class: 'btn sm', onclick: patch({ enabled: !p.enabled }, p.enabled ? 'Disabled' : 'Enabled') }, p.enabled ? 'Disable' : 'Enable'),
+      can('products.edit') && h('button', { class: 'btn sm', onclick: async () => { if (await confirmDialog('Regenerate download token?', 'The old BuiltByBit URL stops working immediately. Update your resource with the new URL.', 'Regenerate', false)) patch({ regenerate_token: true }, 'New token generated')(); } }, 'New token'),
+      can('products.delete') && h('button', { class: 'btn sm danger', onclick: async () => { if (await confirmDialog('Delete product?', `"${p.name}" and its uploaded file are removed. Issued licenses are not affected.`, 'Delete')) { await api('DELETE', `/api/admin/products/${p.id}`); toast('Deleted'); refresh(); } } }, 'Delete')));
 }
 
 function integrationNote(p) {
@@ -300,11 +343,13 @@ function integrationNote(p) {
 function productEdit(p) {
   const dlg = h('dialog', null, h('h3', { style: { marginBottom: '16px' } }, 'Edit product'),
     h('div', { class: 'field' }, h('label', null, 'Name'), h('input', { id: 'p-name', value: p.name })),
-    h('div', { class: 'field' }, h('label', null, 'Assign issued licenses to group'), groupSelect(p.group_id),
+    can('groups.view') && h('div', { class: 'field' }, h('label', null, 'Assign issued licenses to group'), groupSelect(p.group_id),
       h('div', { class: 'hint' }, 'Buyers of this product get a license in this group, inheriting its server limit.')),
+    h('div', { class: 'field' }, h('label', null, 'BuiltByBit resource id (optional)'), h('input', { id: 'p-bbb', value: p.bbb_resource_id || '', inputmode: 'numeric', placeholder: 'e.g. 123456' }),
+      h('div', { class: 'hint' }, 'The number in this resource\'s BuiltByBit address. Licenses BuiltByBit asks for are then linked to this product, so people limited to it can see them.')),
     h('div', { class: 'row', style: { 'justify-content': 'flex-end' } }, h('button', { class: 'btn', onclick: () => dlg.close() }, 'Cancel'),
       h('button', { class: 'btn primary', onclick: async () => {
-        try { await api('PATCH', `/api/admin/products/${p.id}`, { name: dlg.querySelector('#p-name').value, group_id: dlg.querySelector('#f-group').value || null }); dlg.close(); toast('Saved'); products(); }
+        try { await api('PATCH', `/api/admin/products/${p.id}`, { name: dlg.querySelector('#p-name').value, bbb_resource_id: dlg.querySelector('#p-bbb').value.trim(), ...(can('groups.view') ? { group_id: dlg.querySelector('#f-group').value || null } : {}) }); dlg.close(); toast('Saved'); products(); }
         catch (e) { toast(e.message, true); }
       } }, 'Save')));
   dlg.addEventListener('close', () => dlg.remove()); document.body.append(dlg); dlg.showModal();
@@ -427,43 +472,42 @@ const untilText = w => {
   const d = w.plan_until ? date(w.plan_until) : '';
   if (w.plan_key === 'free') return 'Free plan';
   if (w.lapsed) return `Ended ${d}. Free plan limits apply.`;
-  if (w.plan_source === 'manual') return w.plan_until ? `Granted by the site owner until ${d}` : 'Granted by the site owner, no end date';
-  if (w.plan_status === 'canceled') return `Canceled. You keep this plan until ${d}`;
-  if (w.plan_status === 'past_due') return `Payment failed. Plan active until ${d}`;
-  return w.plan_until ? `Paid through ${d}` : 'Paid once, no end date';
+  const how = w.plan_note ? 'Activated with a BuiltByBit key' : 'Granted by the site owner';
+  return w.plan_until ? `${how}, active until ${d}` : `${how}, no end date`;
 };
 
 async function billingPage() {
   const pricing = await api('GET', '/api/public/pricing');
-  const w = WS, paid = new URLSearchParams(location.search).get('paid') === '1';
-  const go = async (path, body) => { try { const r = await api('POST', path, body); location.href = r.url; } catch (e) { toast(e.message, true); } };
-  const site = pricing.site;
+  const w = WS, site = pricing.site;
   const contact = p => site.discord_url ? h('a', { class: 'btn sm primary', href: site.discord_url, target: '_blank', rel: 'noopener noreferrer' }, 'Buy on Discord')
     : site.support_email ? h('a', { class: 'btn sm primary', href: `mailto:${site.support_email}?subject=${encodeURIComponent(p.name + ' plan')}` }, 'Contact us to buy') : h('span', { class: 'muted' }, 'Coming soon');
+  const buy = p => p.buy_url ? h('a', { class: 'btn sm primary', href: p.buy_url, target: '_blank', rel: 'noopener noreferrer' }, p.interval === 'once' ? 'Buy on BuiltByBit' : 'Subscribe on BuiltByBit') : contact(p);
 
-  if (paid && w.plan_key === 'free') {            // the payment webhook can take a few seconds to arrive
-    let tries = 0;
-    buildTimer = setInterval(async () => { tries++; try { const n = await api('GET', '/api/workspace'); if (n.plan_key !== 'free' || tries > 12) { clearInterval(buildTimer); history.replaceState(null, '', '/dashboard#billing'); WS = n; billingPage(); } } catch { clearInterval(buildTimer); } }, 2000);
-  }
-  const statusChip = w.lapsed ? ['blocked', 'Ended'] : w.plan_status === 'past_due' ? ['idle', 'Payment failed'] : w.plan_status === 'canceled' ? ['idle', 'Canceled'] : ['active', 'Active'];
+  const input = h('input', { id: 'redeem-key', placeholder: 'LX-XXXX-XXXX-XXXX-XXXX', autocomplete: 'off', spellcheck: 'false', class: 'mono' });
+  const activate = async e => {
+    e?.preventDefault();
+    try { const r = await api('POST', '/api/billing/redeem', { key: input.value }); toast(r.message); WS = r.workspace; billingPage(); }
+    catch (err) { toast(err.message, true); }
+  };
+  const statusChip = w.lapsed ? ['blocked', 'Ended'] : ['active', 'Active'];
   render(head('Billing'),
-    paid ? h('div', { class: 'notice ok' }, h('b', null, w.plan_key === 'free' ? 'Payment received. ' : 'Thank you! '), w.plan_key === 'free' ? 'Your plan is being activated, this takes a few seconds…' : `Your ${w.plan.name} plan is active.`) : null,
     h('div', { class: 'card', style: { marginBottom: '16px' } },
       h('div', { class: 'row spread wrap' },
         h('div', null, h('div', { class: 'muted', style: { fontSize: '12px', textTransform: 'uppercase', letterSpacing: '.06em' } }, 'Current plan'),
           h('div', { style: { fontSize: '26px', fontWeight: 700, letterSpacing: '-.02em' } }, w.plan.name, ' ', h('span', { class: 'muted', style: { fontSize: '15px', fontWeight: 500 } }, money(w.plan))),
           h('div', { class: 'muted', style: { marginTop: '4px' } }, untilText(w))),
-        h('div', { class: 'row wrap' }, w.plan_key !== 'free' ? h('span', { class: 'chip ' + statusChip[0] }, statusChip[1]) : null,
-          w.billing.can_portal ? h('button', { class: 'btn primary', onclick: () => go('/api/billing/portal') }, 'Manage billing') : null)),
+        w.plan_key !== 'free' ? h('span', { class: 'chip ' + statusChip[0] }, statusChip[1]) : null),
       h('div', { class: 'meters' }, meter('Plugins', w.usage.products, w.plan.max_products), meter('Licenses', w.usage.licenses, w.plan.max_licenses))),
+    h('form', { class: 'card', style: { marginBottom: '16px', maxWidth: '680px' }, onsubmit: activate },
+      h('h3', { style: { marginBottom: '4px' } }, 'Activate a key'),
+      h('p', { class: 'muted', style: { marginTop: 0, fontSize: '14px' } }, 'Bought a plan on BuiltByBit? Download the file you got there: it contains your access key. Paste it here to switch the plan on.'),
+      h('div', { class: 'url-row' }, input, h('button', { class: 'btn primary', type: 'submit' }, 'Activate'))),
     h('h3', { style: { margin: '24px 0 10px' } }, 'Plans'),
     h('div', { class: 'plan-rows' }, pricing.plans.map(p => h('div', { class: 'card plan-row' + (p.key === w.plan.key ? ' current' : '') },
       h('div', null, h('b', null, p.name), p.highlight ? h('span', { class: 'tag', style: { marginLeft: '8px' } }, 'Popular') : null, h('div', { class: 'muted', style: { fontSize: '13px' } }, `${plugins(p.max_products)} · ${cap(p.max_licenses)} licenses`)),
       h('div', { style: { fontWeight: 600 } }, money(p)),
-      p.key === w.plan.key ? h('span', { class: 'chip active' }, 'Current')
-        : p.price_cents === 0 ? h('span', { class: 'muted', style: { fontSize: '13px' } }, w.billing.can_portal ? 'Cancel in billing' : '')
-        : pricing.payments ? h('button', { class: 'btn sm primary', onclick: () => go('/api/billing/checkout', { plan: p.key }) }, p.interval === 'once' ? 'Buy' : 'Choose') : contact(p)))),
-    h('p', { class: 'muted', style: { fontSize: '13px', marginTop: '14px' } }, 'If your plan ends, existing licenses keep working. You just cannot add more than the Free plan allows.'));
+      p.key === w.plan.key ? h('span', { class: 'chip active' }, 'Current') : p.price_cents === 0 ? h('span') : buy(p)))),
+    h('p', { class: 'muted', style: { fontSize: '13px', marginTop: '14px' } }, 'If your plan ends, existing licenses keep working. You just cannot add more than the Free plan allows. A monthly plan gives you a new key each month on BuiltByBit.'));
 }
 
 // --- customers (owner) ----------------------------------------------------------
@@ -472,7 +516,7 @@ async function customersPage() {
   const reload = () => customersPage();
   const call = async (method, path, body, msg) => { try { await api(method, path, body); if (msg) toast(msg); reload(); } catch (e) { toast(e.message, true); } };
   const rows = list.filter(c => !c.house);
-  const statusOf = c => c.suspended ? ['blocked', 'Suspended'] : c.lapsed ? ['idle', 'Lapsed'] : c.plan_status === 'past_due' ? ['idle', 'Past due'] : c.plan_status === 'canceled' ? ['idle', 'Canceled'] : ['active', 'Active'];
+  const statusOf = c => c.suspended ? ['blocked', 'Suspended'] : c.lapsed ? ['idle', 'Lapsed'] : c.plan_status === 'canceled' ? ['idle', 'Canceled'] : ['active', 'Active'];
 
   const invite = () => {
     const dlg = h('dialog', null, h('h3', { style: { marginBottom: '4px' } }, 'Invite a customer'),
@@ -489,7 +533,7 @@ async function customersPage() {
       h('div', { class: 'field' }, h('label', null, 'Plan'), h('select', { id: 'g-plan' }, plans.map(p => h('option', { value: p.key, selected: p.key === c.plan_key }, `${p.name}${p.active ? '' : ' (hidden)'} · ${money(p)}`)))),
       h('div', { class: 'field' }, h('label', { class: 'trustbox' }, h('input', { type: 'checkbox', id: 'g-forever', checked: !c.plan_until }), 'No end date')),
       h('div', { class: 'field', id: 'g-until-box', hidden: !c.plan_until }, h('label', null, 'Until'), h('input', { type: 'date', id: 'g-until', value: new Date((c.plan_until || Date.now() / 1000 + 30 * 86400) * 1000).toISOString().slice(0, 10) })),
-      h('div', { class: 'hint' }, 'A hand-given plan is never changed by Stripe events. Choosing Free ends it.'),
+      h('div', { class: 'hint' }, 'A hand-given plan does not renew by itself. Choosing Free ends it.'),
       h('div', { class: 'row', style: { 'justify-content': 'flex-end', marginTop: '14px' } }, h('button', { class: 'btn', onclick: () => dlg.close() }, 'Cancel'),
         h('button', { class: 'btn primary', onclick: async () => {
           const forever = dlg.querySelector('#g-forever').checked, d = dlg.querySelector('#g-until').value;
@@ -505,7 +549,7 @@ async function customersPage() {
       h('thead', null, h('tr', null, ['Customer', 'Plan', 'Status', 'Plugins', 'Licenses', 'Joined', ''].map(t => h('th', null, t)))),
       h('tbody', null, rows.length ? rows.map(c => h('tr', null,
         h('td', null, h('b', null, c.name), h('div', { class: 'muted keycell' }, c.owner_email)),
-        h('td', null, h('b', null, c.plan.name), h('div', { class: 'faint', style: { fontSize: '12px' } }, c.plan_source === 'manual' ? 'given by you' : c.plan_source === 'stripe' ? 'Stripe' : '')),
+        h('td', null, h('b', null, c.plan.name), h('div', { class: 'faint', style: { fontSize: '12px' } }, c.plan_note ? 'BuiltByBit key' : c.plan_source === 'manual' ? 'given by you' : c.plan_source === 'stripe' ? 'paid by card (old)' : '')),
         h('td', null, h('span', { class: 'chip ' + statusOf(c)[0] }, statusOf(c)[1])),
         h('td', { class: 'muted' }, `${c.products} / ${cap(c.plan.max_products)}`), h('td', { class: 'muted' }, `${c.licenses} / ${cap(c.plan.max_licenses)}`), h('td', { class: 'muted' }, date(c.created_at)),
         h('td', null, h('div', { class: 'row', style: { 'justify-content': 'flex-end', flexWrap: 'wrap' } },
@@ -513,13 +557,12 @@ async function customersPage() {
           h('button', { class: 'btn sm', onclick: () => grant(c) }, 'Plan'),
           c.suspended ? h('button', { class: 'btn sm', onclick: () => call('POST', `/api/admin/customers/${c.id}/suspend`, { suspended: false }, 'Unsuspended') }, 'Unsuspend')
             : h('button', { class: 'btn sm danger', onclick: () => { const r = prompt('Reason (shown to their buyers\' plugins):', 'Terms violation'); if (r !== null) call('POST', `/api/admin/customers/${c.id}/suspend`, { suspended: true, reason: r }, 'Suspended'); } }, 'Suspend'),
-          h('button', { class: 'btn sm danger', onclick: async () => { if (await confirmDialog('Delete this customer?', `${c.owner_email}: all of their licenses, products, files and servers are removed permanently, and their buyers' plugins stop working. This does not cancel a Stripe subscription.`, 'Delete everything')) call('DELETE', `/api/admin/customers/${c.id}`, null, 'Deleted'); } }, 'Delete'))))) : h('tr', null, h('td', { colspan: 7, class: 'muted' }, 'No customers yet. They appear here when someone signs up from the pricing page.'))))));
+          h('button', { class: 'btn sm danger', onclick: async () => { if (await confirmDialog('Delete this customer?', `${c.owner_email}: all of their licenses, products, files and servers are removed permanently, and their buyers' plugins stop working.`, 'Delete everything')) call('DELETE', `/api/admin/customers/${c.id}`, null, 'Deleted'); } }, 'Delete'))))) : h('tr', null, h('td', { colspan: 7, class: 'muted' }, 'No customers yet. They appear here when someone signs up from the pricing page.'))))));
 }
 
 // --- plans (owner) ----------------------------------------------------------------
 async function plansPage() {
-  const [plans, s] = await Promise.all([api('GET', '/api/admin/plans'), api('GET', '/api/admin/settings')]);
-  const st = s.stripe || {};
+  const [plans, sales] = await Promise.all([api('GET', '/api/admin/plans'), api('GET', '/api/admin/plan-sales')]);
   const edit = p => {
     const isNew = !p, f = id => dlg.querySelector('#' + id);
     const dlg = h('dialog', { style: { width: 'min(560px, calc(100vw - 32px))' } }, h('h3', { style: { marginBottom: '14px' } }, isNew ? 'New plan' : `Edit ${p.name}`),
@@ -535,6 +578,9 @@ async function plansPage() {
         h('div', { class: 'field' }, h('label', null, 'Plugins allowed'), h('input', { id: 'p-prod', type: 'number', min: -1, value: p?.max_products ?? 5 }), h('div', { class: 'hint' }, '-1 = unlimited')),
         h('div', { class: 'field' }, h('label', null, 'Licenses allowed'), h('input', { id: 'p-lic', type: 'number', min: -1, value: p?.max_licenses ?? 1000 }))),
       h('div', { class: 'field' }, h('label', null, 'Feature bullets (one per line)'), h('textarea', { id: 'p-feat', rows: 5 }, p?.features || '')),
+      p?.key === 'free' ? null : h('div', { class: 'grid2' },
+        h('div', { class: 'field' }, h('label', null, 'BuiltByBit buy link'), h('input', { id: 'p-buy', value: p?.buy_url || '', placeholder: 'https://builtbybit.com/resources/...' }), h('div', { class: 'hint' }, 'The Buy button on the pricing page goes here.')),
+        h('div', { class: 'field' }, h('label', null, 'BuiltByBit resource id'), h('input', { id: 'p-rid', value: p?.bbb_resource_id || '', inputmode: 'numeric', placeholder: 'e.g. 123456' }), h('div', { class: 'hint' }, 'The number in that resource\'s address. Keys from it switch this plan on.'))),
       h('div', { class: 'row wrap' },
         h('label', { class: 'trustbox' }, h('input', { type: 'checkbox', id: 'p-hot', checked: !!p?.highlight }), 'Mark as "Most popular"'),
         p?.key === 'free' ? null : h('label', { class: 'trustbox' }, h('input', { type: 'checkbox', id: 'p-active', checked: p ? !!p.active : true }), 'For sale (shown on the pricing page)')),
@@ -542,22 +588,32 @@ async function plansPage() {
       h('div', { class: 'row', style: { 'justify-content': 'flex-end', marginTop: '10px' } }, h('button', { class: 'btn', onclick: () => dlg.close() }, 'Cancel'),
         h('button', { class: 'btn primary', onclick: async () => {
           const body = { name: f('p-name').value, description: f('p-desc').value, interval: f('p-interval').value, price_cents: Math.round(Number(f('p-price').value) * 100), currency: f('p-cur').value,
-            max_products: Number(f('p-prod').value), max_licenses: Number(f('p-lic').value), features: f('p-feat').value, highlight: f('p-hot').checked, active: f('p-active') ? f('p-active').checked : true, sort: Number(f('p-sort').value) };
+            max_products: Number(f('p-prod').value), max_licenses: Number(f('p-lic').value), features: f('p-feat').value, ...(f('p-buy') ? { buy_url: f('p-buy').value.trim(), bbb_resource_id: f('p-rid').value.trim() } : {}), highlight: f('p-hot').checked, active: f('p-active') ? f('p-active').checked : true, sort: Number(f('p-sort').value) };
           try { isNew ? await api('POST', '/api/admin/plans', { ...body, key: f('p-key').value }) : await api('PATCH', `/api/admin/plans/${p.key}`, body); dlg.close(); toast('Saved'); plansPage(); } catch (e) { toast(e.message, true); }
         } }, 'Save')));
     dlg.addEventListener('close', () => dlg.remove()); document.body.append(dlg); dlg.showModal();
   };
   render(head('Plans', h('button', { class: 'btn primary', onclick: () => edit(null) }, '+ New plan')),
     h('div', { class: 'card', style: { marginBottom: '16px' } },
-      h('div', { class: 'row spread wrap' }, h('h3', null, 'Card payments (Stripe)'), h('span', { class: 'chip ' + (st.configured && st.webhook_configured ? 'active' : st.configured ? 'idle' : 'blocked') }, st.configured && st.webhook_configured ? 'Ready' : st.configured ? 'Add the webhook secret' : 'Not set up')),
-      h('p', { class: 'muted', style: { fontSize: '14px', margin: '6px 0 12px' } }, st.configured ? 'Customers can buy from the pricing page. Plans you give by hand under Customers work either way.' : 'Without Stripe, the pricing page shows a contact button instead of Buy, and you give plans by hand under Customers. Setup steps: docs/BILLING.md'),
-      h('label', null, 'Webhook address to enter in Stripe'), h('div', { class: 'url-row' }, h('input', { class: 'mono', readonly: true, value: st.webhook_url || '', onclick: e => e.target.select() }), h('button', { class: 'btn sm', onclick: () => copy(st.webhook_url) }, 'Copy')),
-      h('div', { class: 'hint' }, 'Events to send: checkout.session.completed, customer.subscription.created, customer.subscription.updated, customer.subscription.deleted, invoice.paid, invoice.payment_failed.')),
+      h('h3', { style: { marginBottom: '4px' } }, 'Selling plans on BuiltByBit'),
+      h('p', { class: 'muted', style: { fontSize: '14px', margin: '6px 0 10px' } }, 'Plans are bought on BuiltByBit: one monthly and one one-time resource. Each resource contains a small file with the "External license key" placeholder using the URL and secret below; whoever downloads it gets an access key and pastes it under Billing in their dashboard to switch the plan on. Enter each plan\'s BuiltByBit link and resource id below (Edit). Step by step: docs/BILLING.md.'),
+      h('label', null, 'URL for the placeholder'), h('div', { class: 'url-row' }, h('input', { class: 'mono', readonly: true, value: sales.callback_url, onclick: e => e.target.select() }), h('button', { class: 'btn sm', onclick: () => copy(sales.callback_url) }, 'Copy')),
+      h('label', { style: { marginTop: '10px' } }, 'Secret for plan resources (only you can see this, not your team)'),
+      h('div', { class: 'url-row' }, h('input', { class: 'mono', readonly: true, value: sales.secret, onclick: e => e.target.select() }), h('button', { class: 'btn sm', onclick: () => copy(sales.secret) }, 'Copy'),
+        h('button', { class: 'btn sm danger', onclick: async () => { if (await confirmDialog('Generate a new secret?', 'BuiltByBit will be refused until you paste the new secret into the placeholder of your plan resources.', 'Generate', false)) { try { await api('POST', '/api/admin/plan-sales/secret'); plansPage(); } catch (e) { toast(e.message, true); } } } }, 'New secret')),
+      h('div', { class: 'hint' }, 'Without a buy link the pricing page shows your Discord or email instead.'),
+      sales.keys.length ? h('details', { style: { marginTop: '14px' } }, h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, `Access keys handed out (${sales.keys.length})`),
+        h('div', { class: 'table-card', style: { marginTop: '8px' } }, h('table', null,
+          h('thead', null, h('tr', null, ['Key', 'Plan', 'Buyer', 'Status', ''].map(t => h('th', null, t)))),
+          h('tbody', null, sales.keys.map(k => h('tr', null,
+            h('td', { class: 'keycell' }, k.key), h('td', null, k.plan_key, k.period ? h('span', { class: 'faint' }, ' ' + k.period) : null), h('td', { class: 'muted' }, `BuiltByBit #${k.bbb_user}`),
+            h('td', null, k.redeemed_at ? h('span', { class: 'chip active' }, `used by ${k.workspace || 'a deleted account'}`) : h('span', { class: 'chip ' + (k.status === 'active' ? 'idle' : 'blocked') }, k.status === 'active' ? 'not used yet' : 'cancelled')),
+            h('td', null, !k.redeemed_at && k.status === 'active' ? h('button', { class: 'btn sm danger', title: 'Refund: this key will stop working', onclick: async () => { if (await confirmDialog('Cancel this key?', 'It can no longer be used to activate a plan.', 'Cancel key')) { try { await api('POST', `/api/admin/plan-keys/${k.id}/revoke`); plansPage(); } catch (e) { toast(e.message, true); } } } }, 'Cancel') : null))))))) : null),
     h('div', { class: 'card table-card' }, h('table', null,
       h('thead', null, h('tr', null, ['Plan', 'Price', 'Plugins', 'Licenses', 'Customers', ''].map(t => h('th', null, t)))),
       h('tbody', null, plans.map(p => h('tr', null,
         h('td', null, h('b', null, p.name), ' ', h('span', { class: 'faint keycell' }, p.key), p.highlight ? h('span', { class: 'tag', style: { marginLeft: '8px' } }, 'Popular') : null, !p.active ? h('span', { class: 'chip idle', style: { marginLeft: '8px' } }, 'Hidden') : null),
-        h('td', null, money(p)), h('td', { class: 'muted' }, cap(p.max_products)), h('td', { class: 'muted' }, cap(p.max_licenses)), h('td', { class: 'muted' }, p.customers),
+        h('td', null, money(p), p.bbb_resource_id ? h('div', { class: 'faint', style: { fontSize: '12px' } }, `BuiltByBit resource ${p.bbb_resource_id}`) : p.key !== 'free' ? h('div', { class: 'faint', style: { fontSize: '12px' } }, 'no resource id yet') : null), h('td', { class: 'muted' }, cap(p.max_products)), h('td', { class: 'muted' }, cap(p.max_licenses)), h('td', { class: 'muted' }, p.customers),
         h('td', null, h('div', { class: 'row', style: { 'justify-content': 'flex-end' } }, h('button', { class: 'btn sm', onclick: () => edit(p) }, 'Edit'),
           p.key === 'free' ? null : h('button', { class: 'btn sm danger', onclick: async () => { if (await confirmDialog('Delete this plan?', `"${p.name}" is removed. Plans customers are on cannot be deleted: hide them instead.`, 'Delete')) { try { await api('DELETE', `/api/admin/plans/${p.key}`); toast('Deleted'); plansPage(); } catch (e) { toast(e.message, true); } } } }, 'Delete')))))))));
 }
@@ -577,11 +633,11 @@ async function groupsPage() {
         } }, 'Save')));
     dlg.addEventListener('close', () => dlg.remove()); document.body.append(dlg); dlg.showModal();
   };
-  render(head('Groups', h('button', { class: 'btn primary', onclick: () => edit(null) }, '+ New group')),
+  render(head('Groups', can('groups.manage') && h('button', { class: 'btn primary', onclick: () => edit(null) }, '+ New group')),
     h('p', { class: 'muted', style: { marginTop: '-12px' } }, 'Groups set a shared server limit. A limit set directly on a license always wins.'),
     h('div', { class: 'card table-card' }, h('table', null, h('thead', null, h('tr', null, ['Group', 'Server limit', 'Licenses', ''].map(t => h('th', null, t)))),
       h('tbody', null, groups.length ? groups.map(g => h('tr', null, h('td', null, h('span', { class: 'tag', style: { '--c': g.color } }, g.name)), h('td', null, limitText(g.max_servers)), h('td', { class: 'muted' }, g.licenses),
-        h('td', null, h('div', { class: 'row', style: { 'justify-content': 'flex-end' } }, h('button', { class: 'btn sm', onclick: () => edit(g) }, 'Edit'),
+        h('td', null, can('groups.manage') && h('div', { class: 'row', style: { 'justify-content': 'flex-end' } }, h('button', { class: 'btn sm', onclick: () => edit(g) }, 'Edit'),
           h('button', { class: 'btn sm danger', onclick: async () => { if (await confirmDialog('Delete group?', `Licenses in "${g.name}" fall back to the default limit.`, 'Delete')) { await api('DELETE', `/api/admin/groups/${g.id}`); groupsPage(); } } }, 'Delete'))))) : h('tr', null, h('td', { colspan: 4, class: 'muted' }, 'No groups yet'))))));
 }
 
@@ -652,7 +708,7 @@ async function settings() {
     s.password_login === false ? h('div', { class: 'hint' }, 'Password login is turned off in the server config.') : h('div', { class: 'hint' }, 'The admin password still works as a backup way in.'));
 
   const site = window.__me.role === 'platform' && WS.house;   // site-wide cards are the owner's, in the owner's own workspace
-  render(head('Settings'), site && !s.public_url_set && !/^(localhost|127\.0\.0\.1)$/.test(location.hostname) ? h('div', { class: 'notice warn' }, h('b', null, 'Set LICENSEX_PUBLIC_URL. '), 'Without it, download links, the address baked into plugins and the sign-in callbacks below are guessed from the browser request and can be wrong behind a proxy. Set it to your real https address (see DEPLOY.md).') : null, site ? h('div', { class: 'notice ok' }, 'Site-wide settings (branding, sign-in, backups) are below the workspace settings. Customers only see the workspace settings.') : null, site ? access : null, bbb, site ? brand : null, site ? backup : null, h('div', { class: 'card', style: { maxWidth: '680px' } },
+  render(head('Settings'), site && !s.public_url_set && !/^(localhost|127\.0\.0\.1)$/.test(location.hostname) ? h('div', { class: 'notice warn' }, h('b', null, 'Set LICENSEX_PUBLIC_URL. '), 'Without it, download links, the address baked into plugins and the sign-in callbacks below are guessed from the browser request and can be wrong behind a proxy. Set it to your real https address (see DEPLOY.md).') : null, site ? h('div', { class: 'notice ok' }, 'Site-wide settings (branding, sign-in, backups) are below the workspace settings. Customers only see the workspace settings.') : null, site ? access : null, bbb, site || (WS.house && s.site_access) ? brand : null, site ? backup : null, h('div', { class: 'card', style: { maxWidth: '680px' } },
     num('default_limit', 'Default server limit', 'Applies to licenses with no group and no override. -1 = unlimited.', -1),
     num('heartbeat_minutes', 'Plugin check-in interval (minutes)', 'How often running plugins re-validate. Removals and blocks take effect within this window.', 1),
     toggle('claims_enabled', 'Issue licenses on download', 'When off, new downloads cannot claim a license (existing licenses keep working).'),
