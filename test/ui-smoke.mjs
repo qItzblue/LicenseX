@@ -36,6 +36,8 @@ async function walk(page, label, expected) {
     // a page is drawn once #view shows a heading different from the previous page's (the old heading would satisfy a plain selector)
     await page.waitForFunction(prev => { const t = document.querySelector('#view h1')?.innerText.trim(); return !!t && t !== prev; }, previous, { timeout: 8000 });
     previous = await page.evaluate(() => document.querySelector('#view h1').innerText.trim());
+    // the heading can be drawn a moment before the rest of the page
+    await page.waitForFunction(() => document.querySelector('#view').innerText.trim().length > 10, null, { timeout: 8000 }).catch(() => {});
     const text = await page.$eval('#view', v => v.innerText);
     assert.ok(text.trim().length > 10, `${label}/${p}: page is empty`);
     assert.ok(!/\b(undefined|null|\[object Object\])\b/.test(text), `${label}/${p}: shows a raw value: ${text.match(/.{0,30}\b(undefined|null|\[object Object\])\b.{0,30}/)?.[0]}`);
@@ -133,9 +135,10 @@ try {
     const d = await newPage(ctx2, 'two-factor');
     await d.goto(base + raw.location);
     await d.waitForSelector('#code');
-    await d.fill('#code', '000000'); await d.click('#codeGo');
-    await d.waitForFunction(() => /not right/.test(document.body.innerText));
-    await d.fill('#code', totp(base32Decode(secret), Math.floor(Date.now() / 30000) + 1)); await d.click('#codeGo');
+    await d.fill('#code', '000000');   // six digits submit by themselves
+    await d.waitForFunction(() => /didn't work/.test(document.body.innerText));
+    assert.equal(await d.locator('.lx-otp input').count(), 6, 'six digit boxes');
+    await d.fill('#code', totp(base32Decode(secret), Math.floor(Date.now() / 30000) + 1));
     await d.waitForURL(/\/dashboard$/);
     await d.waitForSelector('nav a');
   }
@@ -297,7 +300,7 @@ async function buyerFlows() {
   await buyer.waitForURL('**/account');
   await buyer.goto(base + '/login');
   await buyer.waitForSelector('.who');
-  assert.ok((await buyer.innerText('.card')).includes('Pat Buyer') && (await buyer.innerText('.card')).includes('Sign out'));
+  assert.ok((await buyer.innerText('#view .lx-card')).includes('Pat Buyer') && (await buyer.innerText('#view .lx-card')).includes('Sign out'));
   await buyer.goto(base + '/');
   await buyer.waitForSelector('nav.top a[href="/account"]');
   assert.equal(await buyer.locator('nav.top a[href="/dashboard"]').count(), 0, 'a buyer without a workspace gets no Dashboard button');
