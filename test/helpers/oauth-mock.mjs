@@ -38,17 +38,22 @@ export function oauthEnv(mockBase) {
 
 export const googleUser = (email, { verified = true, name } = {}) => ({ user: { sub: 'g-' + email, email, email_verified: verified, name: name || email.split('@')[0], picture: '' } });
 
-/** Signs `profile` in with Google through the real redirect flow. Returns the session cookie. */
-export async function signIn(base, mock, profile) {
-  const cookiesOf = res => Object.fromEntries(res.headers.getSetCookie().map(c => c.split(';')[0].split(/=(.*)/s).slice(0, 2)));
+const cookiesOf = res => Object.fromEntries(res.headers.getSetCookie().map(c => c.split(';')[0].split(/=(.*)/s).slice(0, 2)));
+/** Runs the redirect flow for `profile` and returns where it ended up and the cookies it set (for the two-factor step). */
+export async function signInRaw(base, mock, profile, next = '') {
   mock.as(profile);
-  const start = await fetch(`${base}/auth/google`, { redirect: 'manual' });
+  const start = await fetch(`${base}/auth/google${next ? '?next=' + encodeURIComponent(next) : ''}`, { redirect: 'manual' });
   assert.equal(start.status, 302);
   const oauth = 'lx_oauth=' + cookiesOf(start).lx_oauth;
   const atProvider = await fetch(start.headers.get('location'), { redirect: 'manual' });
   const cb = new URL(atProvider.headers.get('location'));
   const done = await fetch(base + cb.pathname + cb.search, { redirect: 'manual', headers: { Cookie: oauth } });
-  const c = cookiesOf(done);
+  return { location: done.headers.get('location'), cookies: cookiesOf(done) };
+}
+
+/** Signs `profile` in with Google through the real redirect flow. Returns the session cookie. */
+export async function signIn(base, mock, profile) {
+  const { cookies: c } = await signInRaw(base, mock, profile);
   assert.ok(c.lx_user, 'sign-in should set a session cookie');
   return 'lx_user=' + c.lx_user;
 }

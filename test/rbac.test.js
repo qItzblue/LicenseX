@@ -68,7 +68,8 @@ test('the permission catalogue is consistent', () => {
 });
 
 test('every admin route is guarded: no silent open doors', () => {
-  const OPEN = new Set(['GET /api/admin/me', 'GET /api/admin/stats', 'GET /api/workspace']); // any signed-in team member; what they see is filtered inside
+  const OPEN = new Set(['GET /api/admin/me', 'GET /api/admin/stats', 'GET /api/workspace', // any signed-in team member; what they see is filtered inside
+    'GET /api/admin/2fa', 'POST /api/admin/2fa/setup', 'POST /api/admin/2fa/enable', 'POST /api/admin/2fa/disable', 'POST /api/admin/2fa/recovery']); // your own sign-in only
   const known = new Set(PERMISSIONS.map(p => p.key));
   for (const [method, re, , opts] of routes) {
     const path = re.source;

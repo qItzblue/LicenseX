@@ -3,7 +3,7 @@
 import { readFileSync, writeFileSync, readdirSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
 import { injectFiles, listEntries, readEntry } from './jarstamp.js';
 import { migrate, reserveWorkspaceIds } from './db.js';
 
@@ -12,15 +12,16 @@ const EMPTY_ZIP = Buffer.concat([Buffer.from([0x50, 0x4b, 0x05, 0x06]), Buffer.a
 // The first four hold the customers (workspaces), their plans and per-workspace settings; backups made before
 // workspaces existed do not have them, and restoring such a backup leaves them alone.
 const WORKSPACE_TABLES = ['workspaces', 'plans', 'ws_settings', 'stripe_events', 'roles', 'members'];
-const TABLES = ['workspaces', 'plans', 'settings', 'ws_settings', 'roles', 'members', 'license_groups', 'licenses', 'servers', 'products', 'member_products', 'buyer_links', 'plan_keys', 'audit', 'stripe_events'];
-const WORKSPACE_OWNED = ['license_groups', 'licenses', 'products', 'audit', 'ws_settings', 'roles', 'members']; // rows that carry a workspace_id
+const TABLES = ['workspaces', 'plans', 'settings', 'ws_settings', 'roles', 'members', 'license_groups', 'licenses', 'servers', 'products', 'member_products', 'buyer_links', 'plan_keys', 'downloads', 'twofa', 'audit', 'stripe_events'];
+const WORKSPACE_OWNED = ['license_groups', 'licenses', 'products', 'audit', 'ws_settings', 'roles', 'members', 'downloads']; // rows that carry a workspace_id
 const MAX_ENTRY = 256 * 1024 * 1024; // per file inside the backup (plugin jars can be tens of MB)
 const PRODUCT_FILE = /^[a-z0-9-]{1,48}\.bin$/;
 
 const tmpPath = ext => join(tmpdir(), `licensex-${randomBytes(6).toString('hex')}${ext}`);
 const quote = p => p.replace(/'/g, "''");
 
-export function createBackup(db, productsDir) {
+/** The files that make up a backup, plus a digest of their contents (the same data gives the same digest). */
+export function backupFiles(db, productsDir) {
   const snap = tmpPath('.db');
   try {
     db.exec(`VACUUM INTO '${quote(snap)}'`);
@@ -28,11 +29,15 @@ export function createBackup(db, productsDir) {
       { name: 'backup.json', content: JSON.stringify({ app: 'licensex', version: 1, created: new Date().toISOString() }) },
       { name: 'licensex.db', content: readFileSync(snap) },
     ];
-    for (const f of readdirSync(productsDir).filter(f => PRODUCT_FILE.test(f)))
+    for (const f of readdirSync(productsDir).filter(f => PRODUCT_FILE.test(f)).sort())
       files.push({ name: `products/${f}`, content: readFileSync(join(productsDir, f)) });
-    return injectFiles(EMPTY_ZIP, files);
+    const h = createHash('sha256');
+    for (const f of files.slice(1)) h.update(f.name).update('\0').update(f.content);
+    return { files, digest: h.digest('hex') };
   } finally { rmSync(snap, { force: true }); }
 }
+export const zipFiles = files => injectFiles(EMPTY_ZIP, files);
+export function createBackup(db, productsDir) { return zipFiles(backupFiles(db, productsDir).files); }
 
 export class RestoreError extends Error {}
 

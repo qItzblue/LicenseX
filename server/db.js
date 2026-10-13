@@ -184,6 +184,30 @@ export function openDb(path) {
       created_at INTEGER NOT NULL,
       PRIMARY KEY (user_key, license_id)
     );
+    -- Two-factor sign-in (server/twofa.js). subject = 'password' (the admin password) or 'email:<address>'.
+    CREATE TABLE IF NOT EXISTS twofa (
+      subject    TEXT PRIMARY KEY,
+      secret     TEXT NOT NULL,                     -- base32 TOTP secret
+      enabled    INTEGER NOT NULL DEFAULT 0,        -- 0 while being set up
+      last_step  INTEGER NOT NULL DEFAULT 0,        -- newest 30-second step used: a code works once
+      recovery   TEXT NOT NULL DEFAULT '[]',        -- sha256 of the unused recovery codes
+      created_at INTEGER NOT NULL,
+      enabled_at INTEGER
+    );
+    -- Every jar handed out, with the invisible mark stamped into it: the leak tracer finds the download a leaked jar came from.
+    CREATE TABLE IF NOT EXISTS downloads (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      workspace_id INTEGER NOT NULL,
+      product_id   INTEGER REFERENCES products(id) ON DELETE SET NULL,
+      license_id   INTEGER REFERENCES licenses(id) ON DELETE SET NULL,
+      license_key  TEXT NOT NULL DEFAULT '',        -- kept when the license is deleted later
+      mark         TEXT NOT NULL UNIQUE,
+      ip           TEXT NOT NULL DEFAULT '',
+      user_agent   TEXT NOT NULL DEFAULT '',
+      bbb_user     TEXT NOT NULL DEFAULT '',
+      at           INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_downloads_license ON downloads(license_id);
     CREATE INDEX IF NOT EXISTS idx_servers_license ON servers(license_id);
     CREATE INDEX IF NOT EXISTS idx_audit_at ON audit(at DESC);
   `);
@@ -282,7 +306,7 @@ export function migrate(db) {
  */
 export function reserveWorkspaceIds(db) {
   let top = 0;
-  for (const t of ['workspaces', 'licenses', 'products', 'license_groups', 'audit', 'ws_settings', 'roles', 'members']) {
+  for (const t of ['workspaces', 'licenses', 'products', 'license_groups', 'audit', 'ws_settings', 'roles', 'members', 'downloads']) {
     const col = t === 'workspaces' ? 'id' : 'workspace_id';
     top = Math.max(top, db.prepare(`SELECT COALESCE(MAX(${col}), 0) AS m FROM ${t}`).get().m);
   }

@@ -24,6 +24,7 @@
       <div class="divider" id="or" hidden>or</div>
       <form id="loginForm">
         <div class="field"><input type="password" id="pw" placeholder="Admin password" autocomplete="current-password" required></div>
+        <div class="field" id="codeField" hidden><input id="code" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code from your authenticator app" maxlength="12"><div class="hint">Lost your phone? A recovery code works here too.</div></div>
         <div class="err" id="loginErr" hidden></div>
         <button class="btn primary" style="width:100%;justify-content:center">Sign in with password</button>
       </form>

@@ -5,7 +5,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { startMock, oauthEnv, googleUser, signIn } from './helpers/oauth-mock.mjs';
+import { startMock, oauthEnv, googleUser, signIn, signInRaw } from './helpers/oauth-mock.mjs';
+import { totp, base32Decode } from '../server/twofa.js';
 
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || '/opt/node-tools/node_modules/playwright/index.mjs').catch(() => import('playwright'));
 const mock = await startMock();
@@ -48,9 +49,36 @@ try {
   await a.goto(base + '/admin');
   await a.fill('#pw', 'ui-pass');
   await a.click('#loginForm button');
-  await walk(a, 'owner', ['overview', 'licenses', 'servers', 'products', 'build', 'groups', 'team', 'customers', 'plans', 'settings', 'audit']);
+  await walk(a, 'owner', ['overview', 'licenses', 'servers', 'leaks', 'products', 'build', 'groups', 'team', 'customers', 'plans', 'settings', 'audit', 'security']);
   await a.reload(); // a fresh load with the saved session works as well
-  await walk(a, 'owner(reload)', ['overview', 'licenses', 'servers', 'products', 'build', 'groups', 'team', 'customers', 'plans', 'settings', 'audit']);
+  await walk(a, 'owner(reload)', ['overview', 'licenses', 'servers', 'leaks', 'products', 'build', 'groups', 'team', 'customers', 'plans', 'settings', 'audit', 'security']);
+
+  // 1b. two-factor: set it up on the Security page (QR code + key), then the password form asks for the code
+  await a.evaluate(() => { location.hash = 'overview'; });
+  await a.evaluate(() => { location.hash = 'security'; });
+  await a.click('#tfaSetup');
+  await a.waitForSelector('#tfaSecret');
+  assert.ok(await a.$('#view svg path'), 'a QR code is drawn');
+  const secret = await a.inputValue('#tfaSecret');
+  const code = (o = 0) => totp(base32Decode(secret), Math.floor(Date.now() / 30000) + o);
+  await a.fill('#tfaCode', code());
+  await a.click('#tfaEnable');
+  await a.waitForFunction(() => /Save these recovery codes/.test(document.querySelector('#view').innerText));
+  await a.reload();
+  await a.waitForSelector('nav a');   // this browser stays signed in
+  const fresh = await newPage(await browser.newContext(), 'owner-2fa');
+  await fresh.goto(base + '/admin');
+  await fresh.fill('#pw', 'ui-pass');
+  await fresh.click('#loginForm button');
+  await fresh.waitForSelector('#codeField:not([hidden])');
+  await fresh.fill('#code', code(1));
+  await fresh.click('#loginForm button');
+  await fresh.waitForSelector('nav a');
+  // and the leak tracer page takes a file
+  await fresh.evaluate(() => { location.hash = 'leaks'; });
+  await fresh.waitForSelector('#leakFile', { state: 'attached' });
+  await fresh.setInputFiles('#leakFile', { name: 'x.jar', mimeType: 'application/java-archive', buffer: Buffer.from('not a jar') });
+  await fresh.waitForFunction(() => /not a \.jar/.test(document.querySelector('#view').innerText));
 
   // 2. a customer with their own workspace, signed in through the (fake) provider
   const cookie = await signIn(base, mock, googleUser('dev@studio.io'));
@@ -58,7 +86,7 @@ try {
   await cust.addCookies([{ name: 'lx_user', value: cookie.split('=').slice(1).join('='), url: base }]);
   const b = await newPage(cust, 'customer');
   await b.goto(base + '/dashboard');
-  await walk(b, 'customer', ['overview', 'licenses', 'servers', 'products', 'groups', 'team', 'billing', 'settings', 'audit']);
+  await walk(b, 'customer', ['overview', 'licenses', 'servers', 'leaks', 'products', 'groups', 'team', 'billing', 'settings', 'audit', 'security']);
 
   // 2b. the Team page, and a limited team member who only gets the pages their role allows
   const api = (method, path, body, ck = cookie) => fetch(base + path, { method, headers: { 'Content-Type': 'application/json', Cookie: ck }, body: body ? JSON.stringify(body) : undefined }).then(r => r.json());
@@ -83,13 +111,34 @@ try {
   await help.addCookies([{ name: 'lx_user', value: (await signIn(base, mock, googleUser('help@studio.io'))).split('=').slice(1).join('='), url: base }]);
   const c = await newPage(help, 'member');
   await c.goto(base + '/dashboard');
-  await walk(c, 'member', ['overview', 'licenses', 'servers', 'groups']);
+  await walk(c, 'member', ['overview', 'licenses', 'servers', 'leaks', 'groups', 'security']);
   await c.evaluate(() => { location.hash = 'licenses'; });
   await c.waitForFunction(() => /alpha-buyer/.test(document.querySelector('#view').innerText));
   const seen = await c.$eval('#view', v => v.innerText);
   assert.match(seen, /alpha-buyer/); assert.doesNotMatch(seen, /beta-buyer/, 'a product-limited member never sees the other product\'s licenses');
   assert.match(await c.$eval('#view', v => v.innerText), /Alpha plugin/);
   assert.equal(await c.locator('text=+ New license').count(), 0, 'Support cannot create licenses, so there is no button');
+
+  // 2c. a creator with two-factor on gets the code page after Google
+  {
+    const post = (path, body, c) => fetch(base + path, { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: c }, body: JSON.stringify(body || {}) }).then(r => r.json());
+    const ck = await signIn(base, mock, googleUser('two@studio.io'));
+    await post('/api/workspace/ensure', null, ck);
+    const { secret } = await post('/api/admin/2fa/setup', null, ck);
+    await post('/api/admin/2fa/enable', { code: totp(base32Decode(secret), Math.floor(Date.now() / 30000)) }, ck);
+    const raw = await signInRaw(base, mock, googleUser('two@studio.io'), '/dashboard');
+    assert.equal(raw.location, '/login/2fa');
+    const ctx2 = await browser.newContext();
+    await ctx2.addCookies([{ name: 'lx_2fa', value: raw.cookies.lx_2fa, url: base }]);
+    const d = await newPage(ctx2, 'two-factor');
+    await d.goto(base + raw.location);
+    await d.waitForSelector('#code');
+    await d.fill('#code', '000000'); await d.click('#codeGo');
+    await d.waitForFunction(() => /not right/.test(document.body.innerText));
+    await d.fill('#code', totp(base32Decode(secret), Math.floor(Date.now() / 30000) + 1)); await d.click('#codeGo');
+    await d.waitForURL(/\/dashboard$/);
+    await d.waitForSelector('nav a');
+  }
 
   // 3. the public pages
   const pub = await newPage(await browser.newContext(), 'public');

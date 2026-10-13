@@ -34,6 +34,13 @@ into a product in one click. Needs a JDK and Maven on the server. See **[docs/BU
 button in the site header. Creators and buyers have their own sign-in pages (`/login/creator`, `/login/buyer`, chooser at
 `/login`). Setup in **[docs/LOGIN.md](docs/LOGIN.md)**.
 
+**Security:** two-factor sign-in with an authenticator app for every account, and a **leak tracer**: every downloaded
+jar carries its buyer's key plus a hidden mark, so a leaked copy shows whose it was. See **[docs/SECURITY.md](docs/SECURITY.md)**.
+
+**Off-site backups:** copies to S3-style storage (Backblaze B2, Cloudflare R2, Amazon S3) and/or a Discord channel,
+encrypted, and an automatic restore when the server starts on a wiped disk (Render's free tier). See
+**[docs/BACKUPS.md](docs/BACKUPS.md)**.
+
 **Buyer accounts:** a buyer signs in and sees every license they own at **/account** ("My licenses"): they add keys, and
 licenses you issue to their verified email appear by themselves. They see their servers and can remove the ones they no
 longer run (if you allow self-service removal). Details in [docs/LOGIN.md](docs/LOGIN.md).
@@ -54,6 +61,9 @@ longer run (if you allow self-service removal). Details in [docs/LOGIN.md](docs/
 | `server/rbac.js`, `team.js` | Roles, permissions and product-limited team members. |
 | `server/builder.js`, `zipx.js` | Source inspection (risk scan) and the Maven/Gradle build runner; safe zip extraction. |
 | `server/backup.js` | Backup / restore (admin -> Settings -> Backup & move) for moving between hosts. |
+| `server/offsite.js` | Off-site copies (S3 signature v4, Discord webhook, AES-256-GCM) and the restore on an empty start. |
+| `server/twofa.js` | Two-factor sign-in (TOTP, recovery codes). |
+| `web/admin-extra.js`, `web/vendor/qrcode.mjs` | Security page, leak tracer, off-site backup card; QR codes (qrcode-generator, MIT). |
 | `plugin/` | `LicenseClient` (drop-in, no deps) + an example Bukkit/Paper plugin (`mvn package`). |
 
 ## Products & integrated downloads

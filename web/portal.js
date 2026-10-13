@@ -99,8 +99,8 @@ const safeUrl = u => { try { return /^https?:$/.test(new URL(u).protocol) ? u : 
   let me;
   try { me = await api('GET', '/api/auth/me'); } catch { return; }
   if (!me.user) {
+    slot.append(h('a', { href: '/login', class: 'pill' }, 'Sign in'));   // always: the sign-in pages explain what is available
     if (me.providers.length) {
-      slot.append(h('a', { href: '/login', class: 'pill' }, 'Sign in'));
       hint.replaceChildren('Have more than one license? ', h('a', { href: '/login/buyer' }, 'Sign in'), ' to keep them all in one place.');
       hint.hidden = false;
     }
