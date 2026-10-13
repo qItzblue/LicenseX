@@ -1,7 +1,7 @@
 // Pure-Node ZIP/JAR editing: inject (or replace) files into an existing archive with no dependencies.
 // A .jar is a .zip. We rewrite the central directory so an injected `licensex.json` is the authoritative
 // entry, which lets LicenseX stamp a license key into a plugin jar at download time.
-import { deflateRawSync } from 'node:zlib';
+import { deflateRawSync, inflateRawSync } from 'node:zlib';
 
 const CRC_TABLE = (() => {
   const t = new Uint32Array(256);
@@ -19,9 +19,14 @@ const DOS_TIME = 0, DOS_DATE = 0x5221; // fixed 2021-01-01 so output is reproduc
 
 function findEocd(buf) {
   const min = Math.max(0, buf.length - (22 + 0xFFFF));
+  let loose = -1;
   for (let i = buf.length - 22; i >= min; i--) {
-    if (buf.readUInt32LE(i) === EOCD_SIG) return i;
+    if (buf.readUInt32LE(i) !== EOCD_SIG) continue;
+    const end = i + 22 + buf.readUInt16LE(i + 20); // the record's comment must run exactly to the end of the file
+    if (end === buf.length) return i;
+    if (loose < 0 && end < buf.length) loose = i;   // junk after the comment: tolerated only if nothing fits exactly
   }
+  if (loose >= 0) return loose;
   throw new Error('Not a valid zip/jar (no end-of-central-directory record found)');
 }
 
@@ -40,17 +45,59 @@ export function listEntries(buf) {
   return names;
 }
 
+/** Central-directory records: name, method, sizes, flags and unix mode (for symlink detection). */
+export function readCentral(buf) {
+  const eocd = findEocd(buf);
+  let p = buf.readUInt32LE(eocd + 16);
+  const count = buf.readUInt16LE(eocd + 10);
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    if (buf.readUInt32LE(p) !== CEN_SIG) throw new Error('Corrupt zip (bad central directory)');
+    const n = buf.readUInt16LE(p + 28), m = buf.readUInt16LE(p + 30), k = buf.readUInt16LE(p + 32);
+    out.push({
+      name: buf.toString('utf8', p + 46, p + 46 + n), flags: buf.readUInt16LE(p + 8), method: buf.readUInt16LE(p + 10),
+      csize: buf.readUInt32LE(p + 20), usize: buf.readUInt32LE(p + 24), madeBy: buf.readUInt16LE(p + 4),
+      mode: (buf.readUInt32LE(p + 38) >>> 16) & 0xFFFF, offset: buf.readUInt32LE(p + 42),
+    });
+    p += 46 + n + m + k;
+  }
+  return out;
+}
+
+/** Returns the (decompressed) bytes of one entry, or null if it isn't there. */
+export function readEntry(buf, wanted, maxBytes = 8 * 1024 * 1024) {
+  const eocd = findEocd(buf);
+  let p = buf.readUInt32LE(eocd + 16);
+  const count = buf.readUInt16LE(eocd + 10);
+  for (let i = 0; i < count; i++) {
+    if (buf.readUInt32LE(p) !== CEN_SIG) break;
+    const method = buf.readUInt16LE(p + 10), csize = buf.readUInt32LE(p + 20);
+    const n = buf.readUInt16LE(p + 28), m = buf.readUInt16LE(p + 30), k = buf.readUInt16LE(p + 32);
+    if (buf.toString('utf8', p + 46, p + 46 + n) === wanted) {
+      const lo = buf.readUInt32LE(p + 42);
+      const start = lo + 30 + buf.readUInt16LE(lo + 26) + buf.readUInt16LE(lo + 28);
+      const data = buf.subarray(start, start + csize);
+      if (method === 0) { if (data.length > maxBytes) throw new Error(`${wanted} is too large`); return Buffer.from(data); }
+      if (method === 8) return inflateRawSync(data, { maxOutputLength: maxBytes });
+      throw new Error('Unsupported compression method ' + method);
+    }
+    p += 46 + n + m + k;
+  }
+  return null;
+}
+
 /**
  * Return a new archive buffer with `files` ([{name, content}]) injected. If a name already exists its old
  * central-directory record is dropped (the central directory is authoritative, so the orphaned local bytes
  * are ignored by readers), guaranteeing the injected version wins.
  */
-export function injectFiles(buf, files) {
+export function injectFiles(buf, files, { remove = () => false } = {}) {
   const eocd = findEocd(buf);
   const centralOffset = buf.readUInt32LE(eocd + 16);
   const centralSize = buf.readUInt32LE(eocd + 12);
   const totalEntries = buf.readUInt16LE(eocd + 10);
-  if (centralOffset === 0xFFFFFFFF || totalEntries === 0xFFFF)
+  // ZIP64 is signalled by a locator record right before the EOCD (65535 entries on its own is an ordinary archive)
+  if (centralOffset === 0xFFFFFFFF || centralSize === 0xFFFFFFFF || (eocd >= 20 && buf.readUInt32LE(eocd - 20) === 0x07064b50))
     throw new Error('ZIP64 archives are not supported');
 
   const inject = files.map(f => {
@@ -96,7 +143,7 @@ export function injectFiles(buf, files) {
     const n = buf.readUInt16LE(p + 28), m = buf.readUInt16LE(p + 30), k = buf.readUInt16LE(p + 32);
     const recLen = 46 + n + m + k;
     const name = buf.toString('utf8', p + 46, p + 46 + n);
-    if (!injectNames.has(name)) { centralParts.push(buf.subarray(p, p + recLen)); entries++; }
+    if (!injectNames.has(name) && !remove(name)) { centralParts.push(buf.subarray(p, p + recLen)); entries++; }
     p += recLen;
   }
 

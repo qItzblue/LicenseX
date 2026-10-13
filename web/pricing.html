@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pricing</title>
+  <meta name="description" content="License your Minecraft plugins in minutes. Upload your jar, we add the license check. Simple plans.">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32">
+  <link rel="alternate icon" href="/favicon.ico">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <meta name="theme-color" content="#0a0b10">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500&display=swap">
+  <link rel="stylesheet" href="/app.css">
+  <style>
+    main { max-width: 1080px; margin: 0 auto; padding: 28px 20px 80px; }
+    header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 64px; }
+    nav.top { display: flex; gap: 6px; align-items: center; }
+    nav.top .grp { display: flex; gap: 6px; align-items: center; }
+    nav.top a { color: var(--muted); font-size: 14px; font-weight: 500; padding: 7px 12px; border-radius: 99px; transition: .15s; }
+    nav.top a:hover { color: var(--text); background: rgba(255, 255, 255, .05); }
+    nav.top a.pill { border: 1px solid var(--border-strong); color: var(--text); }
+    nav.top a.pill:hover { border-color: var(--accent); background: var(--accent-soft); }
+    nav.top a.admin { background: linear-gradient(135deg, var(--accent), #6d4de0); color: #fff; box-shadow: 0 6px 18px rgba(139, 92, 246, .35); }
+    nav.top button.linklike { font: inherit; font-size: 14px; font-weight: 500; color: var(--muted); background: none; border: 0; cursor: pointer; padding: 7px 10px; border-radius: 99px; }
+    nav.top button.linklike:hover { color: var(--text); background: rgba(255, 255, 255, .05); }
+
+    .hero { text-align: center; margin-bottom: 44px; }
+    .eyebrow { display: inline-block; font-size: 12px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--accent); background: var(--accent-soft); padding: 5px 12px; border-radius: 99px; margin-bottom: 18px; }
+    .hero h1 { font-size: clamp(34px, 6vw, 56px); font-weight: 800; letter-spacing: -.03em; background: linear-gradient(180deg, #fff, #a9aec6); -webkit-background-clip: text; background-clip: text; color: transparent; }
+    .hero p { color: var(--muted); font-size: 18px; max-width: 580px; margin: 16px auto 0; }
+
+    .plans { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 18px; align-items: stretch; margin-top: 8px; }
+    .plan { display: flex; flex-direction: column; padding: 28px 26px; position: relative; transition: .2s; }
+    .plan:hover { transform: translateY(-3px); }
+    .plan.hot { border-color: var(--accent); background: linear-gradient(180deg, rgba(139, 92, 246, .14), var(--surface-2) 55%); box-shadow: 0 24px 70px rgba(139, 92, 246, .22); }
+    .plan .badge { position: absolute; top: -12px; left: 50%; transform: translateX(-50%); background: linear-gradient(135deg, var(--accent), #6d4de0); color: #fff; font-size: 12px; font-weight: 700; padding: 4px 14px; border-radius: 99px; white-space: nowrap; }
+    .plan h2 { font-size: 20px; }
+    .plan .desc { color: var(--muted); font-size: 14px; min-height: 42px; margin: 6px 0 0; }
+    .price { display: flex; align-items: baseline; gap: 8px; margin: 20px 0 4px; }
+    .price b { font-size: 44px; font-weight: 800; letter-spacing: -.03em; line-height: 1; }
+    .price span { color: var(--muted); font-size: 14px; }
+    .limits { color: var(--muted); font-size: 13px; margin-bottom: 18px; }
+    .plan ul { list-style: none; margin: 0 0 24px; padding: 18px 0 0; border-top: 1px solid var(--border); display: grid; gap: 10px; flex: 1; align-content: start; }
+    .plan li { display: grid; grid-template-columns: 20px 1fr; gap: 8px; font-size: 14.5px; }
+    .plan li::before { content: '✓'; color: var(--ok); font-weight: 800; }
+    .plan .btn { width: 100%; justify-content: center; padding: 12px; font-size: 15px; }
+    .note { text-align: center; color: var(--faint); font-size: 13px; margin-top: 18px; }
+
+    section.block { margin-top: 84px; }
+    section.block > h2 { font-size: 28px; text-align: center; letter-spacing: -.02em; }
+    section.block > p.sub { text-align: center; color: var(--muted); margin: 8px auto 30px; max-width: 540px; }
+    .grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 16px; }
+    .feat .ico { width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); font-size: 18px; margin-bottom: 14px; }
+    .feat h3 { font-size: 16px; margin-bottom: 6px; } .feat p { margin: 0; color: var(--muted); font-size: 14px; }
+    table.cmp { width: 100%; border-collapse: collapse; }
+    table.cmp th, table.cmp td { text-align: center; padding: 14px; border-bottom: 1px solid var(--border); font-size: 14.5px; }
+    table.cmp th:first-child, table.cmp td:first-child { text-align: left; color: var(--muted); }
+    table.cmp th { font-size: 14px; text-transform: none; letter-spacing: 0; color: var(--text); font-weight: 700; }
+    table.cmp tr:last-child td { border-bottom: 0; }
+    .tick { color: var(--ok); font-weight: 800; }
+    .scroll { overflow-x: auto; }
+    details.faq { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); margin-bottom: 8px; }
+    details.faq[open] { border-color: var(--border-strong); }
+    details.faq summary { cursor: pointer; padding: 15px 18px; font-weight: 600; list-style: none; display: flex; justify-content: space-between; gap: 12px; }
+    details.faq summary::-webkit-details-marker { display: none; }
+    details.faq summary::after { content: '+'; color: var(--accent); font-size: 20px; line-height: 1; }
+    details.faq[open] summary::after { content: '–'; }
+    details.faq p { margin: 0; padding: 0 18px 16px; color: var(--muted); font-size: 14.5px; }
+    .cta { text-align: center; padding: 44px 24px; background: radial-gradient(600px 220px at 50% 0%, rgba(139, 92, 246, .25), transparent 70%), linear-gradient(180deg, var(--surface), var(--surface-2)); }
+    .cta h2 { font-size: 28px; } .cta p { color: var(--muted); margin: 10px auto 22px; max-width: 460px; }
+    footer { margin-top: 64px; text-align: center; color: var(--faint); font-size: 13px; }
+    .foot-links { display: flex; justify-content: center; gap: 18px; flex-wrap: wrap; margin-bottom: 12px; }
+    .foot-links a { color: var(--muted); font-size: 14px; } .foot-links a:hover { color: var(--text); }
+    .toast-err { color: var(--bad); text-align: center; margin-top: 14px; font-size: 14px; }
+    @media (max-width: 720px) { nav.top a.opt { display: none; } header { margin-bottom: 40px; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <a class="brand" href="/"><span class="brand-mark" id="mark">X</span><span id="siteName">LicenseX</span></a>
+    <nav class="top">
+      <span class="grp"><a href="/" class="opt">Check my license</a><a href="#faq" class="opt">FAQ</a></span>
+      <span class="grp" id="authNav"></span>
+    </nav>
+  </header>
+
+  <section class="hero">
+    <span class="eyebrow">For plugin developers</span>
+    <h1>License your plugins<br>in minutes, not weeks.</h1>
+    <p>Upload your jar. We add the license check for you, give every buyer their own license, and let them manage their servers. No code changes.</p>
+  </section>
+
+  <section class="plans" id="plans"><div class="muted" style="grid-column:1/-1;text-align:center">Loading plans…</div></section>
+  <div class="toast-err" id="err" hidden></div>
+  <p class="note" id="payNote"></p>
+
+  <section class="block">
+    <h2>Everything you need to sell licensed plugins</h2>
+    <p class="sub">Every plan includes the full product. Plans differ only in how many plugins and licenses you can have.</p>
+    <div class="grid3">
+      <div class="card feat"><div class="ico">⚡</div><h3>Automatic license check</h3><p>Drop in your finished jar. LicenseX wraps it so it verifies its license before it starts. Your source code stays untouched.</p></div>
+      <div class="card feat"><div class="ico">🛒</div><h3>Built for BuiltByBit</h3><p>Each buyer gets their own license, delivered at download. The same buyer always gets the same key, however often they download.</p></div>
+      <div class="card feat"><div class="ico">🖥</div><h3>Server limits per license</h3><p>Set how many servers each license may run on, with groups for tiers. Disable a single server, or block a license, in one click.</p></div>
+      <div class="card feat"><div class="ico">🔑</div><h3>A page for your buyers</h3><p>Buyers see which servers use their license and free a slot themselves, so you spend less time on support.</p></div>
+      <div class="card feat"><div class="ico">⏱</div><h3>Changes within a minute</h3><p>Plugins check in every minute. Blocks, removals and limit changes reach running servers almost immediately.</p></div>
+      <div class="card feat"><div class="ico">🔒</div><h3>Your data stays yours</h3><p>Every account is a private workspace. Nobody else can see or touch your licenses, buyers or files.</p></div>
+    </div>
+  </section>
+
+  <section class="block" id="compare" hidden>
+    <h2>Compare plans</h2>
+    <p class="sub">Same features everywhere. Pick the room you need.</p>
+    <div class="card scroll" style="padding:6px 8px"><table class="cmp" id="cmp"></table></div>
+  </section>
+
+  <section class="block" id="faq">
+    <h2>Questions</h2>
+    <p class="sub" style="margin-bottom:22px">The honest answers.</p>
+    <details class="faq"><summary>Do I need to change my plugin's code?</summary><p>No. Upload your finished jar and LicenseX adds the license check around your main class. It works with normal Bukkit, Spigot and Paper plugins.</p></details>
+    <details class="faq"><summary>What happens if I stop paying?</summary><p>Your existing licenses keep working, so your buyers' servers are never switched off because of a billing problem. You just can't add new plugins or licenses beyond the Free plan until you upgrade again.</p></details>
+    <details class="faq"><summary>Can I cancel a monthly plan?</summary><p>Any time, from the Billing page in your dashboard. You keep what you paid for until the end of the period.</p></details>
+    <details class="faq"><summary>How do buyers get their license?</summary><p>With BuiltByBit, the key is written into the jar when they download. You can also share a direct download link. Either way each buyer has one stable license.</p></details>
+    <details class="faq"><summary>Is it safe to upload my plugin?</summary><p>Your files are stored privately in your own workspace and are only used to produce your buyers' downloads. The license check is a deterrent against casual sharing; for strong protection also obfuscate your jar.</p></details>
+    <details class="faq"><summary>Which plugins are supported?</summary><p>Bukkit, Spigot and Paper plugins with a plugin.yml. BungeeCord, Velocity and mods aren't supported yet.</p></details>
+  </section>
+
+  <section class="block">
+    <div class="card cta">
+      <h2>Ready to protect your plugin?</h2>
+      <p>Start on the Free plan. No card needed. Upgrade when you outgrow it.</p>
+      <a class="btn primary" id="ctaBtn" href="/login?next=/dashboard" style="padding:13px 22px;font-size:15px">Get started free</a>
+    </div>
+  </section>
+
+  <footer><div class="foot-links" id="footLinks"></div><div id="footText"></div></footer>
+</main>
+<script type="module" src="/pricing.js"></script>
+</body>
+</html>

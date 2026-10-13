@@ -22,9 +22,9 @@ test('end to end: claim -> plugin -> portal -> admin', async () => {
   const { cookie } = await call('POST', '/api/admin/login', { password: 'secret-pw' });
   assert.ok(cookie);
 
-  const { body: c } = await call('POST', '/api/v1/claim', { nonce: 'dl-1', user: 'steve' });
-  const key = c.key;
-  assert.equal((await call('POST', '/api/v1/claim', { nonce: 'dl-1-redownload', user: 'steve' })).body.key, key);
+  // the old unauthenticated /api/v1/claim endpoint is gone: anyone could mint licenses with it
+  assert.equal((await call('POST', '/api/v1/claim', { nonce: 'x', user: 'steve' })).status, 404);
+  const key = (await call('POST', '/api/admin/licenses', { owner: 'steve' }, cookie)).body.key;
 
   assert.equal((await call('POST', '/api/v1/validate', { key, instanceId: 'srv-1', name: 'Lobby', port: 25565 })).status, 200);
   assert.equal((await call('POST', '/api/v1/validate', { key, instanceId: 'srv-2', name: 'Pirate' })).body.code, 'LIMIT_REACHED');
@@ -49,6 +49,8 @@ test('end to end: claim -> plugin -> portal -> admin', async () => {
 
 test('products: upload a jar, download stamps a license per download nonce', async () => {
   const { listEntries } = await import('../server/jarstamp.js');
+  const { readFileSync } = await import('node:fs');
+  const plugin = readFileSync(new URL('./fixtures/hello/hello-plugin.jar', import.meta.url));
   const emptyZip = Buffer.concat([Buffer.from([0x50, 0x4b, 0x05, 0x06]), Buffer.alloc(18)]);
   const { cookie } = await call('POST', '/api/admin/login', { password: 'secret-pw' });
 
@@ -57,8 +59,11 @@ test('products: upload a jar, download stamps a license per download nonce', asy
   assert.match(p.download_url, /\/download\/my-plugin\?token=/);
 
   // raw binary upload (not JSON)
-  const up = await fetch(base + `/api/admin/products/${p.id}/file`, { method: 'POST', headers: { Cookie: cookie, 'X-Filename': 'MyPlugin.jar' }, body: emptyZip });
-  assert.equal((await up.json()).has_file, 1);
+  const up = await fetch(base + `/api/admin/products/${p.id}/file`, { method: 'POST', headers: { Cookie: cookie, 'X-Filename': 'MyPlugin.jar' }, body: plugin });
+  const upBody = await up.json();
+  assert.equal(upBody.has_file, 1);
+  assert.equal(upBody.integration.ok, true);
+  assert.equal(upBody.integration.main, 'com.acme.hello.HelloPlugin');
 
   const token = p.token;
   const dl = (q) => fetch(base + `/download/my-plugin?${q}`).then(async r => ({ status: r.status, type: r.headers.get('content-type'), buf: Buffer.from(await r.arrayBuffer()) }));
@@ -68,6 +73,7 @@ test('products: upload a jar, download stamps a license per download nonce', asy
   assert.equal(d1.status, 200);
   assert.equal(d1.type, 'application/java-archive');
   assert.ok(listEntries(d1.buf).includes('licensex.json'));
+  assert.ok(listEntries(d1.buf).some(n => /^dev\/licensex\/w[0-9a-f]{8}\/Wrapper\.class$/.test(n)), 'plugin is wrapped, not just stamped');
 
   const countFor = async () => (await call('GET', '/api/admin/licenses', null, cookie)).body.filter(l => l.product === 'My Plugin').length;
   await dl(`token=${token}&nonce=buyer-1&user=bob`); // same buyer, same download -> no new license
@@ -75,6 +81,14 @@ test('products: upload a jar, download stamps a license per download nonce', asy
   assert.equal(await countFor(), 1);
   await dl(`token=${token}&nonce=buyer-2&user=sue`); // different buyer -> new license
   assert.equal(await countFor(), 2);
+
+  // a jar that can't be wrapped (not a plugin) is refused instead of being served unprotected
+  const bad = (await call('POST', '/api/admin/products', { name: 'Not A Plugin' }, cookie)).body;
+  const badUp = await fetch(base + `/api/admin/products/${bad.id}/file`, { method: 'POST', headers: { Cookie: cookie, 'X-Filename': 'x.jar' }, body: emptyZip });
+  assert.equal((await badUp.json()).integration.ok, false);
+  const refused = await fetch(base + `/download/not-a-plugin?token=${bad.token}&user=1`);
+  assert.equal(refused.status, 503);
+  assert.match((await refused.json()).message, /plugin\.yml/);
 
   // disabling the product blocks downloads
   await call('PATCH', `/api/admin/products/${p.id}`, { enabled: false }, cookie);
@@ -126,4 +140,45 @@ test('site links: validated, public, and never leak secrets', async () => {
   assert.equal(site.support_email, 'help@acme.dev');
   assert.equal(JSON.stringify(site).includes('secret'), false);
   assert.equal('bbb_secret' in site, false);
+});
+
+test('backup and restore round-trips licenses, groups, settings and plugin files', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { listEntries } = await import('../server/jarstamp.js');
+  const plugin = readFileSync(new URL('./fixtures/hello/hello-plugin.jar', import.meta.url));
+  const { cookie } = await call('POST', '/api/admin/login', { password: 'secret-pw' });
+  assert.equal((await fetch(base + '/api/admin/backup')).status, 401);
+
+  const lic = (await call('POST', '/api/admin/licenses', { owner: 'restore-me', note: 'keep' }, cookie)).body;
+  await call('PUT', '/api/admin/settings', { site_name: 'Before Backup' }, cookie);
+  const prod = (await call('POST', '/api/admin/products', { name: 'Backed Up' }, cookie)).body;
+  await fetch(base + `/api/admin/products/${prod.id}/file`, { method: 'POST', headers: { Cookie: cookie, 'X-Filename': 'b.jar' }, body: plugin });
+
+  const res = await fetch(base + '/api/admin/backup', { headers: { Cookie: cookie } });
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type'), /zip/);
+  const backup = Buffer.from(await res.arrayBuffer());
+  const names = listEntries(backup);
+  assert.ok(names.includes('licensex.db') && names.includes('backup.json') && names.includes('products/backed-up.bin'), names.join());
+
+  // change things after the backup was taken
+  await call('DELETE', `/api/admin/licenses/${lic.id}`, null, cookie);
+  await call('PUT', '/api/admin/settings', { site_name: 'After Backup' }, cookie);
+  await call('DELETE', `/api/admin/products/${prod.id}`, null, cookie);
+  assert.equal((await call('GET', '/api/admin/licenses?q=restore-me', null, cookie)).body.length, 0);
+
+  const bad = await fetch(base + '/api/admin/restore', { method: 'POST', headers: { Cookie: cookie }, body: Buffer.from('not a zip') });
+  assert.equal(bad.status, 400);
+  assert.equal((await call('GET', '/api/public/site')).body.site_name, 'After Backup', 'a failed restore changes nothing');
+
+  const ok = await fetch(base + '/api/admin/restore', { method: 'POST', headers: { Cookie: cookie }, body: backup });
+  assert.equal(ok.status, 200);
+  const back = (await call('GET', '/api/admin/licenses?q=restore-me', null, cookie)).body;
+  assert.equal(back.length, 1);
+  assert.equal(back[0].key, lic.key, 'same license key after restore');
+  assert.equal((await call('GET', '/api/public/site')).body.site_name, 'Before Backup');
+  const products = (await call('GET', '/api/admin/products', null, cookie)).body;
+  assert.ok(products.find(p => p.slug === 'backed-up' && p.has_file && p.integration.ok), 'plugin file restored and still wrappable');
+  const dl = await fetch(base + `/download/backed-up?token=${prod.token}&user=5`);
+  assert.equal(dl.status, 200, 'restored plugin can be downloaded');
 });

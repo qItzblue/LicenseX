@@ -1,0 +1,4 @@
+name: HelloGradle
+version: 1.0.0
+main: com.acme.hello.HelloPlugin
+api-version: "1.20"
