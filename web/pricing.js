@@ -59,7 +59,7 @@ function chrome(site) {
 
 function authNav() {
   const slot = document.getElementById('authNav');
-  if (!me.user) { if (me.providers.length) slot.append(h('a', { href: '/login', class: 'pill' }, 'Sign in')); return; }
+  if (!me.user) { slot.append(h('a', { href: '/login', class: 'pill' }, 'Sign in')); return; }
   const u = me.user;
   slot.append(...[
     h('a', { href: '/account', class: 'pill' }, 'My licenses'),

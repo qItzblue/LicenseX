@@ -1,5 +1,6 @@
 import { h, api, toast, confirmDialog, ago, date, limitText, copy, currentWs, setWs, wsHeaders, wsq } from '/lib.js';
 import { teamPage } from '/admin-team.js';
+import { securityPage, leaksPage, offsiteCard } from '/admin-extra.js';
 
 const $ = id => document.getElementById(id);
 const view = $('view');
@@ -9,10 +10,10 @@ let groups = [];
 // Which pages exist for this person. The server enforces everything; this only hides what they could not use anyway.
 const can = perm => (window.__me?.permissions || []).includes(perm);
 const PAGE_DEFS = [
-  ['overview', 'Overview', () => true], ['licenses', 'Licenses', () => can('licenses.view')], ['servers', 'Servers', () => can('servers.view')],
+  ['overview', 'Overview', () => true], ['licenses', 'Licenses', () => can('licenses.view')], ['servers', 'Servers', () => can('servers.view')], ['leaks', 'Leak tracer', () => can('licenses.view')],
   ['products', 'Products', () => can('products.view')], ['build', 'Build', () => window.__me.role === 'platform'], ['groups', 'Groups', () => can('groups.view')],
   ['team', 'Team', () => can('team.manage')], ['customers', 'Customers', () => can('platform.customers')], ['plans', 'Plans', () => window.__me.role === 'platform'],
-  ['billing', 'Billing', () => window.__me.role === 'tenant'], ['settings', 'Settings', () => can('settings.manage')], ['audit', 'Audit log', () => can('audit.view')],
+  ['billing', 'Billing', () => window.__me.role === 'tenant'], ['settings', 'Settings', () => can('settings.manage')], ['audit', 'Audit log', () => can('audit.view')], ['security', 'Security', () => true],
 ];
 let PAGES = { overview: 'Overview' };
 const isDash = location.pathname === '/dashboard';
@@ -48,8 +49,12 @@ async function showLogin() {
 }
 $('loginForm').addEventListener('submit', async e => {
   e.preventDefault();
-  try { await api('POST', '/api/admin/login', { password: $('pw').value }); $('login').hidden = true; await boot(); }
-  catch (err) { $('loginErr').textContent = err.message; $('loginErr').hidden = false; }
+  try { await api('POST', '/api/admin/login', { password: $('pw').value, code: $('code').value.trim() || undefined }); $('login').hidden = true; await boot(); }
+  catch (err) {
+    // two-factor is on for the admin password: ask for the code and keep the password that was typed
+    if (err.data?.code === '2FA_REQUIRED' || err.data?.code === '2FA_WRONG') { $('codeField').hidden = false; $('code').focus(); }
+    $('loginErr').textContent = err.message; $('loginErr').hidden = false;
+  }
 });
 $('logout').addEventListener('click', async () => { await api('POST', '/api/auth/logout'); location.href = '/'; });
 function showApp() {
@@ -96,7 +101,8 @@ async function route() {
     window.__me.workspace = { ...window.__me.workspace, ...WS };
     banner();
     groups = can('groups.view') ? await api('GET', '/api/admin/groups') : [];
-    await { overview, licenses, servers, products, build: buildPage, groups: groupsPage, team: () => teamPage({ render, head }), customers: customersPage, plans: plansPage, billing: billingPage, settings, audit }[page]();
+    await { overview, licenses, servers, products, build: buildPage, groups: groupsPage, team: () => teamPage({ render, head }), customers: customersPage, plans: plansPage, billing: billingPage, settings, audit,
+      leaks: () => leaksPage({ render, head }), security: () => securityPage({ render, head }) }[page]();
   } catch (e) { if (e.status === 401) return location.reload(); toast(e.message, true); }
 }
 
@@ -708,7 +714,7 @@ async function settings() {
     s.password_login === false ? h('div', { class: 'hint' }, 'Password login is turned off in the server config.') : h('div', { class: 'hint' }, 'The admin password still works as a backup way in.'));
 
   const site = window.__me.role === 'platform' && WS.house;   // site-wide cards are the owner's, in the owner's own workspace
-  render(head('Settings'), site && !s.public_url_set && !/^(localhost|127\.0\.0\.1)$/.test(location.hostname) ? h('div', { class: 'notice warn' }, h('b', null, 'Set LICENSEX_PUBLIC_URL. '), 'Without it, download links, the address baked into plugins and the sign-in callbacks below are guessed from the browser request and can be wrong behind a proxy. Set it to your real https address (see DEPLOY.md).') : null, site ? h('div', { class: 'notice ok' }, 'Site-wide settings (branding, sign-in, backups) are below the workspace settings. Customers only see the workspace settings.') : null, site ? access : null, bbb, site || (WS.house && s.site_access) ? brand : null, site ? backup : null, h('div', { class: 'card', style: { maxWidth: '680px' } },
+  render(head('Settings'), site && !s.public_url_set && !/^(localhost|127\.0\.0\.1)$/.test(location.hostname) ? h('div', { class: 'notice warn' }, h('b', null, 'Set LICENSEX_PUBLIC_URL. '), 'Without it, download links, the address baked into plugins and the sign-in callbacks below are guessed from the browser request and can be wrong behind a proxy. Set it to your real https address (see DEPLOY.md).') : null, site ? h('div', { class: 'notice ok' }, 'Site-wide settings (branding, sign-in, backups) are below the workspace settings. Customers only see the workspace settings.') : null, site ? access : null, bbb, site || (WS.house && s.site_access) ? brand : null, site ? backup : null, site ? await offsiteCard() : null, h('div', { class: 'card', style: { maxWidth: '680px' } },
     num('default_limit', 'Default server limit', 'Applies to licenses with no group and no override. -1 = unlimited.', -1),
     num('heartbeat_minutes', 'Plugin check-in interval (minutes)', 'How often running plugins re-validate. Removals and blocks take effect within this window.', 1),
     toggle('claims_enabled', 'Issue licenses on download', 'When off, new downloads cannot claim a license (existing licenses keep working).'),

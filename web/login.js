@@ -8,6 +8,7 @@ const ERRORS = {
   state: 'That sign-in link expired or was already used. Please try again.',
   failed: 'The provider did not complete the sign-in. Please try again.',
   notconfigured: 'That sign-in method is not set up yet.',
+  expired: 'The sign-in took too long. Please sign in again.',
 };
 const PATH = location.pathname.replace(/\/+$/, '');
 const ALLOWED = { creator: ['/dashboard', '/pricing', '/admin'], buyer: ['/account'] };   // where each kind of sign-in may land (the server checks too)
@@ -38,7 +39,7 @@ function providerButtons(me, kind, next) {
   return me.providers.length
     ? h('div', { class: 'oauth' }, me.providers.map(p => h('a', { class: 'oauth-btn', href: `/auth/${p.id}?next=${encodeURIComponent(next)}`, onclick: () => remember(kind, next) },
         h('span', { class: `logo ${p.id}` }, p.label.charAt(0)), `Continue with ${p.label}`)))
-    : h('p', { class: 'muted' }, 'Sign-in is not set up on this site yet. The owner can enable it in the server settings.');
+    : h('p', { class: 'muted' }, 'Signing in with Google, Discord or GitHub is not switched on for this site yet. The site owner sets it up in the server settings (docs/LOGIN.md).');
 }
 
 function chooser(err) {
@@ -64,7 +65,8 @@ function creatorCard(me, err) {
       : 'Sell Minecraft plugins with license keys, buyer pages and a team dashboard. New here? Signing in creates your free workspace. No card needed.'),
     err && h('div', { class: 'err' }, err),
     providerButtons(me, 'creator', next),
-    admin && me.password_login ? h('div', null, h('div', { class: 'divider' }, 'or'), h('a', { class: 'btn block', href: '/admin' }, 'Use the admin password')) : null,
+    // the site owner can always get in with the admin password (also before Google/Discord/GitHub are set up)
+    me.password_login && (admin || !me.providers.length) ? h('div', null, h('div', { class: 'divider' }, admin || me.providers.length ? 'or' : 'site owner'), h('a', { class: 'btn block', href: '/admin', id: 'usePassword' }, 'Use the admin password')) : null,
     h('p', { class: 'alt' }, 'Bought a plugin instead? ', h('a', { href: '/login/buyer' }, 'Buyer sign in')));
 }
 
@@ -97,10 +99,38 @@ function signedIn(u, err) {
     h('button', { class: 'btn ghost block', onclick: async () => { await api('POST', '/api/auth/logout'); location.href = '/login'; } }, 'Sign out'));
 }
 
+/** Second step of a Google/Discord/GitHub sign-in when two-factor is on. */
+function codeCard() {
+  wide(false);
+  const input = h('input', { id: 'code', inputmode: 'numeric', autocomplete: 'one-time-code', maxlength: 12, placeholder: '123456',
+    style: { 'font-family': 'var(--mono)', 'font-size': '22px', 'letter-spacing': '.2em', 'text-align': 'center' } });
+  const err = h('div', { class: 'err', hidden: true });
+  const go = async e => {
+    e?.preventDefault();
+    try { const r = await api('POST', '/api/auth/2fa', { code: input.value.trim() }); location.replace(r.next || '/'); }
+    catch (x) {
+      if (x.data?.code === '2FA_EXPIRED') return location.replace('/login?error=expired');
+      err.textContent = x.message; err.hidden = false; input.select();
+    }
+  };
+  setTimeout(() => input.focus(), 0);
+  return h('div', { class: 'card' }, brand(), h('div', null, h('span', { class: 'eyebrow' }, 'Two-factor')),
+    h('h1', null, 'Enter your code'),
+    h('p', { class: 'muted lead' }, 'Open your authenticator app and enter the 6-digit code for ' + site + '. Lost your phone? Enter one of your recovery codes.'),
+    h('form', { onsubmit: go }, h('div', { class: 'field' }, input), err, h('button', { class: 'btn primary block', id: 'codeGo' }, 'Continue')),
+    h('p', { class: 'alt' }, h('a', { href: '/login', onclick: async ev => { ev.preventDefault(); await api('POST', '/api/auth/logout'); location.href = '/login'; } }, 'Cancel and sign in again')));
+}
+
 async function render() {
   let me;
   try { me = await api('GET', '/api/auth/me'); } catch { view.replaceChildren(h('div', { class: 'card' }, h('div', { class: 'err' }, 'Could not reach the server.'))); return; }
   const code = params.get('error'), err = ERRORS[code];
+  if (PATH === '/login/2fa') {
+    if (!me.twofa_pending) return location.replace(me.user ? '/login' : '/login?error=expired');
+    try { const s = await api('GET', '/api/public/site'); if (s.site_name) site = s.site_name; } catch {}
+    document.title = `Two-factor code · ${site}`;
+    return view.replaceChildren(codeCard());
+  }
   // Back from a failed provider round trip: show the message on the page the visitor started from.
   if (code && PATH === '/login' && !KIND) {
     const from = recalled();

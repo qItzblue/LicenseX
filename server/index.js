@@ -4,16 +4,18 @@ import { join, resolve, relative, isAbsolute, extname, dirname } from 'node:path
 import { fileURLToPath } from 'node:url';
 import { randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
 import { openDb, DatabaseSync } from './db.js';
-import { createBackup, restoreBackup, RestoreError } from './backup.js';
+import { createBackup, restoreBackup, RestoreError, backupFiles, zipFiles } from './backup.js';
+import { createOffsite, offsiteConfig, withoutProducts, isEncrypted, decrypt } from './offsite.js';
 import { createBuildService, BuildError } from './builder.js';
 import { planForResource, planSalesSecret, issuePlanKey, lookupKey, redeemKey, registerPlanSales, RedeemError } from './plansales.js';
 import { providerDefs, authorizeUrl, exchangeCode, fetchProfile, parseEmails, normEmail, EMAIL_RE } from './auth.js';
 import { createCore, normalizeKey, KEY_RE, hash, now, PlanError, HOUSE } from './core.js';
-import { injectFiles } from './jarstamp.js';
+import { injectFiles, listEntries, readEntry, setZipComment, readZipComment } from './jarstamp.js';
 import { wrapJar, checkWrappable, WrapError } from './wrapjar.js';
 import { registerBuyers } from './buyers.js';
 import { registerTeam } from './team.js';
 import { accessFor, slotsFor } from './rbac.js';
+import { createTwoFactor, otpauthUri, subjectForEmail, PASSWORD_SUBJECT } from './twofa.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const WEB = join(ROOT, 'web');
@@ -55,8 +57,37 @@ if (DISABLE_PASSWORD_LOGIN && (!Object.keys(oauthConf).length || !CONFIG_ADMIN_E
 
 mkdirSync(DATA, { recursive: true });
 mkdirSync(PRODUCTS_DIR, { recursive: true });
-const db = openDb(process.env.LICENSEX_DB || join(DATA, 'licensex.db'));
+const DB_PATH = process.env.LICENSEX_DB || join(DATA, 'licensex.db');
+const freshDisk = !existsSync(DB_PATH);
+const db = openDb(DB_PATH);
 const core = createCore(db);
+
+// Off-site backups (server/offsite.js). On a wiped disk the newest copy is put back before anything else happens.
+const OFFSITE = offsiteConfig(process.env, fileConfig);
+const offsite = createOffsite({ config: OFFSITE, log: (action, target, detail) => core.log('system', action, target, detail),
+  snapshot: () => { const { files, digest } = backupFiles(db, PRODUCTS_DIR); return { zip: zipFiles(files), digest, small: withoutProducts(files) }; } });
+const looksEmpty = () => !db.prepare('SELECT 1 FROM licenses LIMIT 1').get() && !db.prepare('SELECT 1 FROM products LIMIT 1').get() && db.prepare('SELECT COUNT(*) n FROM workspaces').get().n <= 1;
+if (offsite.enabled && OFFSITE.restoreOnStart && (freshDisk || looksEmpty())) {
+  try {
+    const zip = await offsite.fetchLatest();
+    if (zip) {
+      const r = restoreBackup(db, PRODUCTS_DIR, zip, DatabaseSync);
+      core.log('system', 'backup.auto-restore', '', `${r.products} plugin file(s)`);
+      offsite.markRestored({ ok: true, products: r.products });
+      console.log(`[LicenseX] Empty disk: restored the latest off-site backup (${r.products} plugin file(s)).`);
+    } else console.log('[LicenseX] Empty disk and no off-site backup yet: starting fresh.');
+  } catch (e) {
+    offsite.markRestored({ ok: false, error: e.message });
+    console.error(`[LicenseX] Could not restore the off-site backup: ${e.message}. Starting with what is on disk; nothing is backed up over the old copy until you check.`);
+    OFFSITE.blocked = true;
+  }
+}
+const twofa = createTwoFactor(db);
+// Locked out (lost phone and recovery codes)? Start once with LICENSEX_RESET_2FA=password (or an email address) to switch it off.
+for (const who of parseEmails(process.env.LICENSEX_RESET_2FA || '')) {
+  const subject = who === PASSWORD_SUBJECT ? PASSWORD_SUBJECT : subjectForEmail(who);
+  if (twofa.remove(subject)) { core.log('system', '2fa.reset', who, 'LICENSEX_RESET_2FA'); console.log(`[LicenseX] Two-factor sign-in switched off for ${who}. Remove LICENSEX_RESET_2FA again.`); }
+}
 
 // Products uploaded before integration checks existed (or with an older wrapper) get analysed on startup.
 for (const p of db.prepare("SELECT * FROM products WHERE has_file=1 AND wrap_ok=0 AND wrap_code=''").all()) {
@@ -94,8 +125,18 @@ const readToken = tok => {
   if (!p || !sig || !safeEq(sig, sign(p))) return null;
   try { const o = JSON.parse(Buffer.from(p, 'base64url').toString()); return o.exp > Date.now() ? o : null; } catch { return null; }
 };
-const makeSession = () => { const exp = String(Date.now() + 12 * 3600e3); return `${exp}.${sign(exp)}`; };
-const validSession = tok => { const [exp, sig] = String(tok || '').split('.'); return !!sig && safeEq(sig, sign(exp)) && Number(exp) > Date.now(); };
+/** Admin-password session: "<expiry>.<m>.<signature>", m = 1 when the two-factor code was given. */
+const makeSession = (mfa = false) => { const v = `${Date.now() + 12 * 3600e3}.${mfa ? 1 : 0}`; return `${v}.${sign(v)}`; };
+const validSession = tok => {
+  const [exp, m, sig] = String(tok || '').split('.');
+  if (!sig || !/^[01]$/.test(m) || !safeEq(sig, sign(`${exp}.${m}`)) || !(Number(exp) > Date.now())) return null;
+  return { mfa: m === '1' };
+};
+/** A session made without the code stops counting the moment two-factor is switched on for that account. */
+const passwordSessionOk = req => { const s = validSession(cookies(req).lx_admin); return !!s && (s.mfa || !twofa.requiredFor([PASSWORD_SUBJECT])); };
+const adminCookie = (req, mfa) => `lx_admin=${makeSession(mfa)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200${secure(req)}`;
+const userCookie = (req, user) => `lx_user=${signToken(user)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.max(0, Math.round((user.exp - Date.now()) / 1000))}${secure(req)}`;
+const TWOFA_RATE = (ip, who) => rateLimit('2fa-ip:' + ip, 10, 10 * 60e3) && rateLimit('2fa:' + who, 10, 10 * 60e3);
 
 // --- tiny helpers --------------------------------------------------------
 /**
@@ -268,10 +309,16 @@ route('POST', '/api/admin/login', async ctx => {
   if (!rateLimit('login:' + ctx.ip, 8, 5 * 60e3)) throw new HttpError(429, 'Too many login attempts');
   const b = await body(ctx.req);
   if (!safeEq(hash(b.password ?? ''), hash(ADMIN_PASSWORD))) { core.log('admin', 'login.fail', ctx.ip); throw new HttpError(401, 'Wrong password'); }
-  core.log('admin', 'login', ctx.ip);
-  return [200, { ok: true }, { 'Set-Cookie': `lx_admin=${makeSession()}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200${secure(ctx.req)}` }];
+  const needCode = twofa.requiredFor([PASSWORD_SUBJECT]);
+  if (needCode) {
+    if (!b.code) throw new HttpError(401, 'Enter the 6-digit code from your authenticator app.', '2FA_REQUIRED');
+    if (!TWOFA_RATE(ctx.ip, PASSWORD_SUBJECT)) throw new HttpError(429, 'Too many codes tried. Wait a few minutes.');
+    if (!twofa.check([PASSWORD_SUBJECT], b.code)) { core.log('admin', 'login.2fa-fail', ctx.ip); throw new HttpError(401, 'That code is not right (or was already used).', '2FA_WRONG'); }
+  }
+  core.log('admin', 'login', ctx.ip, needCode ? 'with two-factor code' : '');
+  return [200, { ok: true }, { 'Set-Cookie': adminCookie(ctx.req, needCode) }];
 });
-const CLEAR_COOKIES = ['lx_admin=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0', 'lx_user=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0'];
+const CLEAR_COOKIES = ['lx_admin=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0', 'lx_user=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0', 'lx_2fa=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0'];
 route('POST', '/api/admin/logout', async () => [200, { ok: true }, { 'Set-Cookie': CLEAR_COOKIES }]);
 route('GET', '/api/admin/me', async ctx => {
   const w = db.prepare('SELECT id, name, plan_key, suspended FROM workspaces WHERE id=?').get(ctx.wsId);
@@ -285,7 +332,13 @@ route('GET', '/api/admin/me', async ctx => {
 
 // Who is signed in with Google/Discord/GitHub, and are they an admin? (public: the site header uses it)
 const adminEmailSet = () => new Set([...CONFIG_ADMIN_EMAILS, ...parseEmails(core.getSetting('admin_emails'))]);
-const sessionUser = req => readToken(cookies(req).lx_user);
+const sessionUser = req => {
+  const u = readToken(cookies(req).lx_user);
+  // signed in without the code while one of their emails has two-factor on (e.g. switched on after this session began): not signed in
+  return u && (u.mfa || !twofa.requiredFor(twofa.emailSubjects(u.emails))) ? u : null;
+};
+/** Signed in with Google/Discord/GitHub, still owing the two-factor code (5 minutes to give it). */
+const pendingUser = req => readToken(cookies(req).lx_2fa);
 const isAdminUser = u => !!u && Array.isArray(u.emails) && u.emails.some(e => adminEmailSet().has(e)); // checked on every request
 const workspaceOfUser = u => {
   if (!u || !Array.isArray(u.emails) || !u.emails.length) return null;
@@ -302,7 +355,7 @@ const workspaceOfUser = u => {
  * the X-Workspace header (default: the one they own, else the first they were added to).
  */
 const adminIdentity = (req, url) => {
-  if (validSession(cookies(req).lx_admin)) return { via: 'password', role: 'platform', name: 'Admin password' };
+  if (passwordSessionOk(req)) return { via: 'password', role: 'platform', name: 'Admin password' };
   const u = sessionUser(req);
   if (!u) return null;
   if (isAdminUser(u)) return { via: u.p, role: 'platform', name: u.name, email: u.email };
@@ -326,6 +379,7 @@ route('GET', '/api/auth/me', async ctx => {
     user: u ? { name: u.name, email: u.email, avatar: u.avatar, provider: u.p, isAdmin: isAdminUser(u), workspace: w ? { id: w.id, name: w.name } : null, memberships } : null,
     providers: Object.keys(oauthConf).map(id => ({ id, label: PROVIDERS[id].label })),
     password_login: !DISABLE_PASSWORD_LOGIN,
+    twofa_pending: !u && !!pendingUser(ctx.req),
   }];
 });
 route('POST', '/api/auth/logout', async () => [200, { ok: true }, { 'Set-Cookie': CLEAR_COOKIES }]);
@@ -362,12 +416,93 @@ async function handleAuth(req, res, url) {
 
   const user = { p: provider, id: profile.id, name: String(profile.name).slice(0, 80), avatar: String(profile.avatar).slice(0, 300),
     email: profile.email, emails: profile.emails.slice(0, 20), exp: Date.now() + 7 * 86400e3 };
+  const target = pending.n && NEXT_OK.has(pending.n) ? pending.n : '/';
+  if (twofa.requiredFor(twofa.emailSubjects(user.emails))) {
+    // not signed in yet: the code comes first (/login/2fa)
+    core.log('user', 'login.2fa-asked', `${provider}:${profile.email || profile.id}`);
+    return redirect(res, '/login/2fa', [
+      `lx_2fa=${signToken({ user, n: target, exp: Date.now() + 5 * 60e3 })}; HttpOnly; SameSite=Lax; Path=/; Max-Age=300${secure(req)}`,
+      'lx_user=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0', 'lx_oauth=; HttpOnly; SameSite=Lax; Path=/auth; Max-Age=0']);
+  }
   core.log('user', isAdminUser(user) ? 'login.admin' : 'login', `${provider}:${profile.email || profile.id}`);
   if (user.emails.length) db.prepare(`UPDATE members SET last_login = ? WHERE email IN (${user.emails.map(() => '?').join(',')})`).run(now(), ...user.emails);
-  redirect(res, pending.n && NEXT_OK.has(pending.n) ? pending.n : '/', [
-    `lx_user=${signToken(user)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${7 * 86400}${secure(req)}`,
-    'lx_oauth=; HttpOnly; SameSite=Lax; Path=/auth; Max-Age=0']);
+  redirect(res, target, [userCookie(req, user), 'lx_oauth=; HttpOnly; SameSite=Lax; Path=/auth; Max-Age=0']);
 }
+
+// Two-factor -----------------------------------------------------------------------------------------------------
+// The second step of a Google/Discord/GitHub sign-in.
+route('POST', '/api/auth/2fa', async ctx => {
+  const p = pendingUser(ctx.req);
+  if (!p?.user) throw new HttpError(401, 'The sign-in expired. Please sign in again.', '2FA_EXPIRED');
+  const b = await body(ctx.req), subjects = twofa.emailSubjects(p.user.emails);
+  if (!TWOFA_RATE(ctx.ip, subjects[0] || p.user.id)) throw new HttpError(429, 'Too many codes tried. Wait a few minutes.');
+  const who = `${p.user.p}:${p.user.email || p.user.id}`;
+  if (!twofa.check(subjects, b.code)) { core.log('user', 'login.2fa-fail', who); throw new HttpError(401, 'That code is not right (or was already used).', '2FA_WRONG'); }
+  const user = { ...p.user, mfa: 1 };
+  core.log('user', isAdminUser(user) ? 'login.admin' : 'login', who, 'with two-factor code');
+  if (user.emails.length) db.prepare(`UPDATE members SET last_login = ? WHERE email IN (${user.emails.map(() => '?').join(',')})`).run(now(), ...user.emails);
+  return [200, { ok: true, next: NEXT_OK.has(p.n) ? p.n : '/' }, { 'Set-Cookie': [userCookie(ctx.req, user), 'lx_2fa=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0'] }];
+});
+
+// Turning it on and off for your own account (anyone who can open the dashboard: the owner, customers and their team).
+const twofaSubject = ctx => {
+  if (ctx.admin.via === 'password') return PASSWORD_SUBJECT;
+  if (!ctx.admin.email) throw new HttpError(400, 'Your sign-in shared no verified email, so two-factor cannot be set up for it.');
+  return subjectForEmail(ctx.admin.email);
+};
+/** After switching it on, the session in use is re-issued as "code given" (every other session is signed out). */
+const refreshedSession = ctx => {
+  if (ctx.admin.via === 'password') return adminCookie(ctx.req, true);
+  const u = readToken(cookies(ctx.req).lx_user);
+  return u ? userCookie(ctx.req, { ...u, mfa: 1 }) : null;
+};
+const ownCode = async (ctx, subject) => {
+  const b = await body(ctx.req);
+  if (!TWOFA_RATE(ctx.ip, subject)) throw new HttpError(429, 'Too many codes tried. Wait a few minutes.');
+  return b;
+};
+route('GET', '/api/admin/2fa', async ctx => {
+  const subject = twofaSubject(ctx);
+  return [200, { ...twofa.status(subject), account: ctx.admin.via === 'password' ? 'the admin password' : ctx.admin.email }];
+}, { admin: true, allowSuspended: true });
+route('POST', '/api/admin/2fa/setup', async ctx => {
+  const subject = twofaSubject(ctx);
+  const secret = twofa.begin(subject);
+  if (!secret) throw new HttpError(409, 'Two-factor sign-in is already on. Switch it off first to move it to another phone.');
+  const issuer = core.getSetting('site_name') || 'LicenseX';
+  return [200, { secret, uri: otpauthUri({ issuer, account: ctx.admin.via === 'password' ? 'admin' : ctx.admin.email, secret }) }];
+}, { admin: true, allowSuspended: true });
+route('POST', '/api/admin/2fa/enable', async ctx => {
+  const subject = twofaSubject(ctx), b = await ownCode(ctx, subject);
+  const codes = twofa.finish(subject, b.code);
+  if (!codes) throw new HttpError(400, 'That code is not right. Check that the time on your phone is correct and try the newest code.', '2FA_WRONG');
+  core.log(ctx.admin.email || 'admin', '2fa.enable', subject, '', ctx.admin.role === 'platform' ? HOUSE : ctx.wsId);
+  const cookie = refreshedSession(ctx);
+  return [200, { ok: true, recovery_codes: codes }, cookie ? { 'Set-Cookie': cookie } : {}];
+}, { admin: true, allowSuspended: true });
+route('POST', '/api/admin/2fa/disable', async ctx => {
+  const subject = twofaSubject(ctx), b = await ownCode(ctx, subject);
+  if (!twofa.status(subject).enabled) return [200, { ok: true }];
+  if (!twofa.check([subject], b.code)) throw new HttpError(400, 'That code is not right (or was already used).', '2FA_WRONG');
+  twofa.remove(subject);
+  core.log(ctx.admin.email || 'admin', '2fa.disable', subject, '', ctx.admin.role === 'platform' ? HOUSE : ctx.wsId);
+  return [200, { ok: true }];
+}, { admin: true, allowSuspended: true });
+route('POST', '/api/admin/2fa/recovery', async ctx => {
+  const subject = twofaSubject(ctx), b = await ownCode(ctx, subject);
+  if (!twofa.status(subject).enabled) throw new HttpError(409, 'Two-factor sign-in is off.');
+  if (!twofa.check([subject], b.code)) throw new HttpError(400, 'That code is not right (or was already used).', '2FA_WRONG');
+  core.log(ctx.admin.email || 'admin', '2fa.recovery', subject, 'new recovery codes', ctx.admin.role === 'platform' ? HOUSE : ctx.wsId);
+  return [200, { recovery_codes: twofa.newRecovery(subject) }];
+}, { admin: true, allowSuspended: true });
+// The site owner can switch it off for someone who lost their phone and their recovery codes.
+route('POST', '/api/admin/2fa/reset', async ctx => {
+  const b = await body(ctx.req), who = normEmail(b.email);
+  if (!EMAIL_RE.test(who)) throw new HttpError(400, 'Enter the email address of the account.');
+  const done = twofa.remove(subjectForEmail(who));
+  if (done) core.log(ctx.admin.email || 'admin', '2fa.reset', who, '', HOUSE);
+  return [200, { ok: true, was_on: done }];
+}, { platform: true });
 
 // Admin: stats ----------------------------------------------------------------
 route('GET', '/api/admin/stats', async ctx => {
@@ -487,6 +622,46 @@ route('DELETE', '/api/admin/licenses/:id', async ctx => {
   wl(ctx, 'license.delete', lic.key, lic.owner);
   return [200, { ok: true }];
 }, { perm: 'licenses.delete' });
+
+// Leak tracer: upload a leaked jar, find out whose copy it was. -----------------------------------------------------
+const MARK_RE = /^[0-9a-f]{16}$/;
+/** What a jar says about where it came from: the license key and the download marks stamped into it. */
+function jarClues(jar) {
+  try { listEntries(jar); } catch { throw new HttpError(400, 'That file is not a .jar (or it is damaged).'); }
+  let cfg = null;
+  try { const raw = readEntry(jar, 'licensex.json', 64 * 1024); if (raw) cfg = JSON.parse(raw.toString('utf8')); } catch { cfg = null; }
+  const key = cfg && typeof cfg.key === 'string' ? normalizeKey(cfg.key) : '';
+  let comment = ''; try { comment = readZipComment(jar).trim(); } catch {}
+  const marks = [...new Set([cfg?.mark, comment].filter(m => typeof m === 'string' && MARK_RE.test(m)))];
+  return { has_config: !!cfg, key: KEY_RE.test(key) ? key : '', marks, product: cfg && typeof cfg.product === 'string' ? cfg.product.slice(0, 80) : '' };
+}
+route('POST', '/api/admin/leaks/trace', async ctx => {
+  if (!rateLimit('trace:' + ctx.ip, 30, 60e3)) throw new HttpError(429, 'Too many files at once. Wait a minute.');
+  const tmp = join(DATA, `trace-${randomBytes(6).toString('hex')}.jar`);
+  let jar;
+  try { await saveUpload(ctx.req, tmp); jar = readFileSync(tmp); } finally { rmSync(tmp, { force: true }); }
+  const clues = jarClues(jar);
+  const [sw, sa] = scopeSql(ctx, 'd.product_id');
+  const dls = clues.marks.length ? db.prepare(`SELECT d.*, p.name product_name FROM downloads d LEFT JOIN products p ON p.id = d.product_id
+    WHERE d.workspace_id = ? AND d.mark IN (${clues.marks.map(() => '?').join(',')}) AND ${sw}`).all(ctx.wsId, ...clues.marks, ...sa) : [];
+  const download = dls[0] || null;
+  const visible = l => (l && l.workspace_id === ctx.wsId && inScope(ctx, l.product_id) ? l : null);
+  const byKey = clues.key ? visible(db.prepare('SELECT * FROM licenses WHERE key = ?').get(clues.key)) : null;
+  const byMark = download ? visible(db.prepare('SELECT * FROM licenses WHERE id = ?').get(download.license_id) || db.prepare('SELECT * FROM licenses WHERE key = ?').get(download.license_key)) : null;
+  // The mark says which download the file is; the key says which license it runs on. Leakers sometimes put in another key.
+  const verdict = byMark && byKey ? (byMark.id === byKey.id ? 'match' : 'key_swapped') : byMark ? 'mark_only' : byKey ? 'key_only' : download ? 'license_deleted' : 'none';
+  const describe = l => {
+    if (!l) return null;
+    const product_name = l.product_id ? db.prepare('SELECT name FROM products WHERE id=?').get(l.product_id)?.name || l.product : l.product;
+    return { ...licenseRow({ ...l, product_name }),
+      servers: can(ctx, 'servers.view') ? db.prepare('SELECT name, ip, port, version, status, first_seen, last_seen FROM servers WHERE license_id = ? ORDER BY last_seen DESC LIMIT 20').all(l.id) : [],
+      downloads: db.prepare('SELECT at, ip, user_agent FROM downloads WHERE license_id = ? ORDER BY at DESC LIMIT 20').all(l.id) };
+  };
+  wl(ctx, 'leak.trace', (byMark || byKey)?.key || '', verdict);
+  return [200, { verdict, file: { has_config: clues.has_config, key: clues.key, marks: clues.marks, product: clues.product },
+    download: download && { at: download.at, ip: download.ip, user_agent: download.user_agent, bbb_user: download.bbb_user, product: download.product_name || '', license_key: download.license_key },
+    license: describe(byMark || byKey), other_license: verdict === 'key_swapped' ? describe(byKey) : null }];
+}, { perm: 'licenses.view' });
 
 // Delete licenses that downloads issued but that were never used on a server: the quick way to clear out junk.
 route('POST', '/api/admin/licenses/purge-unused', async ctx => {
@@ -709,13 +884,24 @@ route('POST', '/api/admin/restore', async ctx => {
   const tmp = join(DATA, '.restore-upload');
   await saveUpload(ctx.req, tmp, MAX_UPLOAD * 4); // a backup holds every plugin jar plus the database
   try {
-    const r = restoreBackup(db, PRODUCTS_DIR, readFileSync(tmp), DatabaseSync);
+    let file = readFileSync(tmp);
+    if (isEncrypted(file)) { try { file = decrypt(file, OFFSITE.password); } catch (e) { throw new RestoreError(e.message); } }
+    const r = restoreBackup(db, PRODUCTS_DIR, file, DatabaseSync);
     core.log('admin', 'backup.restore', '', `${r.products} plugin file(s)`);
     return [200, { ok: true, ...r }];
   } catch (e) {
     if (e instanceof RestoreError) throw new HttpError(400, e.message);
     throw e;
   } finally { rmSync(tmp, { force: true }); }
+}, { platform: true });
+
+route('GET', '/api/admin/offsite', async () => [200, { ...offsite.status(), blocked: !!OFFSITE.blocked }], { platform: true });
+route('POST', '/api/admin/offsite/run', async ctx => {
+  OFFSITE.blocked = false;   // the owner looked and wants copies sent again
+  offsite.start();
+  const r = await offsite.run({ force: true, reason: 'by hand' });
+  core.log(ctx.admin.email || 'admin', 'backup.offsite', '', JSON.stringify(r.results || r.message), HOUSE);
+  return [r.ok ? 200 : 502, r.ok ? r : { ok: false, message: r.message || Object.entries(r.results).map(([k, v]) => `${k}: ${v}`).join('; '), ...r }];
 }, { platform: true });
 
 // Admin: groups ---------------------------------------------------------------
@@ -922,7 +1108,7 @@ route('DELETE', '/api/admin/customers/:id', async ctx => {
   for (const p of db.prepare('SELECT slug FROM products WHERE workspace_id=?').all(w.id)) rmSync(productFile(p.slug), { force: true });
   db.exec('BEGIN');
   try {
-    for (const t of ['members', 'roles', 'licenses', 'products', 'license_groups', 'ws_settings', 'audit']) db.prepare(`DELETE FROM ${t} WHERE workspace_id=?`).run(w.id); // servers, buyer links and member scopes go with their parents
+    for (const t of ['members', 'roles', 'downloads', 'licenses', 'products', 'license_groups', 'ws_settings', 'audit']) db.prepare(`DELETE FROM ${t} WHERE workspace_id=?`).run(w.id); // servers, buyer links and member scopes go with their parents
     db.prepare('DELETE FROM workspaces WHERE id=?').run(w.id);
     db.exec('COMMIT');
   } catch (e) { db.exec('ROLLBACK'); throw e; }
@@ -981,15 +1167,18 @@ route('DELETE', '/api/admin/plans/:key', async ctx => {
 // Wraps the uploaded plugin so it checks its license before starting. A plugin that already contains the LicenseX
 // client only needs its licensex.json. Anything else that can't be wrapped is refused rather than served
 // unprotected: a license system must never silently hand out a jar that doesn't enforce the license.
-function licensedJar(req, p, key) {
+// Every copy also carries a random `mark` (in licensex.json and in the zip comment) that the leak tracer looks up.
+function licensedJar(req, p, key, mark = '') {
   const jar = readFileSync(productFile(p.slug));
-  const cfg = { url: publicBase(req), key, product: p.name };
-  try { return wrapJar(jar, cfg).jar; }
+  const cfg = { url: publicBase(req), key, product: p.name, mark };
+  let out;
+  try { out = wrapJar(jar, cfg).jar; }
   catch (e) {
     if (!(e instanceof WrapError)) throw e;
-    if (e.code === 'ALREADY_INTEGRATED') return injectFiles(jar, [{ name: 'licensex.json', content: JSON.stringify({ ...cfg, issued: now() }) }]);
-    throw new HttpError(503, `This download is unavailable: ${e.message}`, e.code);
+    if (e.code !== 'ALREADY_INTEGRATED') throw new HttpError(503, `This download is unavailable: ${e.message}`, e.code);
+    out = injectFiles(jar, [{ name: 'licensex.json', content: JSON.stringify({ ...cfg, issued: now() }) }]);
   }
+  return mark ? setZipComment(out, mark) : out;
 }
 
 // --- public download (BuiltByBit points here) ------------------------------
@@ -1029,8 +1218,12 @@ function handleDownload(req, res, slug, url) {
   }
   if (r.created) { rateLimit('mint:p' + p.id, Infinity, 3600e3); rateLimit('mint:ip' + ip, Infinity, 3600e3); } // only licenses actually issued count against the caps
 
-  const stamped = licensedJar(req, p, r.key);
+  const mark = randomBytes(8).toString('hex');
+  const stamped = licensedJar(req, p, r.key, mark);
   db.prepare('UPDATE products SET downloads = downloads + 1 WHERE id=?').run(p.id);
+  const lic = db.prepare('SELECT id FROM licenses WHERE key = ?').get(r.key);
+  db.prepare('INSERT INTO downloads (workspace_id, product_id, license_id, license_key, mark, ip, user_agent, bbb_user, at) VALUES (?,?,?,?,?,?,?,?,?)')
+    .run(p.workspace_id, p.id, lic?.id ?? null, r.key, mark, ip, str(req.headers['user-agent'], 200), str(url.searchParams.get('user'), 64), now());
   core.log('system', 'product.download', p.slug, `${r.key} ip=${ip}`, p.workspace_id);
 
   const dlName = (p.filename && /\.(jar|zip)$/i.test(p.filename) ? p.filename : slugify(p.name) + '.jar');
@@ -1048,12 +1241,12 @@ registerTeam(app);
 registerPlanSales(app);
 
 // --- static + dispatch -----------------------------------------------------
-const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
+const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
 function serveStatic(req, res, pathname) {
   if (pathname === '/') pathname = '/index.html';
   if (pathname === '/admin' || pathname === '/dashboard') pathname = '/admin.html';
   if (pathname === '/pricing') pathname = '/pricing.html';
-  if (pathname === '/login' || pathname === '/login/creator' || pathname === '/login/buyer') pathname = '/login.html';
+  if (pathname === '/login' || pathname === '/login/creator' || pathname === '/login/buyer' || pathname === '/login/2fa') pathname = '/login.html';
   if (pathname === '/account') pathname = '/account.html';
   const file = resolve(WEB, '.' + pathname);
   const rel = relative(WEB, file);
@@ -1122,8 +1315,21 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     console.error(`[LicenseX] Port ${PORT} is already in use (probably an old LicenseX still running). Close it or start on another port, e.g. PORT=3001 npm start (PowerShell: $env:PORT=3001; npm start).`);
     process.exit(1);
   });
+  if (offsite.enabled) {
+    // Render and most hosts send SIGTERM and wait a few seconds before stopping: send a last copy first
+    let stopping = false;
+    const stop = async sig => {
+      if (stopping) return; stopping = true;
+      console.log(`[LicenseX] ${sig}: sending a last off-site backup before stopping...`);
+      const r = OFFSITE.blocked ? null : await Promise.race([offsite.run({ reason: 'shutdown' }).catch(e => ({ message: e.message })), new Promise(r => setTimeout(r, 25e3))]);
+      console.log('[LicenseX] backup:', r ? JSON.stringify(r.results || r.message) : 'skipped or timed out');
+      process.exit(0);
+    };
+    process.on('SIGTERM', () => stop('SIGTERM')); process.on('SIGINT', () => stop('SIGINT'));
+    if (!OFFSITE.blocked) offsite.start();
+  }
   server.listen(PORT, () => {
-    console.log(`[LicenseX] listening on http://localhost:${PORT}  (admin: /admin)`);
+    console.log(`[LicenseX] listening on http://localhost:${server.address().port}  (admin: /admin)`);
     if (!PUBLIC_URL && (TRUST_PROXY || process.env.NODE_ENV === 'production'))
       console.warn('[LicenseX] LICENSEX_PUBLIC_URL is not set. Download links, the license address baked into plugins and sign-in redirects are guessed from each request, which can be wrong behind a proxy. Set it to your real https address.');
   });

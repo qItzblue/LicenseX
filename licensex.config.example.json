@@ -11,5 +11,11 @@
     "google":  { "clientId": "", "clientSecret": "" },
     "discord": { "clientId": "", "clientSecret": "" },
     "github":  { "clientId": "", "clientSecret": "" }
+  },
+  "backup": {
+    "s3": { "endpoint": "", "bucket": "", "accessKey": "", "secretKey": "" },
+    "discordWebhook": "",
+    "password": "",
+    "everyMinutes": 60
   }
 }

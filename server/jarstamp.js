@@ -155,3 +155,15 @@ export function injectFiles(buf, files, { remove = () => false } = {}) {
   newEocd.writeUInt32LE(newCentral.length, 12); newEocd.writeUInt32LE(newLocal.length, 16); newEocd.writeUInt16LE(0, 20);
   return Buffer.concat([newLocal, newCentral, newEocd]);
 }
+
+/** Replaces the archive comment (the free text at the very end of a zip). Readers ignore it; the leak tracer uses it. */
+export function setZipComment(buf, text) {
+  const eocd = findEocd(buf), c = Buffer.from(String(text), 'utf8').subarray(0, 0xFFFF);
+  const head = Buffer.from(buf.subarray(eocd, eocd + 22));
+  head.writeUInt16LE(c.length, 20);
+  return Buffer.concat([buf.subarray(0, eocd), head, c]);
+}
+export function readZipComment(buf) {
+  const eocd = findEocd(buf);
+  return buf.toString('utf8', eocd + 22, Math.min(buf.length, eocd + 22 + buf.readUInt16LE(eocd + 20)));
+}
