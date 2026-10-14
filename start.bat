@@ -3,3 +3,4 @@ cd /d "%~dp0"
 where node >nul 2>nul || (echo Node.js 22.13 or newer is required: https://nodejs.org & pause & exit /b 1)
 node server\index.js
 pause
+rem updated 2026-10-14

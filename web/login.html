@@ -8,25 +8,40 @@
   <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
-  <meta name="theme-color" content="#0a0b10">
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap">
+  <meta name="theme-color" content="#0b0a10">
+  <link rel="stylesheet" href="/ds/styles.css">
   <link rel="stylesheet" href="/app.css">
+  <link rel="stylesheet" href="/lx.css">
   <style>
-    main { min-height: 100vh; display: grid; place-items: center; padding: 24px 16px; }
-    .box { width: min(400px, 100%); }
-    .box .card { padding: 28px; }
-    h1 { font-size: 24px; margin: 18px 0 6px; }
-    .err { color: var(--bad); font-size: 14px; background: rgba(248, 113, 113, .08); border: 1px solid rgba(248, 113, 113, .3); padding: 10px 12px; border-radius: var(--radius-sm); margin-bottom: 14px; }
-    .who { display: flex; align-items: center; gap: 12px; margin: 16px 0 18px; }
-    .who img, .who .ph { width: 44px; height: 44px; border-radius: 50%; background: var(--accent-soft); display: grid; place-items: center; font-weight: 700; color: var(--accent); object-fit: cover; }
-    .back { display: block; text-align: center; margin-top: 18px; font-size: 14px; color: var(--muted); }
+    main { min-height: calc(100vh - var(--header-h)); display: grid; place-items: center; padding: clamp(40px, 8vw, 96px) var(--gutter) 64px; }
+    .box { width: min(440px, 100%); }
+    .box.wide { width: min(720px, 100%); }
+    .box .lx-card { padding: clamp(22px, 4vw, 32px); }
+    h1 { font-size: clamp(30px, 4.4vw, 40px); font-weight: 650; letter-spacing: var(--tracking-heading); line-height: 1.05; margin: 16px 0 10px; }
+    .lead { margin: 0 0 22px; color: var(--fg-2); font-size: 15px; }
+    .btn.block, .lx-btn.block { width: 100%; justify-content: center; margin-bottom: 10px; }
+    .err { color: var(--redstone-400); font-size: 14px; background: var(--redstone-900); border: 1px solid rgba(229, 56, 59, .35); padding: 10px 12px; border-radius: var(--radius-sm); margin-bottom: 14px; }
+    .who { display: flex; align-items: center; gap: 12px; margin: 18px 0 20px; }
+    .who img, .who .ph { width: 44px; height: 44px; border-radius: var(--radius-sm); background: var(--surface-2); display: grid; place-items: center; font-weight: 700; color: var(--accent); object-fit: cover; }
+    .head { display: flex; flex-direction: column; gap: 14px; margin-bottom: 28px; }
+    .head h1 { margin: 0; }
+    .choices { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .oauth-btn { height: 48px; padding: 0 16px; border-radius: var(--radius-md); border: 1px solid var(--border-2); background: var(--surface-2); box-shadow: var(--shadow-1); justify-content: center; }
+    .oauth-btn .logo { width: 22px; height: 22px; border-radius: 5px; font-size: 12px; }
+    .alt { text-align: center; margin: 20px 0 0; font-size: 14px; color: var(--fg-2); }
+    .back { display: block; text-align: center; margin-top: 20px; font-size: 14px; color: var(--fg-2); }
+    .codebox { display: flex; flex-direction: column; gap: 14px; margin: 6px 0 22px; }
+    .status { min-height: 20px; font-size: 13px; color: var(--fg-2); }
+    .status.bad { color: var(--redstone-400); }
+    @media (max-width: 640px) { .choices { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
-  <main>
-    <div class="box">
-      <div class="card" id="card"><div class="muted">Loading...</div></div>
-      <a class="back" href="/">&larr; Back to the license page</a>
+  <div id="lxHeader"></div>
+  <main id="main">
+    <div class="box" id="box">
+      <div id="view"><div class="lx-card muted">Loading...</div></div>
+      <a class="back" href="/">&larr; Back to the home page</a>
     </div>
   </main>
   <script type="module" src="/login.js"></script>

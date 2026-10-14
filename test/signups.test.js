@@ -27,7 +27,7 @@ test('closed signups: strangers cannot create workspaces or check out', async ()
   const r = await call('POST', '/api/workspace/ensure', null, guest);
   assert.equal(r.status, 403); assert.match(r.body.message, /closed/i);
   assert.equal((await call('GET', '/api/admin/stats', null, guest)).status, 401);
-  assert.equal((await call('POST', '/api/billing/checkout', { plan: 'pro' }, guest)).status, 503, 'payments are off here, so checkout stops before it could create anything');
+  assert.equal((await call('POST', '/api/billing/redeem', { key: 'LX-AAAA-BBBB-CCCC-DDDD' }, guest)).status, 404, 'a key that is not a plan key creates nothing, even though signups are closed');
   assert.equal((await call('GET', '/api/admin/customers', null, boss)).body.filter(c => !c.house).length, 0, 'nothing was created');
 });
 
@@ -49,4 +49,18 @@ test('the owner can invite someone: whoever signs in with that verified email ow
   // an UNVERIFIED claim to that email gets nothing
   const fake = await signIn(base, mock, googleUser('friend@devs.io', { verified: false }));
   assert.equal((await call('GET', '/api/admin/stats', null, fake)).status, 401);
+});
+
+test('with signups closed, a valid BuiltByBit key is still an invitation: the buyer gets an account with the plan', async () => {
+  const plans = (await call('GET', '/api/admin/plans', null, boss)).body, life = plans.find(p => p.key === 'lifetime');
+  assert.equal((await call('PATCH', '/api/admin/plans/lifetime', { ...life, bbb_resource_id: '4242', buy_url: 'https://builtbybit.com/resources/x.4242/' }, boss)).status, 200);
+  const secret = (await call('GET', '/api/admin/plan-sales', null, boss)).body.secret;
+  const key = await fetch(`${base}/api/v1/builtbybit/license`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ secret, user_id: '99', resource_id: '4242' }) }).then(r => r.text());
+  const buyer = await signIn(base, mock, googleUser('buyer@elsewhere.io'));
+  assert.equal((await call('POST', '/api/workspace/ensure', null, buyer)).status, 403, 'plain signup is still closed');
+  assert.equal((await call('POST', '/api/billing/redeem', { key: 'LX-AAAA-BBBB-CCCC-DDDD' }, buyer)).status, 404, 'a bad key creates nothing');
+  assert.equal((await call('GET', '/api/admin/stats', null, buyer)).status, 401);
+  const r = await call('POST', '/api/billing/redeem', { key }, buyer);
+  assert.equal(r.status, 200);
+  assert.equal((await call('GET', '/api/workspace', null, buyer)).body.plan_key, 'lifetime');
 });

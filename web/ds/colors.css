@@ -1,0 +1,56 @@
+:root {
+  /* Obsidian — page + surfaces (subtle purple undertone) */
+  --obsidian-950: #0b0a10;
+  --obsidian-900: #14121c;
+  --obsidian-850: #1c1926;
+  --obsidian-800: #25212f;
+  --obsidian-700: #332e42;
+  --obsidian-600: #47415a;
+
+  /* Redstone — primary accent */
+  --redstone-400: #ef5a5c;
+  --redstone-500: #e5383b;
+  --redstone-600: #cf2c30; /* button fill: white text passes AA (5.2:1) */
+  --redstone-700: #a51f23;
+  --redstone-900: #3a1216;
+
+  /* Enchantment — sparing highlights + links */
+  --enchant-300: #a78bfa;
+  --enchant-500: #8b5cf6;
+  --enchant-900: #241a3d;
+
+  /* Status */
+  --emerald-400: #34d399;
+  --emerald-900: #0f2a22;
+  --gold-400: #fbbf24;
+  --gold-900: #2e2410;
+
+  /* Ink */
+  --ink-100: #ecebf3;
+  --ink-400: #8a879c;
+  --ink-600: #5d5a6e; /* decorative / disabled only — not for body text */
+  --white: #ffffff;
+
+  /* Semantic */
+  --bg-page: var(--obsidian-950);
+  --surface-1: var(--obsidian-900);
+  --surface-2: var(--obsidian-850);
+  --surface-3: var(--obsidian-800);
+  --border-1: rgba(236, 235, 243, 0.07);
+  --border-2: rgba(236, 235, 243, 0.13);
+  --border-strong: var(--obsidian-700);
+  --fg-1: var(--ink-100);
+  --fg-2: var(--ink-400);
+  --fg-disabled: var(--ink-600);
+  --accent: var(--redstone-500);
+  --accent-fill: var(--redstone-600);
+  --accent-fill-hover: #d93236;
+  --on-accent: var(--white);
+  --link: var(--enchant-300);
+  --link-hover: #c4b1fd;
+  --highlight: var(--enchant-500);
+  --status-valid: var(--emerald-400);
+  --status-warn: var(--gold-400);
+  --status-blocked: var(--redstone-500);
+  --focus-ring: var(--redstone-500);
+}

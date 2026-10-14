@@ -23,14 +23,27 @@ Settings can come from `licensex.config.json` or environment variables (variable
 proxies are in front; default 1, use 2 for Cloudflare in front of Render).
 
 **Run it as a paid service:** other plugin developers sign up for a private workspace (their own plugins, licenses and
-settings), pick a plan on **/pricing**, and pay with Stripe or get a plan from you. You edit the plans, see every
-customer, and can open their workspace to help. Set up in **[docs/BILLING.md](docs/BILLING.md)**.
+settings), pick a plan on **/pricing**, buy it on **BuiltByBit** (one monthly plan, one one-time plan) and activate the key
+they get there, or get a plan from you. You edit the plans, see every customer, and can open their workspace to help.
+Set up in **[docs/BILLING.md](docs/BILLING.md)**.
 
 **Build from source:** upload a Maven/Gradle project as a zip, get the compiled jar (after an inspection report), and turn it
 into a product in one click. Needs a JDK and Maven on the server. See **[docs/BUILD.md](docs/BUILD.md)**.
 
 **Sign in with Google, Discord or GitHub:** optional; people whose verified email is on your admin list get an **Admin**
-button in the site header. Setup in **[docs/LOGIN.md](docs/LOGIN.md)**.
+button in the site header. Creators and buyers have their own sign-in pages (`/login/creator`, `/login/buyer`, chooser at
+`/login`). Setup in **[docs/LOGIN.md](docs/LOGIN.md)**.
+
+**Security:** two-factor sign-in with an authenticator app for every account, and a **leak tracer**: every downloaded
+jar carries its buyer's key plus a hidden mark, so a leaked copy shows whose it was. See **[docs/SECURITY.md](docs/SECURITY.md)**.
+
+**Off-site backups:** copies to S3-style storage (Backblaze B2, Cloudflare R2, Amazon S3) and/or a Discord channel,
+encrypted, and an automatic restore when the server starts on a wiped disk (Render's free tier). See
+**[docs/BACKUPS.md](docs/BACKUPS.md)**.
+
+**Buyer accounts:** a buyer signs in and sees every license they own at **/account** ("My licenses"): they add keys, and
+licenses you issue to their verified email appear by themselves. They see their servers and can remove the ones they no
+longer run (if you allow self-service removal). Details in [docs/LOGIN.md](docs/LOGIN.md).
 
 ## How it works
 
@@ -42,9 +55,16 @@ button in the site header. Setup in **[docs/LOGIN.md](docs/LOGIN.md)**.
 | `server/jarstamp.js`, `classfile.js`, `wrapjar.js` | Dependency-free JAR editor, class-file patcher and the plugin wrapper that adds the license check. |
 | `wrapper/` | Source of the precompiled wrapper classes (`wrapper/build.sh`). |
 | `server/auth.js` | Google / Discord / GitHub OAuth sign-in and the verified-email admin check. |
-| `server/billing.js` | Stripe Checkout, billing portal and webhook handling (no SDK), and plan entitlements. |
+| `server/buyers.js` | Buyer accounts: `/api/account` (list, link a key, unlink, remove a server). |
+| `web/login.html`, `web/account.html` | Sign-in pages (chooser, creator, buyer) and the buyer portal "My licenses". |
+| `server/plansales.js` | Plans sold on BuiltByBit: access keys, activation, monthly/one-time periods. |
+| `server/rbac.js`, `team.js` | Roles, permissions and product-limited team members. |
 | `server/builder.js`, `zipx.js` | Source inspection (risk scan) and the Maven/Gradle build runner; safe zip extraction. |
 | `server/backup.js` | Backup / restore (admin -> Settings -> Backup & move) for moving between hosts. |
+| `server/offsite.js` | Off-site copies (S3 signature v4, Discord webhook, AES-256-GCM) and the restore on an empty start. |
+| `server/twofa.js` | Two-factor sign-in (TOTP, recovery codes). |
+| `web/ds/`, `web/lx.css`, `web/lx.js` | "Redstone & Obsidian" design system: tokens (colors, type, spacing, effects), Lucide icons, and the shared components (header, console, hotbar, license key chip, server slots, code boxes). |
+| `web/admin-extra.js`, `web/vendor/qrcode.mjs` | Security page, leak tracer, off-site backup card; QR codes (qrcode-generator, MIT). |
 | `plugin/` | `LicenseClient` (drop-in, no deps) + an example Bukkit/Paper plugin (`mvn package`). |
 
 ## Products & integrated downloads

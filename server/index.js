@@ -4,17 +4,18 @@ import { join, resolve, relative, isAbsolute, extname, dirname } from 'node:path
 import { fileURLToPath } from 'node:url';
 import { randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
 import { openDb, DatabaseSync } from './db.js';
-import { createBackup, restoreBackup, RestoreError } from './backup.js';
+import { createBackup, restoreBackup, RestoreError, backupFiles, zipFiles } from './backup.js';
+import { createOffsite, offsiteConfig, withoutProducts, isEncrypted, decrypt } from './offsite.js';
 import { createBuildService, BuildError } from './builder.js';
-import { createBilling, verifySignature, StripeError } from './billing.js';
+import { planForResource, planSalesSecret, issuePlanKey, lookupKey, redeemKey, registerPlanSales, RedeemError } from './plansales.js';
 import { providerDefs, authorizeUrl, exchangeCode, fetchProfile, parseEmails, normEmail, EMAIL_RE } from './auth.js';
 import { createCore, normalizeKey, KEY_RE, hash, now, PlanError, HOUSE } from './core.js';
-import { injectFiles } from './jarstamp.js';
+import { injectFiles, listEntries, readEntry, setZipComment, readZipComment } from './jarstamp.js';
 import { wrapJar, checkWrappable, WrapError } from './wrapjar.js';
-import { registerStripeConnect } from './stripe-connect.js';
 import { registerBuyers } from './buyers.js';
 import { registerTeam } from './team.js';
 import { accessFor, slotsFor } from './rbac.js';
+import { createTwoFactor, otpauthUri, subjectForEmail, PASSWORD_SUBJECT } from './twofa.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const WEB = join(ROOT, 'web');
@@ -44,13 +45,6 @@ for (const p of Object.keys(PROVIDERS)) {
   const secret = process.env[`LICENSEX_${p.toUpperCase()}_CLIENT_SECRET`] || fileConfig.oauth?.[p]?.clientSecret;
   if (id && secret) oauthConf[p] = { clientId: String(id), clientSecret: String(secret) };
 }
-// Stripe (optional): without a secret key the pricing page just offers "contact us" and plans are granted by hand.
-const STRIPE = {
-  secretKey: process.env.LICENSEX_STRIPE_SECRET_KEY || fileConfig.stripe?.secretKey || '',
-  webhookSecret: process.env.LICENSEX_STRIPE_WEBHOOK_SECRET || fileConfig.stripe?.webhookSecret || '',
-  apiBase: process.env.LICENSEX_STRIPE_API_BASE || 'https://api.stripe.com',   // only overridden by the tests
-};
-if (STRIPE.secretKey && !/^(sk|rk)_(test|live)_/.test(STRIPE.secretKey)) console.error('[LicenseX] The Stripe secret key should start with sk_test_ or sk_live_ (a "restricted" rk_ key also works).');
 // Emails that are admins no matter what the database says (so you can never lock yourself out of the settings page).
 const CONFIG_ADMIN_EMAILS = parseEmails(process.env.LICENSEX_ADMIN_EMAILS ?? fileConfig.adminEmails ?? '');
 // 'closed' = only people you give a plan to by hand can have a workspace (no self-service signup)
@@ -63,8 +57,37 @@ if (DISABLE_PASSWORD_LOGIN && (!Object.keys(oauthConf).length || !CONFIG_ADMIN_E
 
 mkdirSync(DATA, { recursive: true });
 mkdirSync(PRODUCTS_DIR, { recursive: true });
-const db = openDb(process.env.LICENSEX_DB || join(DATA, 'licensex.db'));
+const DB_PATH = process.env.LICENSEX_DB || join(DATA, 'licensex.db');
+const freshDisk = !existsSync(DB_PATH);
+const db = openDb(DB_PATH);
 const core = createCore(db);
+
+// Off-site backups (server/offsite.js). On a wiped disk the newest copy is put back before anything else happens.
+const OFFSITE = offsiteConfig(process.env, fileConfig);
+const offsite = createOffsite({ config: OFFSITE, log: (action, target, detail) => core.log('system', action, target, detail),
+  snapshot: () => { const { files, digest } = backupFiles(db, PRODUCTS_DIR); return { zip: zipFiles(files), digest, small: withoutProducts(files) }; } });
+const looksEmpty = () => !db.prepare('SELECT 1 FROM licenses LIMIT 1').get() && !db.prepare('SELECT 1 FROM products LIMIT 1').get() && db.prepare('SELECT COUNT(*) n FROM workspaces').get().n <= 1;
+if (offsite.enabled && OFFSITE.restoreOnStart && (freshDisk || looksEmpty())) {
+  try {
+    const zip = await offsite.fetchLatest();
+    if (zip) {
+      const r = restoreBackup(db, PRODUCTS_DIR, zip, DatabaseSync);
+      core.log('system', 'backup.auto-restore', '', `${r.products} plugin file(s)`);
+      offsite.markRestored({ ok: true, products: r.products });
+      console.log(`[LicenseX] Empty disk: restored the latest off-site backup (${r.products} plugin file(s)).`);
+    } else console.log('[LicenseX] Empty disk and no off-site backup yet: starting fresh.');
+  } catch (e) {
+    offsite.markRestored({ ok: false, error: e.message });
+    console.error(`[LicenseX] Could not restore the off-site backup: ${e.message}. Starting with what is on disk; nothing is backed up over the old copy until you check.`);
+    OFFSITE.blocked = true;
+  }
+}
+const twofa = createTwoFactor(db);
+// Locked out (lost phone and recovery codes)? Start once with LICENSEX_RESET_2FA=password (or an email address) to switch it off.
+for (const who of parseEmails(process.env.LICENSEX_RESET_2FA || '')) {
+  const subject = who === PASSWORD_SUBJECT ? PASSWORD_SUBJECT : subjectForEmail(who);
+  if (twofa.remove(subject)) { core.log('system', '2fa.reset', who, 'LICENSEX_RESET_2FA'); console.log(`[LicenseX] Two-factor sign-in switched off for ${who}. Remove LICENSEX_RESET_2FA again.`); }
+}
 
 // Products uploaded before integration checks existed (or with an older wrapper) get analysed on startup.
 for (const p of db.prepare("SELECT * FROM products WHERE has_file=1 AND wrap_ok=0 AND wrap_code=''").all()) {
@@ -102,8 +125,18 @@ const readToken = tok => {
   if (!p || !sig || !safeEq(sig, sign(p))) return null;
   try { const o = JSON.parse(Buffer.from(p, 'base64url').toString()); return o.exp > Date.now() ? o : null; } catch { return null; }
 };
-const makeSession = () => { const exp = String(Date.now() + 12 * 3600e3); return `${exp}.${sign(exp)}`; };
-const validSession = tok => { const [exp, sig] = String(tok || '').split('.'); return !!sig && safeEq(sig, sign(exp)) && Number(exp) > Date.now(); };
+/** Admin-password session: "<expiry>.<m>.<signature>", m = 1 when the two-factor code was given. */
+const makeSession = (mfa = false) => { const v = `${Date.now() + 12 * 3600e3}.${mfa ? 1 : 0}`; return `${v}.${sign(v)}`; };
+const validSession = tok => {
+  const [exp, m, sig] = String(tok || '').split('.');
+  if (!sig || !/^[01]$/.test(m) || !safeEq(sig, sign(`${exp}.${m}`)) || !(Number(exp) > Date.now())) return null;
+  return { mfa: m === '1' };
+};
+/** A session made without the code stops counting the moment two-factor is switched on for that account. */
+const passwordSessionOk = req => { const s = validSession(cookies(req).lx_admin); return !!s && (s.mfa || !twofa.requiredFor([PASSWORD_SUBJECT])); };
+const adminCookie = (req, mfa) => `lx_admin=${makeSession(mfa)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200${secure(req)}`;
+const userCookie = (req, user) => `lx_user=${signToken(user)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.max(0, Math.round((user.exp - Date.now()) / 1000))}${secure(req)}`;
+const TWOFA_RATE = (ip, who) => rateLimit('2fa-ip:' + ip, 10, 10 * 60e3) && rateLimit('2fa:' + who, 10, 10 * 60e3);
 
 // --- tiny helpers --------------------------------------------------------
 /**
@@ -159,6 +192,7 @@ const json = (res, status, body, headers = {}) => {
 async function body(req) {
   let size = 0; const chunks = [];
   for await (const c of req) { size += c.length; if (size > 32768) throw new HttpError(413, 'Body too large'); chunks.push(c); }
+  req.lxRecheck?.();   // signed-in routes: the caller's access may have changed while the body was on its way
   if (!chunks.length) return {};
   const text = Buffer.concat(chunks).toString();
   if (/x-www-form-urlencoded/i.test(req.headers['content-type'] || '')) return Object.fromEntries(new URLSearchParams(text)); // BuiltByBit posts a form
@@ -190,6 +224,7 @@ async function saveUpload(req, destPath, max = MAX_UPLOAD) {
     check();
     await new Promise(r => out.end(r));
     check();
+    req.lxRecheck?.();
   } catch (e) { out.destroy(); try { rmSync(tmp, { force: true }); } catch {} throw e; }
   if (size === 0) { try { rmSync(tmp, { force: true }); } catch {} throw new HttpError(400, 'Empty upload'); }
   renameSync(tmp, destPath);
@@ -225,13 +260,20 @@ route('POST', '/api/v1/builtbybit/license', async ctx => {
   // the secret identifies the developer (workspace) whose buyer this is
   const secret = typeof b.secret === 'string' ? b.secret : '';
   const w = secret.length >= 16 ? db.prepare('SELECT * FROM workspaces WHERE bbb_secret = ?').get(secret) : null;
-  if (!w) { core.log('system', 'bbb.denied', ctx.ip, 'bad secret'); return [403, 'Forbidden']; }
+  const sales = !w && secret.length >= 16 && safeEq(secret, planSalesSecret(db));   // the owner's secret for selling plans (never shown to staff)
+  if (!w && !sales) { if (rateLimit('bbb-deny:' + ctx.ip, 5, 60e3)) core.log('system', 'bbb.denied', ctx.ip, 'bad secret'); return [403, 'Forbidden']; }
   const uid = str(b.user_id, 32).trim(), rid = str(b.resource_id, 32).trim();
   if (!/^\d+$/.test(uid)) return [400, 'Missing user_id'];
+  if (sales) {                         // a plan resource hands out an access key (see plansales.js); a repeating plan gets a fresh key every period
+    const plan = planForResource(db, rid);
+    if (!plan) return [404, 'No plan is sold under that resource id'];
+    const key = issuePlanKey({ db, plan, user: uid, ip: ctx.ip });
+    return [200, key];
+  }
   const gid = Number(core.getSetting('bbb_group_id', w.id)) || null;
   // when the developer told us which product this BuiltByBit resource is, the license is linked to it
   const linked = rid ? db.prepare('SELECT id FROM products WHERE workspace_id=? AND bbb_resource_id=?').get(w.id, rid) : null;
-  const r = core.claim({ ws: w.id, user: uid, name: `BuiltByBit #${uid}`, product: `BuiltByBit resource ${rid || '?'}`, product_id: linked?.id ?? null,
+  const r = core.claim({ ws: w.id, user: uid, name: `BuiltByBit #${uid}`, product: `BuiltByBit resource ${rid || '?'}`, product_id: linked?.id ?? null, relink: true,
     group_id: gid && db.prepare('SELECT 1 FROM license_groups WHERE id=? AND workspace_id=?').get(gid, w.id) ? gid : null, ip: ctx.ip, device: hash('bbb') });
   if (!r.ok) return [r.code === 'PLAN_LIMIT' ? 402 : 503, r.message];
   return [200, r.key];
@@ -267,10 +309,16 @@ route('POST', '/api/admin/login', async ctx => {
   if (!rateLimit('login:' + ctx.ip, 8, 5 * 60e3)) throw new HttpError(429, 'Too many login attempts');
   const b = await body(ctx.req);
   if (!safeEq(hash(b.password ?? ''), hash(ADMIN_PASSWORD))) { core.log('admin', 'login.fail', ctx.ip); throw new HttpError(401, 'Wrong password'); }
-  core.log('admin', 'login', ctx.ip);
-  return [200, { ok: true }, { 'Set-Cookie': `lx_admin=${makeSession()}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200${secure(ctx.req)}` }];
+  const needCode = twofa.requiredFor([PASSWORD_SUBJECT]);
+  if (needCode) {
+    if (!b.code) throw new HttpError(401, 'Enter the 6-digit code from your authenticator app.', '2FA_REQUIRED');
+    if (!TWOFA_RATE(ctx.ip, PASSWORD_SUBJECT)) throw new HttpError(429, 'Too many codes tried. Wait a few minutes.');
+    if (!twofa.check([PASSWORD_SUBJECT], b.code)) { core.log('admin', 'login.2fa-fail', ctx.ip); throw new HttpError(401, 'That code is not right (or was already used).', '2FA_WRONG'); }
+  }
+  core.log('admin', 'login', ctx.ip, needCode ? 'with two-factor code' : '');
+  return [200, { ok: true }, { 'Set-Cookie': adminCookie(ctx.req, needCode) }];
 });
-const CLEAR_COOKIES = ['lx_admin=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0', 'lx_user=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0'];
+const CLEAR_COOKIES = ['lx_admin=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0', 'lx_user=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0', 'lx_2fa=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0'];
 route('POST', '/api/admin/logout', async () => [200, { ok: true }, { 'Set-Cookie': CLEAR_COOKIES }]);
 route('GET', '/api/admin/me', async ctx => {
   const w = db.prepare('SELECT id, name, plan_key, suspended FROM workspaces WHERE id=?').get(ctx.wsId);
@@ -279,12 +327,18 @@ route('GET', '/api/admin/me', async ctx => {
     permissions: [...ctx.access.perms], limited: !!sc, products: sc ? [...sc] : null,
     member_role: ctx.admin.member?.role_name || (ctx.access.owner ? 'Owner' : ''),
     workspaces: ctx.admin.workspaces || null,
-    workspace: { id: w.id, name: w.name, house: w.id === HOUSE, suspended: !!w.suspended, plan: core.planOf(w.id) } }];
+    workspace: { id: w.id, name: w.name, house: w.id === HOUSE, suspended: !!w.suspended, plan: ctx.admin.role === 'member' ? null : (({ key, name, max_products, max_licenses, interval, price_cents, currency }) => ({ key, name, max_products, max_licenses, interval, price_cents, currency }))(core.planOf(w.id)) } }];
 }, { admin: true });
 
 // Who is signed in with Google/Discord/GitHub, and are they an admin? (public: the site header uses it)
 const adminEmailSet = () => new Set([...CONFIG_ADMIN_EMAILS, ...parseEmails(core.getSetting('admin_emails'))]);
-const sessionUser = req => readToken(cookies(req).lx_user);
+const sessionUser = req => {
+  const u = readToken(cookies(req).lx_user);
+  // signed in without the code while one of their emails has two-factor on (e.g. switched on after this session began): not signed in
+  return u && (u.mfa || !twofa.requiredFor(twofa.emailSubjects(u.emails))) ? u : null;
+};
+/** Signed in with Google/Discord/GitHub, still owing the two-factor code (5 minutes to give it). */
+const pendingUser = req => readToken(cookies(req).lx_2fa);
 const isAdminUser = u => !!u && Array.isArray(u.emails) && u.emails.some(e => adminEmailSet().has(e)); // checked on every request
 const workspaceOfUser = u => {
   if (!u || !Array.isArray(u.emails) || !u.emails.length) return null;
@@ -301,7 +355,7 @@ const workspaceOfUser = u => {
  * the X-Workspace header (default: the one they own, else the first they were added to).
  */
 const adminIdentity = (req, url) => {
-  if (validSession(cookies(req).lx_admin)) return { via: 'password', role: 'platform', name: 'Admin password' };
+  if (passwordSessionOk(req)) return { via: 'password', role: 'platform', name: 'Admin password' };
   const u = sessionUser(req);
   if (!u) return null;
   if (isAdminUser(u)) return { via: u.p, role: 'platform', name: u.name, email: u.email };
@@ -325,6 +379,7 @@ route('GET', '/api/auth/me', async ctx => {
     user: u ? { name: u.name, email: u.email, avatar: u.avatar, provider: u.p, isAdmin: isAdminUser(u), workspace: w ? { id: w.id, name: w.name } : null, memberships } : null,
     providers: Object.keys(oauthConf).map(id => ({ id, label: PROVIDERS[id].label })),
     password_login: !DISABLE_PASSWORD_LOGIN,
+    twofa_pending: !u && !!pendingUser(ctx.req),
   }];
 });
 route('POST', '/api/auth/logout', async () => [200, { ok: true }, { 'Set-Cookie': CLEAR_COOKIES }]);
@@ -361,12 +416,93 @@ async function handleAuth(req, res, url) {
 
   const user = { p: provider, id: profile.id, name: String(profile.name).slice(0, 80), avatar: String(profile.avatar).slice(0, 300),
     email: profile.email, emails: profile.emails.slice(0, 20), exp: Date.now() + 7 * 86400e3 };
+  const target = pending.n && NEXT_OK.has(pending.n) ? pending.n : '/';
+  if (twofa.requiredFor(twofa.emailSubjects(user.emails))) {
+    // not signed in yet: the code comes first (/login/2fa)
+    core.log('user', 'login.2fa-asked', `${provider}:${profile.email || profile.id}`);
+    return redirect(res, '/login/2fa', [
+      `lx_2fa=${signToken({ user, n: target, exp: Date.now() + 5 * 60e3 })}; HttpOnly; SameSite=Lax; Path=/; Max-Age=300${secure(req)}`,
+      'lx_user=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0', 'lx_oauth=; HttpOnly; SameSite=Lax; Path=/auth; Max-Age=0']);
+  }
   core.log('user', isAdminUser(user) ? 'login.admin' : 'login', `${provider}:${profile.email || profile.id}`);
   if (user.emails.length) db.prepare(`UPDATE members SET last_login = ? WHERE email IN (${user.emails.map(() => '?').join(',')})`).run(now(), ...user.emails);
-  redirect(res, pending.n && NEXT_OK.has(pending.n) ? pending.n : '/', [
-    `lx_user=${signToken(user)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${7 * 86400}${secure(req)}`,
-    'lx_oauth=; HttpOnly; SameSite=Lax; Path=/auth; Max-Age=0']);
+  redirect(res, target, [userCookie(req, user), 'lx_oauth=; HttpOnly; SameSite=Lax; Path=/auth; Max-Age=0']);
 }
+
+// Two-factor -----------------------------------------------------------------------------------------------------
+// The second step of a Google/Discord/GitHub sign-in.
+route('POST', '/api/auth/2fa', async ctx => {
+  const p = pendingUser(ctx.req);
+  if (!p?.user) throw new HttpError(401, 'The sign-in expired. Please sign in again.', '2FA_EXPIRED');
+  const b = await body(ctx.req), subjects = twofa.emailSubjects(p.user.emails);
+  if (!TWOFA_RATE(ctx.ip, subjects[0] || p.user.id)) throw new HttpError(429, 'Too many codes tried. Wait a few minutes.');
+  const who = `${p.user.p}:${p.user.email || p.user.id}`;
+  if (!twofa.check(subjects, b.code)) { core.log('user', 'login.2fa-fail', who); throw new HttpError(401, 'That code is not right (or was already used).', '2FA_WRONG'); }
+  const user = { ...p.user, mfa: 1 };
+  core.log('user', isAdminUser(user) ? 'login.admin' : 'login', who, 'with two-factor code');
+  if (user.emails.length) db.prepare(`UPDATE members SET last_login = ? WHERE email IN (${user.emails.map(() => '?').join(',')})`).run(now(), ...user.emails);
+  return [200, { ok: true, next: NEXT_OK.has(p.n) ? p.n : '/' }, { 'Set-Cookie': [userCookie(ctx.req, user), 'lx_2fa=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0'] }];
+});
+
+// Turning it on and off for your own account (anyone who can open the dashboard: the owner, customers and their team).
+const twofaSubject = ctx => {
+  if (ctx.admin.via === 'password') return PASSWORD_SUBJECT;
+  if (!ctx.admin.email) throw new HttpError(400, 'Your sign-in shared no verified email, so two-factor cannot be set up for it.');
+  return subjectForEmail(ctx.admin.email);
+};
+/** After switching it on, the session in use is re-issued as "code given" (every other session is signed out). */
+const refreshedSession = ctx => {
+  if (ctx.admin.via === 'password') return adminCookie(ctx.req, true);
+  const u = readToken(cookies(ctx.req).lx_user);
+  return u ? userCookie(ctx.req, { ...u, mfa: 1 }) : null;
+};
+const ownCode = async (ctx, subject) => {
+  const b = await body(ctx.req);
+  if (!TWOFA_RATE(ctx.ip, subject)) throw new HttpError(429, 'Too many codes tried. Wait a few minutes.');
+  return b;
+};
+route('GET', '/api/admin/2fa', async ctx => {
+  const subject = twofaSubject(ctx);
+  return [200, { ...twofa.status(subject), account: ctx.admin.via === 'password' ? 'the admin password' : ctx.admin.email }];
+}, { admin: true, allowSuspended: true });
+route('POST', '/api/admin/2fa/setup', async ctx => {
+  const subject = twofaSubject(ctx);
+  const secret = twofa.begin(subject);
+  if (!secret) throw new HttpError(409, 'Two-factor sign-in is already on. Switch it off first to move it to another phone.');
+  const issuer = core.getSetting('site_name') || 'LicenseX';
+  return [200, { secret, uri: otpauthUri({ issuer, account: ctx.admin.via === 'password' ? 'admin' : ctx.admin.email, secret }) }];
+}, { admin: true, allowSuspended: true });
+route('POST', '/api/admin/2fa/enable', async ctx => {
+  const subject = twofaSubject(ctx), b = await ownCode(ctx, subject);
+  const codes = twofa.finish(subject, b.code);
+  if (!codes) throw new HttpError(400, 'That code is not right. Check that the time on your phone is correct and try the newest code.', '2FA_WRONG');
+  core.log(ctx.admin.email || 'admin', '2fa.enable', subject, '', ctx.admin.role === 'platform' ? HOUSE : ctx.wsId);
+  const cookie = refreshedSession(ctx);
+  return [200, { ok: true, recovery_codes: codes }, cookie ? { 'Set-Cookie': cookie } : {}];
+}, { admin: true, allowSuspended: true });
+route('POST', '/api/admin/2fa/disable', async ctx => {
+  const subject = twofaSubject(ctx), b = await ownCode(ctx, subject);
+  if (!twofa.status(subject).enabled) return [200, { ok: true }];
+  if (!twofa.check([subject], b.code)) throw new HttpError(400, 'That code is not right (or was already used).', '2FA_WRONG');
+  twofa.remove(subject);
+  core.log(ctx.admin.email || 'admin', '2fa.disable', subject, '', ctx.admin.role === 'platform' ? HOUSE : ctx.wsId);
+  return [200, { ok: true }];
+}, { admin: true, allowSuspended: true });
+route('POST', '/api/admin/2fa/recovery', async ctx => {
+  const subject = twofaSubject(ctx), b = await ownCode(ctx, subject);
+  if (!twofa.status(subject).enabled) throw new HttpError(409, 'Two-factor sign-in is off.');
+  if (!twofa.check([subject], b.code)) throw new HttpError(400, 'That code is not right (or was already used).', '2FA_WRONG');
+  core.log(ctx.admin.email || 'admin', '2fa.recovery', subject, 'new recovery codes', ctx.admin.role === 'platform' ? HOUSE : ctx.wsId);
+  return [200, { recovery_codes: twofa.newRecovery(subject) }];
+}, { admin: true, allowSuspended: true });
+// The site owner can switch it off for someone who lost their phone and their recovery codes.
+route('POST', '/api/admin/2fa/reset', async ctx => {
+  const b = await body(ctx.req), who = normEmail(b.email);
+  if (!EMAIL_RE.test(who)) throw new HttpError(400, 'Enter the email address of the account.');
+  const done = twofa.remove(subjectForEmail(who));
+  if (done) core.log(ctx.admin.email || 'admin', '2fa.reset', who, '', HOUSE);
+  return [200, { ok: true, was_on: done }];
+}, { platform: true });
 
 // Admin: stats ----------------------------------------------------------------
 route('GET', '/api/admin/stats', async ctx => {
@@ -487,6 +623,46 @@ route('DELETE', '/api/admin/licenses/:id', async ctx => {
   return [200, { ok: true }];
 }, { perm: 'licenses.delete' });
 
+// Leak tracer: upload a leaked jar, find out whose copy it was. -----------------------------------------------------
+const MARK_RE = /^[0-9a-f]{16}$/;
+/** What a jar says about where it came from: the license key and the download marks stamped into it. */
+function jarClues(jar) {
+  try { listEntries(jar); } catch { throw new HttpError(400, 'That file is not a .jar (or it is damaged).'); }
+  let cfg = null;
+  try { const raw = readEntry(jar, 'licensex.json', 64 * 1024); if (raw) cfg = JSON.parse(raw.toString('utf8')); } catch { cfg = null; }
+  const key = cfg && typeof cfg.key === 'string' ? normalizeKey(cfg.key) : '';
+  let comment = ''; try { comment = readZipComment(jar).trim(); } catch {}
+  const marks = [...new Set([cfg?.mark, comment].filter(m => typeof m === 'string' && MARK_RE.test(m)))];
+  return { has_config: !!cfg, key: KEY_RE.test(key) ? key : '', marks, product: cfg && typeof cfg.product === 'string' ? cfg.product.slice(0, 80) : '' };
+}
+route('POST', '/api/admin/leaks/trace', async ctx => {
+  if (!rateLimit('trace:' + ctx.ip, 30, 60e3)) throw new HttpError(429, 'Too many files at once. Wait a minute.');
+  const tmp = join(DATA, `trace-${randomBytes(6).toString('hex')}.jar`);
+  let jar;
+  try { await saveUpload(ctx.req, tmp); jar = readFileSync(tmp); } finally { rmSync(tmp, { force: true }); }
+  const clues = jarClues(jar);
+  const [sw, sa] = scopeSql(ctx, 'd.product_id');
+  const dls = clues.marks.length ? db.prepare(`SELECT d.*, p.name product_name FROM downloads d LEFT JOIN products p ON p.id = d.product_id
+    WHERE d.workspace_id = ? AND d.mark IN (${clues.marks.map(() => '?').join(',')}) AND ${sw}`).all(ctx.wsId, ...clues.marks, ...sa) : [];
+  const download = dls[0] || null;
+  const visible = l => (l && l.workspace_id === ctx.wsId && inScope(ctx, l.product_id) ? l : null);
+  const byKey = clues.key ? visible(db.prepare('SELECT * FROM licenses WHERE key = ?').get(clues.key)) : null;
+  const byMark = download ? visible(db.prepare('SELECT * FROM licenses WHERE id = ?').get(download.license_id) || db.prepare('SELECT * FROM licenses WHERE key = ?').get(download.license_key)) : null;
+  // The mark says which download the file is; the key says which license it runs on. Leakers sometimes put in another key.
+  const verdict = byMark && byKey ? (byMark.id === byKey.id ? 'match' : 'key_swapped') : byMark ? 'mark_only' : byKey ? 'key_only' : download ? 'license_deleted' : 'none';
+  const describe = l => {
+    if (!l) return null;
+    const product_name = l.product_id ? db.prepare('SELECT name FROM products WHERE id=?').get(l.product_id)?.name || l.product : l.product;
+    return { ...licenseRow({ ...l, product_name }),
+      servers: can(ctx, 'servers.view') ? db.prepare('SELECT name, ip, port, version, status, first_seen, last_seen FROM servers WHERE license_id = ? ORDER BY last_seen DESC LIMIT 20').all(l.id) : [],
+      downloads: db.prepare('SELECT at, ip, user_agent FROM downloads WHERE license_id = ? ORDER BY at DESC LIMIT 20').all(l.id) };
+  };
+  wl(ctx, 'leak.trace', (byMark || byKey)?.key || '', verdict);
+  return [200, { verdict, file: { has_config: clues.has_config, key: clues.key, marks: clues.marks, product: clues.product },
+    download: download && { at: download.at, ip: download.ip, user_agent: download.user_agent, bbb_user: download.bbb_user, product: download.product_name || '', license_key: download.license_key },
+    license: describe(byMark || byKey), other_license: verdict === 'key_swapped' ? describe(byKey) : null }];
+}, { perm: 'licenses.view' });
+
 // Delete licenses that downloads issued but that were never used on a server: the quick way to clear out junk.
 route('POST', '/api/admin/licenses/purge-unused', async ctx => {
   const b = await body(ctx.req);
@@ -506,10 +682,12 @@ route('POST', '/api/admin/licenses/purge-unused', async ctx => {
 route('GET', '/api/admin/servers', async ctx => {
   const text = ctx.url.searchParams.get('q')?.trim();
   const [sw, sa] = scopeSql(ctx, 'l.product_id');
+  // a license key is a credential: it is only shown (and searchable) to people who may see licenses
+  const withKeys = can(ctx, 'licenses.view');
   const rows = db.prepare(`SELECT s.*, l.key license_key, l.owner FROM servers s JOIN licenses l ON l.id = s.license_id
-    WHERE l.workspace_id = ? AND ${sw} AND s.status != 'removed' ${text ? 'AND (s.name LIKE ? OR s.ip LIKE ? OR l.key LIKE ? OR l.owner LIKE ?)' : ''} ORDER BY s.last_seen DESC LIMIT 500`)
-    .all(ctx.wsId, ...sa, ...(text ? Array(4).fill(`%${text}%`) : []));
-  return [200, rows];
+    WHERE l.workspace_id = ? AND ${sw} AND s.status != 'removed' ${text ? (withKeys ? 'AND (s.name LIKE ? OR s.ip LIKE ? OR l.key LIKE ? OR l.owner LIKE ?)' : 'AND (s.name LIKE ? OR s.ip LIKE ?)') : ''} ORDER BY s.last_seen DESC LIMIT 500`)
+    .all(ctx.wsId, ...sa, ...(text ? Array(withKeys ? 4 : 2).fill(`%${text}%`) : []));
+  return [200, withKeys ? rows : rows.map(r => ({ ...r, license_key: '', owner: '' }))];
 }, { perm: 'servers.view' });
 /** A server of this workspace that the caller may touch (for a limited member: only on licenses of their products). */
 const ownServer = (ctx, id) => {
@@ -563,13 +741,13 @@ const productRow = (req, p) => {
 route('GET', '/api/admin/products', async ctx => {
   const [sw, sa] = scopeSql(ctx, 'p.id');
   const rows = db.prepare(`SELECT p.*, (SELECT COUNT(*) FROM licenses l WHERE l.product_id = p.id) licenses FROM products p WHERE p.workspace_id=? AND ${sw} ORDER BY p.id DESC`).all(ctx.wsId, ...sa);
-  return [200, rows.map(p => productRow(ctx.req, p))];
+  return [200, rows.map(p => productRow(ctx.req, can(ctx, 'licenses.view') ? p : { ...p, licenses: null }))];
 }, { perm: 'products.view' });
 // Names of the products the caller may link a license to (a limited member only gets theirs).
 route('GET', '/api/admin/products/options', async ctx => {
   const [sw, sa] = scopeSql(ctx, 'id');
   return [200, db.prepare(`SELECT id, name FROM products WHERE workspace_id=? AND ${sw} ORDER BY name`).all(ctx.wsId, ...sa)];
-}, { perm: ['licenses.view', 'licenses.create', 'products.view'] });
+}, { perm: ['licenses.create', 'licenses.edit', 'products.view'] });
 route('POST', '/api/admin/products', async ctx => {
   const b = await body(ctx.req);
   const name = str(b.name, 60).trim();
@@ -620,6 +798,8 @@ route('PATCH', '/api/admin/products/:id', async ctx => {
   if ('group_id' in b) f.group_id = ownGroup(ctx, b.group_id ? int(b.group_id, { min: 1 }) : null);
   if (b.regenerate_token) f.token = randomBytes(12).toString('base64url');
   if ('bbb_resource_id' in b) {
+    // linking a resource re-links licenses across the whole workspace and reveals which ids other products use, so it is not for people limited to some products
+    if (ctx.access.scope) throw new HttpError(403, 'Only people with access to all products can link a BuiltByBit resource.', 'FORBIDDEN');
     // which BuiltByBit resource this product is, so licenses BuiltByBit asks for are linked to it (and to the people limited to it)
     const rid = str(b.bbb_resource_id, 12).trim();
     if (rid && !/^\d{1,12}$/.test(rid)) throw new HttpError(400, 'The BuiltByBit resource id is the number in the resource\'s address.');
@@ -704,13 +884,24 @@ route('POST', '/api/admin/restore', async ctx => {
   const tmp = join(DATA, '.restore-upload');
   await saveUpload(ctx.req, tmp, MAX_UPLOAD * 4); // a backup holds every plugin jar plus the database
   try {
-    const r = restoreBackup(db, PRODUCTS_DIR, readFileSync(tmp), DatabaseSync);
+    let file = readFileSync(tmp);
+    if (isEncrypted(file)) { try { file = decrypt(file, OFFSITE.password); } catch (e) { throw new RestoreError(e.message); } }
+    const r = restoreBackup(db, PRODUCTS_DIR, file, DatabaseSync);
     core.log('admin', 'backup.restore', '', `${r.products} plugin file(s)`);
     return [200, { ok: true, ...r }];
   } catch (e) {
     if (e instanceof RestoreError) throw new HttpError(400, e.message);
     throw e;
   } finally { rmSync(tmp, { force: true }); }
+}, { platform: true });
+
+route('GET', '/api/admin/offsite', async () => [200, { ...offsite.status(), blocked: !!OFFSITE.blocked }], { platform: true });
+route('POST', '/api/admin/offsite/run', async ctx => {
+  OFFSITE.blocked = false;   // the owner looked and wants copies sent again
+  offsite.start();
+  const r = await offsite.run({ force: true, reason: 'by hand' });
+  core.log(ctx.admin.email || 'admin', 'backup.offsite', '', JSON.stringify(r.results || r.message), HOUSE);
+  return [r.ok ? 200 : 502, r.ok ? r : { ok: false, message: r.message || Object.entries(r.results).map(([k, v]) => `${k}: ${v}`).join('; '), ...r }];
 }, { platform: true });
 
 // Admin: groups ---------------------------------------------------------------
@@ -722,7 +913,8 @@ const groupFields = b => {
 };
 route('GET', '/api/admin/groups', async ctx => {
   const [sw, sa] = scopeSql(ctx, 'l.product_id');
-  return [200, db.prepare(`SELECT g.*, (SELECT COUNT(*) FROM licenses l WHERE l.group_id=g.id AND ${sw}) licenses FROM license_groups g WHERE g.workspace_id=? ORDER BY g.id`).all(...sa, ctx.wsId)];
+  const rows = db.prepare(`SELECT g.*, (SELECT COUNT(*) FROM licenses l WHERE l.group_id=g.id AND ${sw}) licenses FROM license_groups g WHERE g.workspace_id=? ORDER BY g.id`).all(...sa, ctx.wsId);
+  return [200, can(ctx, 'licenses.view') ? rows : rows.map(g => ({ ...g, licenses: null }))];
 }, { perm: 'groups.view' });
 route('POST', '/api/admin/groups', async ctx => {
   const [name, max, color] = groupFields(await body(ctx.req));
@@ -763,7 +955,6 @@ route('GET', '/api/admin/settings', async ctx => {
   if (ctx.admin.role === 'platform') Object.assign(out, {
     admin_emails: parseEmails(core.getSetting('admin_emails')), admin_emails_config: CONFIG_ADMIN_EMAILS, password_login: !DISABLE_PASSWORD_LOGIN,
     oauth: Object.fromEntries(Object.keys(PROVIDERS).map(p => [p, { label: PROVIDERS[p].label, configured: !!oauthConf[p], callback_url: `${publicBase(ctx.req)}/auth/${p}/callback` }])),
-    stripe: { configured: !!STRIPE.secretKey, webhook_configured: !!STRIPE.webhookSecret, webhook_url: `${publicBase(ctx.req)}/api/stripe/webhook` },
   });
   return [200, out];
 }, { perm: 'settings.manage' });
@@ -807,35 +998,39 @@ route('PUT', '/api/admin/settings', async ctx => {
 route('GET', '/api/admin/audit', async ctx => [200, db.prepare('SELECT * FROM audit WHERE workspace_id=? ORDER BY id DESC LIMIT ?').all(ctx.wsId, Math.max(1, Math.min(Number(ctx.url.searchParams.get('limit')) || 100, 500)))], { perm: 'audit.view' });
 
 // Workspaces, plans and billing ----------------------------------------------------
-const billing = createBilling({ db, core, cfg: STRIPE, log: (a, t, d) => console.error(`[LicenseX] ${a} ${t} ${d}`) });
 const slugKey = /^[a-z0-9][a-z0-9-]{1,23}$/;
 const planView = p => ({ key: p.key, name: p.name, description: p.description, price_cents: p.price_cents, currency: p.currency, interval: p.interval,
-  max_products: p.max_products, max_licenses: p.max_licenses, features: p.features.split('\n').map(x => x.trim()).filter(Boolean), highlight: !!p.highlight });
-const asStripeHttp = async fn => { try { return await fn(); } catch (e) { if (e instanceof StripeError) throw new HttpError(e.status, e.message); throw e; } };
+  max_products: p.max_products, max_licenses: p.max_licenses, features: p.features.split('\n').map(x => x.trim()).filter(Boolean), highlight: !!p.highlight,
+  buy_url: p.buy_url || '' });
 
 function workspaceSummary(w) {
   const plan = core.planOf(w.id), entitled = core.entitledPlanKey(w);
   return { id: w.id, name: w.name, house: w.id === HOUSE, owner_email: w.owner_email, created_at: w.created_at,
     suspended: !!w.suspended, suspended_reason: w.suspended_reason,
     plan: planView({ features: '', currency: 'usd', description: '', highlight: 0, ...plan }),
-    plan_key: w.plan_key, plan_status: w.plan_status, plan_until: w.plan_until, plan_source: w.plan_source,
+    plan_key: w.plan_key, plan_status: w.plan_status, plan_until: w.plan_until, plan_source: w.plan_source, plan_note: w.plan_note || '',
     lapsed: w.plan_key !== 'free' && entitled === 'free', usage: core.usage(w.id),
-    heartbeat_minutes: Number(core.getSetting('heartbeat_minutes', w.id)) || 1,
-    billing: { stripe: billing.enabled(), can_portal: billing.enabled() && !!w.stripe_customer_id } };
+    heartbeat_minutes: Number(core.getSetting('heartbeat_minutes', w.id)) || 1 };
 }
-route('GET', '/api/workspace', async ctx => [200, workspaceSummary(db.prepare('SELECT * FROM workspaces WHERE id=?').get(ctx.wsId))], { admin: true, allowSuspended: true });
+route('GET', '/api/workspace', async ctx => {
+  const summary = workspaceSummary(db.prepare('SELECT * FROM workspaces WHERE id=?').get(ctx.wsId));
+  if (ctx.admin.role !== 'member') return [200, summary];
+  // a team member needs to know where they are and whether it is frozen, not the owner's plan, billing or workspace-wide totals
+  const { id, name, house, suspended, suspended_reason, lapsed, heartbeat_minutes } = summary;
+  return [200, { id, name, house, suspended, suspended_reason, lapsed, heartbeat_minutes, plan: { key: '', name: '', max_products: -1, max_licenses: -1, price_cents: 0, interval: 'free' }, usage: null }];
+}, { admin: true, allowSuspended: true });
 
-// Public pricing: the plans that are for sale, whether card payments are on, and how else to reach the owner.
+// Public pricing: the plans that are for sale (bought on BuiltByBit, where each plan's link points) and how else to reach the owner.
 route('GET', '/api/public/pricing', async ctx => {
   const plans = db.prepare('SELECT * FROM plans WHERE active=1 ORDER BY sort, price_cents').all().map(planView);
   const u = sessionUser(ctx.req), w = workspaceOfUser(u);
-  return [200, { plans, payments: billing.enabled(), signups: SIGNUPS_OPEN, site: Object.fromEntries(SITE_KEYS.map(k => [k, core.getSetting(k)])),
+  return [200, { plans, signups: SIGNUPS_OPEN, site: Object.fromEntries(SITE_KEYS.map(k => [k, core.getSetting(k)])),
     current: w ? { plan_key: core.entitledPlanKey(w), status: w.plan_status, until: w.plan_until } : null }];
 });
 
 // A signed-in person gets their own private workspace (on the Free plan). Needs a verified email: that is who owns it.
-const createWorkspaceFor = u => {
-  if (!SIGNUPS_OPEN) throw new HttpError(403, 'Signups are closed. Contact the site owner for an invitation.');
+const createWorkspaceFor = (u, { force = false } = {}) => {
+  if (!SIGNUPS_OPEN && !force) throw new HttpError(403, 'Signups are closed. Contact the site owner for an invitation.');
   if (!u.email) throw new HttpError(400, `${u.p} did not share a verified email address, so we cannot create an account. Sign in with a provider that does.`);
   const r = db.prepare('INSERT INTO workspaces (name, owner_email, owner_name, bbb_secret, created_at) VALUES (?,?,?,?,?)')
     .run(str(u.name, 60) || u.email.split('@')[0], u.email, str(u.name, 80), newSecret(), now());
@@ -852,45 +1047,30 @@ route('POST', '/api/workspace/ensure', async ctx => {
   return [201, workspaceSummary(createWorkspaceFor(u))];
 });
 
-route('POST', '/api/billing/checkout', async ctx => {
+// Activating a plan that was bought on BuiltByBit: the buyer pastes the access key from the file they downloaded there.
+// Only the owner of a workspace can switch its plan on. See server/plansales.js.
+route('POST', '/api/billing/redeem', async ctx => {
   const u = sessionUser(ctx.req);
   if (!u) throw new HttpError(401, 'Sign in first.');
-  if (!rateLimit('checkout:' + (u.email || u.id), 10, 60e3)) throw new HttpError(429, 'Slow down a little.');
+  if (!rateLimit('redeem:' + (u.email || u.id), 10, 60e3) || !rateLimit('redeem-ip:' + ctx.ip, 30, 60e3)) throw new HttpError(429, 'Too many attempts. Wait a minute.');
   const b = await body(ctx.req);
-  const plan = db.prepare('SELECT * FROM plans WHERE key=? AND active=1').get(str(b.plan, 30));
-  if (!plan || plan.price_cents <= 0) throw new HttpError(400, 'That plan is not for sale.');
-  if (!billing.enabled()) throw new HttpError(503, 'Online payments are not set up yet. Please contact us to buy this plan.');
   let w = workspaceOfUser(u);
-  if (!w) w = createWorkspaceFor(u);
-  const entitled = core.entitledPlanKey(w);
-  if (entitled === plan.key && plan.interval === 'once') throw new HttpError(409, `You already have the ${plan.name} plan.`);
-  if (w.stripe_subscription_id && w.plan_source === 'stripe' && entitled !== 'free' && w.plan_status !== 'canceled')
-    throw new HttpError(409, 'You already have an active subscription. Open Billing in your dashboard to change or cancel it.');
-  const url = await asStripeHttp(() => billing.checkout({ ws: w, plan, email: u.email, siteName: core.getSetting('site_name'), base: publicBase(ctx.req) }));
-  core.log('user', 'billing.checkout', plan.key, u.email, w.id);
-  return [200, { url }];
-});
-route('POST', '/api/billing/portal', async ctx => {
-  const u = sessionUser(ctx.req), w = workspaceOfUser(u);
-  if (!w) throw new HttpError(401, 'Sign in first.');
-  return [200, { url: await asStripeHttp(() => billing.portal({ ws: w, base: publicBase(ctx.req) })) }];
-});
-
-// Stripe calls this. The signature is checked against the exact bytes received, and nothing is trusted before that.
-route('POST', '/api/stripe/webhook', async ctx => {
-  if (!STRIPE.webhookSecret) throw new HttpError(503, 'Webhook secret not configured');
-  const chunks = []; let size = 0;
-  for await (const c of ctx.req) { size += c.length; if (size > 1024 * 1024) throw new HttpError(413, 'Too large'); chunks.push(c); }
-  const raw = Buffer.concat(chunks);
-  if (!verifySignature(raw, ctx.req.headers['stripe-signature'], STRIPE.webhookSecret)) throw new HttpError(400, 'Bad signature');
-  let event; try { event = JSON.parse(raw.toString('utf8')); } catch { throw new HttpError(400, 'Bad JSON'); }
-  try { return [200, { received: true, note: billing.handleEvent(event) }]; }
-  catch (e) { console.error('[LicenseX] stripe event failed:', e.message); throw new HttpError(500, 'Handler failed (Stripe will retry)'); }
+  try {
+    if (!w) {                          // a first-time buyer: a valid key is their invitation, so their account is created together with the plan (even when signups are closed)
+      lookupKey({ db, key: b.key });
+      if (!rateLimit('ws:' + ctx.ip, Number(process.env.LICENSEX_SIGNUPS_PER_IP_HOUR || 10), 3600e3)) throw new HttpError(429, 'Too many accounts created from this address. Try again later.');
+      w = createWorkspaceFor(u, { force: true });
+    }
+    const { plan, until } = redeemKey({ db, core, workspace: w, key: b.key });
+    return [200, { ok: true, message: `${plan.name} is active${until ? ` until ${new Date(until * 1000).toLocaleDateString('en-GB')}` : ', with no end date'}.`, workspace: workspaceSummary(db.prepare('SELECT * FROM workspaces WHERE id=?').get(w.id)) }];
+  } catch (e) {
+    if (e instanceof RedeemError) throw new HttpError(e.status, e.message, e.code);
+    throw e;
+  }
 });
 
 // Platform: customers ------------------------------------------------------------
-const customerRow = w => ({ ...workspaceSummary(w), licenses: core.usage(w.id).licenses, products: core.usage(w.id).products,
-  stripe_customer_id: w.stripe_customer_id, stripe_subscription_id: w.stripe_subscription_id });
+const customerRow = w => ({ ...workspaceSummary(w), licenses: core.usage(w.id).licenses, products: core.usage(w.id).products });
 route('GET', '/api/admin/customers', async () => [200, db.prepare('SELECT * FROM workspaces ORDER BY id').all().map(customerRow)], { perm: 'platform.customers' });
 // Invite: create a workspace for an email address. Whoever signs in with that VERIFIED email owns it, even when signups are closed.
 route('POST', '/api/admin/customers', async ctx => {
@@ -928,7 +1108,7 @@ route('DELETE', '/api/admin/customers/:id', async ctx => {
   for (const p of db.prepare('SELECT slug FROM products WHERE workspace_id=?').all(w.id)) rmSync(productFile(p.slug), { force: true });
   db.exec('BEGIN');
   try {
-    for (const t of ['members', 'roles', 'licenses', 'products', 'license_groups', 'ws_settings', 'audit']) db.prepare(`DELETE FROM ${t} WHERE workspace_id=?`).run(w.id); // servers, buyer links and member scopes go with their parents
+    for (const t of ['members', 'roles', 'downloads', 'licenses', 'products', 'license_groups', 'ws_settings', 'audit']) db.prepare(`DELETE FROM ${t} WHERE workspace_id=?`).run(w.id); // servers, buyer links and member scopes go with their parents
     db.prepare('DELETE FROM workspaces WHERE id=?').run(w.id);
     db.exec('COMMIT');
   } catch (e) { db.exec('ROLLBACK'); throw e; }
@@ -947,7 +1127,12 @@ const planFields = (b, existing) => {
   const currency = str(b.currency || 'usd', 3).toLowerCase();
   if (!/^[a-z]{3}$/.test(currency)) throw new HttpError(400, 'Currency is a 3-letter code such as usd or eur.');
   const features = String(b.features ?? '').split('\n').map(x => x.trim().slice(0, 90)).filter(Boolean).slice(0, 14).join('\n');
-  return { key, name, description: str(b.description, 140).trim(), price_cents: price, currency, interval,
+  const buy_url = httpUrl(b.buy_url, 'Buy link');
+  const bbb_resource_id = str(b.bbb_resource_id, 12).trim();
+  if (bbb_resource_id && !/^\d{1,12}$/.test(bbb_resource_id)) throw new HttpError(400, 'The BuiltByBit resource id is the number in the resource\'s address.');
+  if (bbb_resource_id && key === 'free') throw new HttpError(400, 'The Free plan is not sold.');
+  if (bbb_resource_id && db.prepare('SELECT 1 FROM plans WHERE bbb_resource_id=? AND key!=?').get(bbb_resource_id, key)) throw new HttpError(409, 'Another plan already uses that BuiltByBit resource id.');
+  return { key, name, description: str(b.description, 140).trim(), price_cents: price, currency, interval, buy_url: key === 'free' ? '' : buy_url, bbb_resource_id,
     max_products: int(b.max_products, { min: -1, max: 100000 }), max_licenses: int(b.max_licenses, { min: -1, max: 10000000 }),
     features, highlight: b.highlight ? 1 : 0, active: b.active === false ? 0 : 1, sort: int(b.sort ?? 0, { min: 0, max: 1000 }) };
 };
@@ -955,8 +1140,8 @@ route('GET', '/api/admin/plans', async () => [200, db.prepare('SELECT p.*, (SELE
 route('POST', '/api/admin/plans', async ctx => {
   const f = planFields(await body(ctx.req), null);
   if (db.prepare('SELECT 1 FROM plans WHERE key=?').get(f.key)) throw new HttpError(409, 'A plan with that key exists');
-  db.prepare('INSERT INTO plans (key,name,description,price_cents,currency,interval,max_products,max_licenses,features,highlight,active,sort) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
-    .run(f.key, f.name, f.description, f.price_cents, f.currency, f.interval, f.max_products, f.max_licenses, f.features, f.highlight, f.active, f.sort);
+  db.prepare('INSERT INTO plans (key,name,description,price_cents,currency,interval,max_products,max_licenses,features,highlight,active,sort,buy_url,bbb_resource_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+    .run(f.key, f.name, f.description, f.price_cents, f.currency, f.interval, f.max_products, f.max_licenses, f.features, f.highlight, f.active, f.sort, f.buy_url, f.bbb_resource_id);
   core.log('admin', 'plan.create', f.key, f.name);
   return [201, { ok: true }];
 }, { platform: true });
@@ -964,8 +1149,8 @@ route('PATCH', '/api/admin/plans/:key', async ctx => {
   const cur = db.prepare('SELECT * FROM plans WHERE key=?').get(ctx.params.key);
   if (!cur) throw new HttpError(404, 'Not found');
   const f = planFields({ ...cur, ...(await body(ctx.req)) }, cur);
-  db.prepare('UPDATE plans SET name=?,description=?,price_cents=?,currency=?,interval=?,max_products=?,max_licenses=?,features=?,highlight=?,active=?,sort=? WHERE key=?')
-    .run(f.name, f.description, f.price_cents, f.currency, f.interval, f.max_products, f.max_licenses, f.features, f.highlight, f.key === 'free' ? 1 : f.active, f.sort, f.key);
+  db.prepare('UPDATE plans SET name=?,description=?,price_cents=?,currency=?,interval=?,max_products=?,max_licenses=?,features=?,highlight=?,active=?,sort=?,buy_url=?,bbb_resource_id=? WHERE key=?')
+    .run(f.name, f.description, f.price_cents, f.currency, f.interval, f.max_products, f.max_licenses, f.features, f.highlight, f.key === 'free' ? 1 : f.active, f.sort, f.buy_url, f.bbb_resource_id, f.key);
   core.log('admin', 'plan.update', f.key, `${f.price_cents}${f.currency}/${f.interval}`);
   return [200, { ok: true }];
 }, { platform: true });
@@ -982,15 +1167,18 @@ route('DELETE', '/api/admin/plans/:key', async ctx => {
 // Wraps the uploaded plugin so it checks its license before starting. A plugin that already contains the LicenseX
 // client only needs its licensex.json. Anything else that can't be wrapped is refused rather than served
 // unprotected: a license system must never silently hand out a jar that doesn't enforce the license.
-function licensedJar(req, p, key) {
+// Every copy also carries a random `mark` (in licensex.json and in the zip comment) that the leak tracer looks up.
+function licensedJar(req, p, key, mark = '') {
   const jar = readFileSync(productFile(p.slug));
-  const cfg = { url: publicBase(req), key, product: p.name };
-  try { return wrapJar(jar, cfg).jar; }
+  const cfg = { url: publicBase(req), key, product: p.name, mark };
+  let out;
+  try { out = wrapJar(jar, cfg).jar; }
   catch (e) {
     if (!(e instanceof WrapError)) throw e;
-    if (e.code === 'ALREADY_INTEGRATED') return injectFiles(jar, [{ name: 'licensex.json', content: JSON.stringify({ ...cfg, issued: now() }) }]);
-    throw new HttpError(503, `This download is unavailable: ${e.message}`, e.code);
+    if (e.code !== 'ALREADY_INTEGRATED') throw new HttpError(503, `This download is unavailable: ${e.message}`, e.code);
+    out = injectFiles(jar, [{ name: 'licensex.json', content: JSON.stringify({ ...cfg, issued: now() }) }]);
   }
+  return mark ? setZipComment(out, mark) : out;
 }
 
 // --- public download (BuiltByBit points here) ------------------------------
@@ -1018,7 +1206,7 @@ function handleDownload(req, res, slug, url) {
   // opening the raw link - there is nothing to match on, so that download gets a fresh license.
   const nonce = str(url.searchParams.get('nonce'), 128).trim();
   const r = core.claim({ ws: p.workspace_id, nonce: nonce.includes('%%') || !nonce ? 'anon-' + randomBytes(12).toString('hex') : nonce,
-    user: str(url.searchParams.get('user'), 64), name: str(url.searchParams.get('name'), 64), product: p.name, product_id: p.id, group_id: p.group_id, ip, device: hash(ip + req.headers['user-agent']),
+    user: str(url.searchParams.get('user'), 64), name: str(url.searchParams.get('name'), 64), product: p.name, product_id: p.id, scope: 'p#' + p.id, group_id: p.group_id, ip, device: hash(ip + req.headers['user-agent']),
     canMint: () => recentCount('mint:p' + p.id, 3600e3) < MINT_PER_PRODUCT_HOUR && recentCount('mint:ip' + ip, 3600e3) < MINT_PER_IP_HOUR });
   if (!r.ok) {
     if (r.code === 'PLAN_LIMIT') { // the public must not learn which plan the developer is on; the developer sees why in the audit log
@@ -1030,8 +1218,12 @@ function handleDownload(req, res, slug, url) {
   }
   if (r.created) { rateLimit('mint:p' + p.id, Infinity, 3600e3); rateLimit('mint:ip' + ip, Infinity, 3600e3); } // only licenses actually issued count against the caps
 
-  const stamped = licensedJar(req, p, r.key);
+  const mark = randomBytes(8).toString('hex');
+  const stamped = licensedJar(req, p, r.key, mark);
   db.prepare('UPDATE products SET downloads = downloads + 1 WHERE id=?').run(p.id);
+  const lic = db.prepare('SELECT id FROM licenses WHERE key = ?').get(r.key);
+  db.prepare('INSERT INTO downloads (workspace_id, product_id, license_id, license_key, mark, ip, user_agent, bbb_user, at) VALUES (?,?,?,?,?,?,?,?,?)')
+    .run(p.workspace_id, p.id, lic?.id ?? null, r.key, mark, ip, str(req.headers['user-agent'], 200), str(url.searchParams.get('user'), 64), now());
   core.log('system', 'product.download', p.slug, `${r.key} ip=${ip}`, p.workspace_id);
 
   const dlName = (p.filename && /\.(jar|zip)$/i.test(p.filename) ? p.filename : slugify(p.name) + '.jar');
@@ -1043,18 +1235,18 @@ function handleDownload(req, res, slug, url) {
 // --- feature modules: each registers its own routes -------------------------------
 // They get the pieces of this file they need through one object, so they can live (and be tested) in their own files.
 const app = { route, db, core, HttpError, body, int, str, rateLimit, recentCount, clientIp, publicBase, sessionUser, cookies, isHttps, secure, sign, signToken, readToken, safeEq,
-  PUBLIC_URL, DATA, SESSION_SECRET, HOUSE, now, hash, normalizeKey, KEY_RE, billing, STRIPE, fileConfig, CONFIG_ADMIN_EMAILS, isAdminUser, workspaceOfUser };
-registerStripeConnect(app);
+  PUBLIC_URL, DATA, SESSION_SECRET, HOUSE, now, hash, normalizeKey, KEY_RE, fileConfig, CONFIG_ADMIN_EMAILS, isAdminUser, workspaceOfUser };
 registerBuyers(app);
 registerTeam(app);
+registerPlanSales(app);
 
 // --- static + dispatch -----------------------------------------------------
-const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
+const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
 function serveStatic(req, res, pathname) {
   if (pathname === '/') pathname = '/index.html';
   if (pathname === '/admin' || pathname === '/dashboard') pathname = '/admin.html';
   if (pathname === '/pricing') pathname = '/pricing.html';
-  if (pathname === '/login' || pathname === '/login/creator' || pathname === '/login/buyer') pathname = '/login.html';
+  if (pathname === '/login' || pathname === '/login/creator' || pathname === '/login/buyer' || pathname === '/login/2fa') pathname = '/login.html';
   if (pathname === '/account') pathname = '/account.html';
   const file = resolve(WEB, '.' + pathname);
   const rel = relative(WEB, file);
@@ -1086,19 +1278,27 @@ export const server = createServer(async (req, res) => {
     for (const [method, re, handler, opts] of routes) {
       const m = req.method === method && re.exec(url.pathname);
       if (!m) continue;
-      const admin = adminIdentity(req, url);
-      let wsId = HOUSE, access = null;
-      if (opts.admin || opts.platform || opts.perm) {
+      const guarded = !!(opts.admin || opts.platform || opts.perm);
+      /** Who is calling and what they may do. Run again once the request body has arrived (see body()): a person who was switched off while their request was still uploading must not get through. */
+      const authorize = () => {
+        const admin = adminIdentity(req, url);
+        if (!guarded) return { admin, wsId: HOUSE, access: null };
         if (!admin) throw new HttpError(401, 'Not signed in');
         if (opts.platform && admin.role !== 'platform') throw new HttpError(403, 'Only the site owner can do that.');
-        wsId = resolveWorkspace(admin, req, url);
-        access = accessFor(db, admin, wsId);
+        const wsId = resolveWorkspace(admin, req, url), access = accessFor(db, admin, wsId);
         const needed = opts.perm ? [].concat(opts.perm) : [];
         if (needed.length && !needed.some(k => access.perms.has(k))) throw new HttpError(403, 'You do not have permission to do that.', 'FORBIDDEN');
         // A suspended customer can still look around (and read their data), but nothing can be changed.
         if (admin.role !== 'platform' && req.method !== 'GET' && core.isSuspended(wsId) && !opts.allowSuspended) throw new HttpError(403, 'This account is suspended. Contact support.');
-      }
-      const [status, payload, headers] = await handler({ req, url, params: m.groups || {}, ip: clientIp(req), admin, wsId, access });
+        return { admin, wsId, access };
+      };
+      const ctx = { req, url, params: m.groups || {}, ip: clientIp(req), ...authorize() };
+      if (guarded) req.lxRecheck = () => {
+        const now = authorize();
+        if (now.wsId !== ctx.wsId) throw new HttpError(401, 'Not signed in');
+        ctx.admin = now.admin; ctx.access = now.access;
+      };
+      const [status, payload, headers] = await handler(ctx);
       return json(res, status, payload, headers);
     }
     throw new HttpError(404, 'Not found');
@@ -1115,8 +1315,21 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     console.error(`[LicenseX] Port ${PORT} is already in use (probably an old LicenseX still running). Close it or start on another port, e.g. PORT=3001 npm start (PowerShell: $env:PORT=3001; npm start).`);
     process.exit(1);
   });
+  if (offsite.enabled) {
+    // Render and most hosts send SIGTERM and wait a few seconds before stopping: send a last copy first
+    let stopping = false;
+    const stop = async sig => {
+      if (stopping) return; stopping = true;
+      console.log(`[LicenseX] ${sig}: sending a last off-site backup before stopping...`);
+      const r = OFFSITE.blocked ? null : await Promise.race([offsite.run({ reason: 'shutdown' }).catch(e => ({ message: e.message })), new Promise(r => setTimeout(r, 25e3))]);
+      console.log('[LicenseX] backup:', r ? JSON.stringify(r.results || r.message) : 'skipped or timed out');
+      process.exit(0);
+    };
+    process.on('SIGTERM', () => stop('SIGTERM')); process.on('SIGINT', () => stop('SIGINT'));
+    if (!OFFSITE.blocked) offsite.start();
+  }
   server.listen(PORT, () => {
-    console.log(`[LicenseX] listening on http://localhost:${PORT}  (admin: /admin)`);
+    console.log(`[LicenseX] listening on http://localhost:${server.address().port}  (admin: /admin)`);
     if (!PUBLIC_URL && (TRUST_PROXY || process.env.NODE_ENV === 'production'))
       console.warn('[LicenseX] LICENSEX_PUBLIC_URL is not set. Download links, the license address baked into plugins and sign-in redirects are guessed from each request, which can be wrong behind a proxy. Set it to your real https address.');
   });

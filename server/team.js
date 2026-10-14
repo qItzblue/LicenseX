@@ -35,6 +35,12 @@ export function registerTeam(app) {
     if (ids.some(i => !own.has(i))) throw new HttpError(400, 'Unknown product.');
     return ids;
   };
+  /** true/false (or "true"/"false"/1/0); anything else is an error rather than silently meaning "all products". */
+  const strictBool = (v, label) => {
+    if (v === true || v === 'true' || v === 1 || v === '1') return true;
+    if (v === false || v === 'false' || v === 0 || v === '0') return false;
+    throw new HttpError(400, `${label} must be true or false.`);
+  };
   const cleanName = (v, label, max = 40) => {
     const n = str(v, max).trim();
     if (!n) throw new HttpError(400, `${label} required`);
@@ -90,7 +96,8 @@ export function registerTeam(app) {
     return [201, { ok: true, id }];
   }, perm);
   route('PATCH', '/api/admin/team/roles/:id', async ctx => {
-    const role = roleOf(ctx, ctx.params.id), b = await body(ctx.req);
+    const b = await body(ctx.req);              // first the body (access is re-checked once it has arrived), then the row: nothing stale gets written back
+    const role = roleOf(ctx, ctx.params.id);
     if (!covers(ctx, role.permissions)) throw new HttpError(403, 'This role has more access than you do, so you cannot change it.', 'FORBIDDEN');
     const name = 'name' in b ? cleanName(b.name, 'Name') : role.name;
     const description = 'description' in b ? str(b.description, 140).trim() : role.description;
@@ -120,7 +127,8 @@ export function registerTeam(app) {
     if (!validEmail(email)) throw new HttpError(400, 'Enter a valid email address.');
     const role = roleOf(ctx, int(b.role_id, { min: 1 }));
     if (!covers(ctx, role.permissions)) throw new HttpError(403, 'That role has more access than you do, so you cannot give it to someone.', 'FORBIDDEN');
-    const all = b.all_products !== false, ids = all ? [] : productIds(ctx, b.product_ids);
+    // the person is unlimited only when that is said outright; product_ids without a flag means limited, never silently everything
+    const all = 'all_products' in b ? strictBool(b.all_products, 'all_products') : !Array.isArray(b.product_ids), ids = all ? [] : productIds(ctx, b.product_ids);
     if (db.prepare('SELECT 1 FROM workspaces WHERE id = ? AND owner_email = ?').get(ctx.wsId, email)) throw new HttpError(409, 'That is the owner of this workspace; they already have full access.');
     if (db.prepare('SELECT COUNT(*) n FROM members WHERE workspace_id = ?').get(ctx.wsId).n >= MAX_MEMBERS) throw new HttpError(409, `At most ${MAX_MEMBERS} team members.`);
     let id;
@@ -139,7 +147,8 @@ export function registerTeam(app) {
     return [201, { ok: true, id }];
   }, perm);
   route('PATCH', '/api/admin/team/members/:id', async ctx => {
-    const m = memberOf(ctx, ctx.params.id), b = await body(ctx.req);
+    const b = await body(ctx.req);
+    const m = memberOf(ctx, ctx.params.id);
     if (m.id === ctx.admin.member?.id) throw new HttpError(403, 'You cannot change your own access.', 'FORBIDDEN');
     if (!covers(ctx, parsePerms(m.role_permissions))) throw new HttpError(403, 'This person has more access than you do, so you cannot change it.', 'FORBIDDEN');
     let roleId = m.role_id;
@@ -148,7 +157,7 @@ export function registerTeam(app) {
       if (!covers(ctx, role.permissions)) throw new HttpError(403, 'That role has more access than you do, so you cannot give it to someone.', 'FORBIDDEN');
       roleId = role.id;
     }
-    const all = 'all_products' in b ? b.all_products !== false : !!m.all_products;
+    const all = 'all_products' in b ? strictBool(b.all_products, 'all_products') : !!m.all_products;
     const ids = !all && ('product_ids' in b || 'all_products' in b) ? productIds(ctx, 'product_ids' in b ? b.product_ids : db.prepare('SELECT product_id FROM member_products WHERE member_id = ?').all(m.id).map(r => r.product_id)) : null;
     db.exec('BEGIN');
     try {

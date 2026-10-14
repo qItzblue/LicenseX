@@ -68,13 +68,14 @@ test('the permission catalogue is consistent', () => {
 });
 
 test('every admin route is guarded: no silent open doors', () => {
-  const OPEN = new Set(['GET /api/admin/me', 'GET /api/admin/stats', 'GET /api/workspace']); // any signed-in team member; what they see is filtered inside
+  const OPEN = new Set(['GET /api/admin/me', 'GET /api/admin/stats', 'GET /api/workspace', // any signed-in team member; what they see is filtered inside
+    'GET /api/admin/2fa', 'POST /api/admin/2fa/setup', 'POST /api/admin/2fa/enable', 'POST /api/admin/2fa/disable', 'POST /api/admin/2fa/recovery']); // your own sign-in only
   const known = new Set(PERMISSIONS.map(p => p.key));
   for (const [method, re, , opts] of routes) {
     const path = re.source;
     if (!/^\^\\\/api\\\/(admin|workspace|billing)\\\//.test(path) && !/^\^\\\/api\\\/workspace\$/.test(path)) continue;
     if (/\\\/api\\\/admin\\\/(login|logout)\$/.test(path)) continue;
-    if (/\\\/api\\\/(workspace\\\/ensure|billing\\\/(checkout|portal))\$/.test(path)) continue; // act for the signed-in OWNER only (checked in their handlers)
+    if (/\\\/api\\\/(workspace\\\/ensure|billing\\\/redeem)\$/.test(path)) continue; // act for the signed-in OWNER only (checked in their handlers)
     const label = `${method} ${path}`;
     const guarded = opts.platform || opts.perm || (opts.admin && OPEN.has(`${method} ${path.replace(/\\\//g, '/').replace(/^\^|\$$/g, '')}`));
     assert.ok(guarded, `${label} has no permission guard`);
@@ -126,7 +127,7 @@ test('starter roles exist, and who may do what follows the role', async () => {
   const srv = (await call('GET', '/api/admin/servers', null, sam)).body[0];
   assert.equal((await call('PATCH', `/api/admin/servers/${srv.id}`, { status: 'disabled' }, sam)).status, 200);
   assert.equal((await call('PATCH', `/api/admin/servers/${srv.id}`, { status: 'active' }, sam)).status, 200);
-  assert.equal((await call('GET', '/api/admin/products', null, sam)).status, 200);
+  assert.equal((await call('GET', '/api/admin/products', null, sam)).status, 403, 'Support has no products.view: a download link is a credential that mints licenses');
   assert.equal((await call('PATCH', `/api/admin/products/${prodA.id}`, { name: 'Hacked' }, sam)).status, 403);
   assert.equal((await call('POST', '/api/admin/products', { name: 'Mine' }, sam)).status, 403);
   assert.equal((await call('GET', '/api/admin/team', null, sam)).status, 403);
@@ -187,7 +188,13 @@ test('a member limited to a product only ever sees and touches that product\'s l
   assert.equal((await call('DELETE', `/api/admin/servers/${bServer.id}`, null, lee)).status, 404);
 
   // products
-  assert.deepEqual((await call('GET', '/api/admin/products', null, lee)).body.map(p => p.name), ['Plugin A']);
+  assert.equal((await call('GET', '/api/admin/products', null, lee)).status, 403, 'Support has no products.view');
+  // the same limit for a role that does see products
+  const dev = (await call('POST', '/api/admin/team/members', { email: 'dev@devs.io', role_id: roleIds.Developer, all_products: false, product_ids: [prodA.id] }, alice));
+  assert.equal(dev.status, 201);
+  people.dev = await login('dev@devs.io');
+  assert.deepEqual((await call('GET', '/api/admin/products', null, people.dev)).body.map(p => p.name), ['Plugin A']);
+  assert.equal((await call('GET', '/api/admin/products', null, people.dev)).body[0].licenses, 2, 'and only counts its own licenses');
 
   // overview numbers count only their product; the activity log is not theirs to read
   const st = (await call('GET', '/api/admin/stats', null, lee)).body;
@@ -356,7 +363,7 @@ test('members never get owner-only powers, and a suspended workspace freezes the
   const sam = people.sam;
   for (const [m, p] of [['GET', '/api/admin/customers'], ['GET', '/api/admin/plans'], ['GET', '/api/admin/builds'], ['GET', '/api/admin/backup'], ['POST', '/api/admin/restore']])
     assert.equal((await call(m, p, null, sam)).status, 403, `${m} ${p}`);
-  assert.equal((await call('POST', '/api/billing/portal', null, sam)).status, 401, 'billing belongs to the owner');
+  assert.equal((await call('POST', '/api/billing/redeem', { key: 'LX-AAAA-BBBB-CCCC-DDDD' }, sam)).status, 404, 'activating a plan is for workspace owners; a member gets nothing from a bad key');
   await call('POST', `/api/admin/customers/${aliceWs}/suspend`, { suspended: true, reason: 'test' }, boss);
   const l = (await call('GET', '/api/admin/licenses', null, sam)).body.find(x => x.owner === 'loose');
   assert.equal((await call('PATCH', `/api/admin/licenses/${l.id}`, { note: 'nope' }, sam)).status, 403);

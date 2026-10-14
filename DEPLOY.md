@@ -22,9 +22,9 @@ sign-in callbacks all use it.
 
 ## Offering it to other developers (optional)
 
-LicenseX can also be a paid service: customers get private workspaces and you take payments with Stripe. Environment
-variables / config keys: `LICENSEX_STRIPE_SECRET_KEY`, `LICENSEX_STRIPE_WEBHOOK_SECRET`, `LICENSEX_SIGNUPS=closed` (invite
-only). Everything is in **[docs/BILLING.md](docs/BILLING.md)**. Run a single instance.
+LicenseX can also be a paid service: customers get private workspaces, and you sell the plans on BuiltByBit (one monthly,
+one one-time). Set `LICENSEX_SIGNUPS=closed` for invite-only (a valid BuiltByBit key still creates the buyer's account).
+Everything is in **[docs/BILLING.md](docs/BILLING.md)**. Run a single instance.
 
 ## Where to host it
 
@@ -62,8 +62,9 @@ Render deploys from GitHub, not from the zip.
 5. In **Settings**, the BuiltByBit URL now shows your Render address.
 
 **Read this before relying on it.** On the **free** plan:
-- The disk is wiped whenever the service restarts, redeploys or spins down, so **every license is lost** each time.
-  Download a backup (**Settings -> Backup & move**) before anything you do on Render and restore it afterwards.
+- The disk is wiped whenever the service restarts, redeploys or spins down. **Set up off-site backups**
+  ([docs/BACKUPS.md](docs/BACKUPS.md), about 10 minutes with a free Backblaze B2 bucket): LicenseX then sends a copy before
+  every stop and restores itself after every wipe. Without them, **every license is lost** each time.
 - The service sleeps after 15 minutes without traffic and takes about a minute to wake. Running servers keep working for
   72 hours without contact, but a buyer who downloads during the sleep may get no key from BuiltByBit.
 

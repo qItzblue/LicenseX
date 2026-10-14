@@ -258,5 +258,5 @@ test('public pages leak no workspace internals', async () => {
   assert.ok(!/workspace|bbb|secret|owner_email/i.test(text), text);
   const pricing = (await call('GET', '/api/public/pricing')).body;
   assert.ok(pricing.plans.length >= 3 && pricing.plans.every(p => !('active' in p) && !('stripe_price_id' in p)));
-  assert.equal(pricing.payments, false);
+  assert.ok(pricing.plans.every(p => 'buy_url' in p), 'every plan carries its BuiltByBit buy link (empty until set)');
 });

@@ -8,15 +8,16 @@
   <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
-  <meta name="theme-color" content="#0a0b10">
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap">
+  <meta name="theme-color" content="#0b0a10">
+  <link rel="stylesheet" href="/ds/styles.css">
   <link rel="stylesheet" href="/app.css">
   <link rel="stylesheet" href="/admin.css">
+  <link rel="stylesheet" href="/lx.css">
 </head>
 <body>
   <div id="login" hidden>
     <div class="card login">
-      <span class="brand"><span class="brand-mark">X</span>LicenseX</span>
+      <a class="lx-logo" href="/"><span class="mark" aria-hidden="true"></span><span class="word">License<b>X</b></span></a>
       <p class="muted" id="loginTitle">Admin sign in</p>
       <p class="muted" id="hintNew" hidden style="font-size:13px;margin-top:-6px">New here? Signing in creates your free account.</p>
       <div class="err" id="notAdmin" hidden></div>
@@ -24,6 +25,7 @@
       <div class="divider" id="or" hidden>or</div>
       <form id="loginForm">
         <div class="field"><input type="password" id="pw" placeholder="Admin password" autocomplete="current-password" required></div>
+        <div class="field" id="codeField" hidden><input id="code" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code from your authenticator app" maxlength="12"><div class="hint">Lost your phone? A recovery code works here too.</div></div>
         <div class="err" id="loginErr" hidden></div>
         <button class="btn primary" style="width:100%;justify-content:center">Sign in with password</button>
       </form>
@@ -32,7 +34,7 @@
   </div>
   <div id="app" class="shell" hidden>
     <aside>
-      <span class="brand"><span class="brand-mark">X</span>LicenseX</span>
+      <a class="lx-logo" href="/"><span class="mark" aria-hidden="true"></span><span class="word">License<b>X</b></span></a>
       <nav id="nav"></nav>
       <div id="wsSwitch" hidden style="margin-top:auto"></div>
       <div id="whoami" class="muted" style="font-size:13px;padding:0 4px"></div>

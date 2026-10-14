@@ -117,20 +117,32 @@ export function createCore(db) {
    * such request would share one license.
    */
   const real = v => { v = String(v ?? '').trim(); return v && !v.includes('%%') ? v : ''; };
-  function claim({ ws = HOUSE, nonce, user = '', name = '', product = '', product_id = null, group_id = null, ip, device, canMint = () => true }) {
+  function claim({ ws = HOUSE, nonce, user = '', name = '', product = '', product_id = null, scope = null, relink = false, group_id = null, ip, device, canMint = () => true }) {
     if (isSuspended(ws)) return { ok: false, code: 'SUSPENDED', message: 'This developer\'s account is suspended.' };
     if (getSetting('claims_enabled', ws) !== '1') return { ok: false, code: 'CLAIMS_DISABLED', message: 'License issuing is currently disabled.' };
     const uid = real(user).slice(0, 64), label = real(name).slice(0, 64) || uid;
-    // Identities are hashed together with the workspace, so long ids/product names can't truncate into a collision and one
-    // developer can never craft a nonce that lands on another developer's buyer.
+    // What a license is FOR is decided by the caller: a download passes `scope` = this product's id (a product's name can be
+    // edited and is not unique, so it must never decide whose license comes back); BuiltByBit passes none and the resource text is used.
+    // Identities are hashed with the workspace and that scope, so long ids can't truncate into a collision and one developer can
+    // never craft a value that lands on another developer's (or another product's) buyer.
     const rawNonce = real(nonce).slice(0, 128);
-    const identity = uid ? 'user:' + hash(ws + '\0' + String(product) + '\0' + uid) : rawNonce ? 'nonce:' + hash(ws + '\0' + rawNonce) : '';
+    const sc = scope ?? String(product);
+    const ident = (kind, s, v) => `${kind}:${hash(ws + '\0' + s + '\0' + v)}`;
+    const identity = uid ? ident('user', sc, uid) : rawNonce ? ident('nonce', sc, rawNonce) : '';
     if (!identity) return { ok: false, code: 'BAD_REQUEST', message: 'Missing buyer or nonce.' };
     let lic = q.licenseByNonce.get(identity);
-    // licenses issued before nonces were namespaced stored the raw value; they still count, but only for their own workspace
-    if (!lic && !uid) { const old = q.licenseByNonce.get(rawNonce); if (old && old.workspace_id === ws) lic = old; }
-    let created = false;
     if (lic && lic.workspace_id !== ws) return { ok: false, code: 'BAD_REQUEST', message: 'Unavailable.' }; // never hand out another workspace's license
+    if (!lic) {
+      // licenses issued under the older identity formats still count - but a download only ever gets back a license that belongs to THIS product
+      const old = [];
+      if (uid) old.push(ident('user', String(product), uid));
+      else if (rawNonce) { old.push(`nonce:${hash(ws + '\0' + rawNonce)}`); if (!/^(user|nonce):[0-9a-f]{32}$/.test(rawNonce)) old.push(rawNonce); }
+      for (const id of old) {
+        const l = q.licenseByNonce.get(id);
+        if (l && l.workspace_id === ws && (scope == null || l.product_id === product_id)) { lic = l; break; }
+      }
+    }
+    let created = false;
     if (!lic) {
       if (!canMint()) return { ok: false, code: 'RATE_LIMIT', message: 'Too many new downloads right now. Please try again in a little while.' };
       try { lic = createLicense({ workspace_id: ws, owner: label, source: 'claim', product: String(product).slice(0, 64), product_id,
@@ -139,8 +151,8 @@ export function createCore(db) {
       log('system', 'license.claim', lic.key, `ip=${ip} user=${uid || '-'} product=${product}`, ws);
       created = true;
     }
-    // a license issued before this product was linked (e.g. its BuiltByBit resource id was entered later) is linked now
-    if (!created && product_id && lic.product_id == null) { db.prepare('UPDATE licenses SET product_id = ? WHERE id = ?').run(product_id, lic.id); lic.product_id = product_id; }
+    // BuiltByBit only (the caller proved it holds the workspace's secret): a license issued before its resource was linked to a product is linked now
+    if (!created && relink && product_id && lic.product_id == null) { db.prepare('UPDATE licenses SET product_id = ? WHERE id = ?').run(product_id, lic.id); lic.product_id = product_id; }
     return { ok: true, key: lic.key, created, product: lic.product };
   }
 

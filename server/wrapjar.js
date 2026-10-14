@@ -34,7 +34,7 @@ const SIGNATURE_RE = /^META-INF\/[^/]+\.(SF|RSA|DSA|EC)$/i;
  * Wraps `jar` (a Buffer). `config` is written to licensex.json: {url, key, product}. Leave key empty for builds
  * whose key is injected later (BuiltByBit placeholder). Throws WrapError when the jar can't be wrapped.
  */
-export function wrapJar(jar, { url, key = '', product = '' }) {
+export function wrapJar(jar, { url, key = '', product = '', mark = '' }) {
   let names;
   try { names = listEntries(jar); } catch { throw new WrapError('NOT_A_JAR', 'That file is not a valid .jar archive.'); }
   const has = n => names.includes(n);
@@ -70,7 +70,7 @@ export function wrapJar(jar, { url, key = '', product = '' }) {
 
   const files = loadTemplates().map(t => ({ name: `${pkg}/${t.file}`, content: mapUtf8(t.bytes, rename) }));
   files.push({ name: 'plugin.yml', content: yml.replace(MAIN_RE, `$1$2dev.licensex.w${suffix}.Wrapper$2$4`) });
-  files.push({ name: 'licensex.json', content: JSON.stringify({ url, key, product, main, wrapped: 1 }) });
+  files.push({ name: 'licensex.json', content: JSON.stringify({ url, key, product, main, wrapped: 1, ...(mark ? { mark } : {}) }) });
   let out;
   try { out = injectFiles(jar, files, { remove: n => SIGNATURE_RE.test(n) }); }
   catch (e) { throw new WrapError('BAD_JAR', `This jar could not be processed (${e.message}).`); }

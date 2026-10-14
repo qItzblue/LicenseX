@@ -100,6 +100,7 @@ export function openDb(path) {
       plan_status            TEXT NOT NULL DEFAULT 'active' CHECK (plan_status IN ('active','past_due','canceled')),
       plan_until             INTEGER,                    -- end of the paid period; NULL = no end (free, lifetime, manual forever)
       plan_source            TEXT NOT NULL DEFAULT 'free' CHECK (plan_source IN ('free','manual','stripe')),
+      -- the two stripe_* columns and the stripe_events table are unused since plans are sold on BuiltByBit; they stay so older databases and backups still open
       stripe_customer_id     TEXT,
       stripe_subscription_id TEXT,
       suspended              INTEGER NOT NULL DEFAULT 0,
@@ -160,6 +161,22 @@ export function openDb(path) {
       product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
       PRIMARY KEY (member_id, product_id)
     );
+    -- Plans sold on BuiltByBit: the access keys handed out for them (see server/plansales.js). Not licenses on purpose.
+    CREATE TABLE IF NOT EXISTS plan_keys (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      key         TEXT NOT NULL UNIQUE,
+      identity    TEXT NOT NULL UNIQUE,            -- hash of plan, resource, BuiltByBit buyer and period: the same buyer and period always get the same key
+      plan_key    TEXT NOT NULL,
+      resource_id TEXT NOT NULL DEFAULT '',
+      bbb_user    TEXT NOT NULL DEFAULT '',
+      period      TEXT NOT NULL DEFAULT '',
+      status      TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','revoked')),
+      issued_ip   TEXT NOT NULL DEFAULT '',
+      issued_at   INTEGER NOT NULL,
+      redeemed_by INTEGER,                         -- workspace id, kept even when that workspace is deleted: a used key can never be used again
+      redeemed_at INTEGER,
+      period_end  INTEGER
+    );
     -- Buyer accounts: a signed-in buyer (user_key = "<provider>:<provider user id>") has these licenses in "My licenses".
     CREATE TABLE IF NOT EXISTS buyer_links (
       user_key   TEXT NOT NULL,
@@ -167,6 +184,30 @@ export function openDb(path) {
       created_at INTEGER NOT NULL,
       PRIMARY KEY (user_key, license_id)
     );
+    -- Two-factor sign-in (server/twofa.js). subject = 'password' (the admin password) or 'email:<address>'.
+    CREATE TABLE IF NOT EXISTS twofa (
+      subject    TEXT PRIMARY KEY,
+      secret     TEXT NOT NULL,                     -- base32 TOTP secret
+      enabled    INTEGER NOT NULL DEFAULT 0,        -- 0 while being set up
+      last_step  INTEGER NOT NULL DEFAULT 0,        -- newest 30-second step used: a code works once
+      recovery   TEXT NOT NULL DEFAULT '[]',        -- sha256 of the unused recovery codes
+      created_at INTEGER NOT NULL,
+      enabled_at INTEGER
+    );
+    -- Every jar handed out, with the invisible mark stamped into it: the leak tracer finds the download a leaked jar came from.
+    CREATE TABLE IF NOT EXISTS downloads (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      workspace_id INTEGER NOT NULL,
+      product_id   INTEGER REFERENCES products(id) ON DELETE SET NULL,
+      license_id   INTEGER REFERENCES licenses(id) ON DELETE SET NULL,
+      license_key  TEXT NOT NULL DEFAULT '',        -- kept when the license is deleted later
+      mark         TEXT NOT NULL UNIQUE,
+      ip           TEXT NOT NULL DEFAULT '',
+      user_agent   TEXT NOT NULL DEFAULT '',
+      bbb_user     TEXT NOT NULL DEFAULT '',
+      at           INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_downloads_license ON downloads(license_id);
     CREATE INDEX IF NOT EXISTS idx_servers_license ON servers(license_id);
     CREATE INDEX IF NOT EXISTS idx_audit_at ON audit(at DESC);
   `);
@@ -221,6 +262,10 @@ export function migrate(db) {
   }
   if (!hasCol(db, 'licenses', 'buyer_email')) db.exec("ALTER TABLE licenses ADD COLUMN buyer_email TEXT NOT NULL DEFAULT ''");
   if (!hasCol(db, 'products', 'bbb_resource_id')) db.exec("ALTER TABLE products ADD COLUMN bbb_resource_id TEXT NOT NULL DEFAULT ''");
+  // plans are bought on BuiltByBit: where to buy, and which BuiltByBit resource hands out the key for this plan
+  if (!hasCol(db, 'plans', 'buy_url')) db.exec("ALTER TABLE plans ADD COLUMN buy_url TEXT NOT NULL DEFAULT ''");
+  if (!hasCol(db, 'plans', 'bbb_resource_id')) db.exec("ALTER TABLE plans ADD COLUMN bbb_resource_id TEXT NOT NULL DEFAULT ''");
+  if (!hasCol(db, 'workspaces', 'plan_note')) db.exec("ALTER TABLE workspaces ADD COLUMN plan_note TEXT NOT NULL DEFAULT ''");
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_licenses_product ON licenses(product_id);
     CREATE INDEX IF NOT EXISTS idx_licenses_buyer ON licenses(buyer_email);
@@ -261,7 +306,7 @@ export function migrate(db) {
  */
 export function reserveWorkspaceIds(db) {
   let top = 0;
-  for (const t of ['workspaces', 'licenses', 'products', 'license_groups', 'audit', 'ws_settings', 'roles', 'members']) {
+  for (const t of ['workspaces', 'licenses', 'products', 'license_groups', 'audit', 'ws_settings', 'roles', 'members', 'downloads']) {
     const col = t === 'workspaces' ? 'id' : 'workspace_id';
     top = Math.max(top, db.prepare(`SELECT COALESCE(MAX(${col}), 0) AS m FROM ${t}`).get().m);
   }
