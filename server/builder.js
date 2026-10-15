@@ -165,6 +165,27 @@ export function inspectSource(dir) {
 // Tools and building
 // ---------------------------------------------------------------------------------------------
 const PASS_ENV = ['PATH', 'JAVA_HOME', 'JAVA_TOOL_OPTIONS', 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy', 'LANG'];
+/**
+ * LicenseX wraps a plugin by extending its main class, so that class must not be final. We have the source here, so
+ * make it extendable before compiling: drop `final` (Java) or add `open` (Kotlin, where classes are final by default).
+ * Returns the file it changed, or ''.
+ */
+export function unfinalMain(root, main) {
+  if (!main) return '';
+  const want = main.replace(/\./g, '/'), simple = main.split('.').pop();
+  const hit = walk(root).find(f => f.rel === `${want}.java` || f.rel.endsWith(`/${want}.java`) || f.rel.endsWith(`/${want}.kt`));
+  if (!hit) return '';
+  const file = join(root, hit.rel), src = readFileSync(file, 'utf8');
+  const decl = new RegExp(`^([ \\t]*(?:@\\w+(?:\\([^)]*\\))?\\s+)*)((?:(?:public|private|internal|protected|abstract|final|sealed|strictfp|open|data)\\s+)*)class\\s+${simple}\\b`, 'm');
+  const m = decl.exec(src);
+  if (!m) return '';
+  let mods = m[2];
+  if (hit.rel.endsWith('.kt')) { if (/\bopen\b|\babstract\b/.test(mods)) return ''; mods = mods.replace(/\bfinal\s+/, '') + 'open '; }
+  else { if (!/\bfinal\b/.test(mods)) return ''; mods = mods.replace(/\bfinal\s+/, ''); }
+  writeFileSync(file, src.slice(0, m.index) + m[1] + mods + src.slice(m.index + m[1].length + m[2].length));
+  return hit.rel;
+}
+
 function cleanEnv(extra = {}) {
   const env = {};
   for (const k of PASS_ENV) if (process.env[k] !== undefined) env[k] = process.env[k];
@@ -294,6 +315,8 @@ export function createBuildService({ baseDir, timeoutMs = 10 * 60 * 1000, onDone
         cmd = 'gradle'; args = ['build', '-x', 'test', '--no-daemon', '--console=plain'];
         env = cleanEnv({ HOME: home, GRADLE_USER_HOME: join(cacheDir, 'gradle'), GRADLE_OPTS: '-Xmx512m' });
       }
+      const unfinal = unfinalMain(root, j.report.plugin?.main);
+      if (unfinal) append(j, `Made ${j.report.plugin.main} non-final so LicenseX can add the license check (${unfinal}).\n`);
       append(j, `$ ${cmd} ${args.join(' ')}\n`);
 
       runProcess(cmd, args, { cwd: root, env, timeoutMs, onData: d => append(j, d.toString()) }).then(r => {

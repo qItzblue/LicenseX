@@ -303,7 +303,11 @@ async function products() {
   grid.replaceChildren(...(list.length ? list.map(productCard) : [h('div', { class: 'muted', style: { padding: '8px' } }, can('products.create') ? 'No products yet. Drop a plugin jar above to create your first licensed download.' : 'There are no products you can see yet.')]));
   render(head('Products'),
     h('p', { class: 'muted', style: { marginTop: '-12px' } }, 'Upload your finished plugin jar as it is. LicenseX wraps it so it checks its buyer\'s license before starting, and hands each buyer their own copy with the license built in. For BuiltByBit, use the BuiltByBit build button.'),
-    can('products.create') ? drop : null, grid);
+    !can('products.create') ? null : window.__me.can_build
+      ? h('div', { class: 'card', style: { marginBottom: '16px' } }, h('b', null, 'New products come from the Build page'),
+          h('div', { class: 'muted', style: { margin: '4px 0 10px' } }, 'Upload your plugin\'s source there: it is built, the license check is added, and it shows up here by itself.'),
+          h('button', { class: 'btn primary', onclick: () => (location.hash = 'build') }, 'Go to Build'))
+      : drop, grid);
 }
 
 function productCard(p) {

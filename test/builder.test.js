@@ -106,3 +106,20 @@ test('inspect: ordinary plugin using the network or reflection is not "high"', (
   assert.equal(r.needsTrust, false);
   assert.ok(r.findings.every(f => f.sev !== 'high'));
 });
+
+test('the main class is made extendable before building, so it can always be wrapped', async () => {
+  const { unfinalMain } = await import('../server/builder.js');
+  const { mkdtempSync, mkdirSync, writeFileSync, readFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const d = mkdtempSync(join(tmpdir(), 'lx-unfinal-'));
+  mkdirSync(join(d, 'src/main/java/dev/a'), { recursive: true });
+  const f = join(d, 'src/main/java/dev/a/P.java');
+  writeFileSync(f, 'package dev.a;\n@SuppressWarnings("x")\npublic final class P extends JavaPlugin {\n  final int x = 1;\n}\n');
+  assert.equal(unfinalMain(d, 'dev.a.P'), 'src/main/java/dev/a/P.java');
+  assert.match(readFileSync(f, 'utf8'), /^public class P extends JavaPlugin \{\n  final int x = 1;/m, 'only the class loses final');
+  assert.equal(unfinalMain(d, 'dev.a.P'), '', 'nothing to do the second time');
+  mkdirSync(join(d, 'src/main/kotlin/dev/a'), { recursive: true });
+  writeFileSync(join(d, 'src/main/kotlin/dev/a/K.kt'), 'package dev.a\nclass K : JavaPlugin()\n');
+  unfinalMain(d, 'dev.a.K');
+  assert.match(readFileSync(join(d, 'src/main/kotlin/dev/a/K.kt'), 'utf8'), /^open class K/m);
+});
