@@ -12,6 +12,7 @@ const showErr = m => { errEl.textContent = m; errEl.hidden = !m; };
 
 let pricing, me;
 
+const isPatreon = url => /^https:\/\/(www\.)?patreon\.com\//i.test(url || '');
 function cta(p) {
   const signedIn = !!me.user, current = pricing.current;
   const isCurrent = current && current.plan_key === p.key;
@@ -22,7 +23,8 @@ function cta(p) {
       ? h('button', { class: 'lx-btn lg block btn', onclick: async () => { try { await api('POST', '/api/workspace/ensure'); location.href = '/dashboard'; } catch (e) { showErr(e.message); } } }, me.user.workspace ? 'Open dashboard' : 'Get started free')
       : h('a', { class: 'lx-btn lg block btn', href: '/login/creator' }, 'Get started free');
   // Paid plans are bought on BuiltByBit; the buyer then activates the key from the downloaded file in their dashboard.
-  if (p.buy_url) return h('a', { class: 'lx-btn lg block btn' + (p.highlight ? ' primary' : ''), href: p.buy_url, ...ext }, p.interval === 'once' ? `Buy ${p.name} on BuiltByBit` : `Get ${p.name} on BuiltByBit`);
+  if (p.buy_url) return h('a', { class: 'lx-btn lg block btn' + (p.highlight ? ' primary' : ''), href: p.buy_url, ...ext },
+    isPatreon(p.buy_url) ? `Join ${p.name} on Patreon` : p.interval === 'once' ? `Buy ${p.name} on BuiltByBit` : `Get ${p.name} on BuiltByBit`);
   const s = pricing.site, discord = s.discord_url, mail = s.support_email;
   if (discord) return h('a', { class: 'lx-btn lg block btn primary', href: discord, ...ext }, `Buy ${p.name} on Discord`);
   if (mail) return h('a', { class: 'lx-btn lg block btn primary', href: `mailto:${mail}?subject=${encodeURIComponent(`${s.site_name || 'LicenseX'} ${p.name} plan`)}` }, `Contact us to buy`);
@@ -57,7 +59,12 @@ function comparison(plans) {
   catch { plansEl.replaceChildren(h('div', { class: 'lx-err', style: { gridColumn: '1/-1' } }, 'Could not load the plans. Please refresh.')); return; }
   plansEl.replaceChildren(...pricing.plans.map(planCard));
   if (pricing.plans.length > 1) comparison(pricing.plans);
-  if (pricing.plans.some(p => p.buy_url)) document.getElementById('payNote').replaceChildren(icon('key-round', 18), 'Plans are bought on BuiltByBit. Download the file you get there, then activate the key in your dashboard under Billing.');
+  const sold = pricing.plans.filter(p => p.buy_url);
+  if (sold.length) document.getElementById('payNote').replaceChildren(icon('key-round', 18), sold.every(p => isPatreon(p.buy_url))
+    ? 'Plans are paid monthly on Patreon. Then sign in here and press Connect Patreon under Billing: your plan switches on and renews by itself.'
+    : sold.some(p => isPatreon(p.buy_url))
+      ? 'Patreon plans: join on Patreon, then press Connect Patreon under Billing. BuiltByBit plans: activate the key from the downloaded file under Billing.'
+      : 'Plans are bought on BuiltByBit. Download the file you get there, then activate the key in your dashboard under Billing.');
   const cta2 = document.getElementById('ctaBtn');
   if (!pricing.signups && !(me.user && (me.user.workspace || me.user.isAdmin))) { cta2.removeAttribute('href'); cta2.textContent = 'Invite only'; cta2.classList.remove('primary'); cta2.setAttribute('aria-disabled', 'true'); }
   if (me.user) { cta2.href = '/dashboard'; cta2.textContent = me.user.workspace || me.user.isAdmin ? 'Open dashboard' : 'Get started free'; if (!me.user.workspace && !me.user.isAdmin) cta2.onclick = async e => { e.preventDefault(); try { await api('POST', '/api/workspace/ensure'); location.href = '/dashboard'; } catch (err) { showErr(err.message); } }; }

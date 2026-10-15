@@ -521,7 +521,7 @@ async function billingPage() {
   const w = WS, site = pricing.site;
   const contact = p => site.discord_url ? h('a', { class: 'btn sm primary', href: site.discord_url, target: '_blank', rel: 'noopener noreferrer' }, 'Buy on Discord')
     : site.support_email ? h('a', { class: 'btn sm primary', href: `mailto:${site.support_email}?subject=${encodeURIComponent(p.name + ' plan')}` }, 'Contact us to buy') : h('span', { class: 'muted' }, 'Coming soon');
-  const buy = p => p.buy_url ? h('a', { class: 'btn sm primary', href: p.buy_url, target: '_blank', rel: 'noopener noreferrer' }, p.interval === 'once' ? 'Buy on BuiltByBit' : 'Subscribe on BuiltByBit') : contact(p);
+  const buy = p => p.buy_url ? h('a', { class: 'btn sm primary', href: p.buy_url, target: '_blank', rel: 'noopener noreferrer' }, /^https:\/\/(www\.)?patreon\.com\//i.test(p.buy_url) ? 'Join on Patreon' : p.interval === 'once' ? 'Buy on BuiltByBit' : 'Subscribe on BuiltByBit') : contact(p);
 
   const input = h('input', { id: 'redeem-key', placeholder: 'LX-XXXX-XXXX-XXXX-XXXX', autocomplete: 'off', spellcheck: 'false', class: 'mono' });
   const activate = async e => {
@@ -620,7 +620,7 @@ async function plansPage() {
         h('div', { class: 'field' }, h('label', null, 'Licenses allowed'), h('input', { id: 'p-lic', type: 'number', min: -1, value: p?.max_licenses ?? 1000 }))),
       h('div', { class: 'field' }, h('label', null, 'Feature bullets (one per line)'), h('textarea', { id: 'p-feat', rows: 5 }, p?.features || '')),
       p?.key === 'free' ? null : h('div', { class: 'grid2' },
-        h('div', { class: 'field' }, h('label', null, 'BuiltByBit buy link'), h('input', { id: 'p-buy', value: p?.buy_url || '', placeholder: 'https://builtbybit.com/resources/...' }), h('div', { class: 'hint' }, 'The Buy button on the pricing page goes here.')),
+        h('div', { class: 'field' }, h('label', null, 'Buy link'), h('input', { id: 'p-buy', value: p?.buy_url || '', placeholder: 'https://builtbybit.com/resources/... or https://www.patreon.com/...' }), h('div', { class: 'hint' }, 'The Buy button on the pricing page goes here: a BuiltByBit resource or your Patreon membership page.')),
         h('div', { class: 'field' }, h('label', null, 'BuiltByBit resource id'), h('input', { id: 'p-rid', value: p?.bbb_resource_id || '', inputmode: 'numeric', placeholder: 'e.g. 123456' }), h('div', { class: 'hint' }, 'The number in that resource\'s address. Keys from it switch this plan on.'))),
       h('div', { class: 'row wrap' },
         h('label', { class: 'trustbox' }, h('input', { type: 'checkbox', id: 'p-hot', checked: !!p?.highlight }), 'Mark as "Most popular"'),
