@@ -165,6 +165,27 @@ export function inspectSource(dir) {
 // Tools and building
 // ---------------------------------------------------------------------------------------------
 const PASS_ENV = ['PATH', 'JAVA_HOME', 'JAVA_TOOL_OPTIONS', 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy', 'LANG'];
+/**
+ * LicenseX wraps a plugin by extending its main class, so that class must not be final. We have the source here, so
+ * make it extendable before compiling: drop `final` (Java) or add `open` (Kotlin, where classes are final by default).
+ * Returns the file it changed, or ''.
+ */
+export function unfinalMain(root, main) {
+  if (!main) return '';
+  const want = main.replace(/\./g, '/'), simple = main.split('.').pop();
+  const hit = walk(root).find(f => f.rel === `${want}.java` || f.rel.endsWith(`/${want}.java`) || f.rel.endsWith(`/${want}.kt`));
+  if (!hit) return '';
+  const file = join(root, hit.rel), src = readFileSync(file, 'utf8');
+  const decl = new RegExp(`^([ \\t]*(?:@\\w+(?:\\([^)]*\\))?\\s+)*)((?:(?:public|private|internal|protected|abstract|final|sealed|strictfp|open|data)\\s+)*)class\\s+${simple}\\b`, 'm');
+  const m = decl.exec(src);
+  if (!m) return '';
+  let mods = m[2];
+  if (hit.rel.endsWith('.kt')) { if (/\bopen\b|\babstract\b/.test(mods)) return ''; mods = mods.replace(/\bfinal\s+/, '') + 'open '; }
+  else { if (!/\bfinal\b/.test(mods)) return ''; mods = mods.replace(/\bfinal\s+/, ''); }
+  writeFileSync(file, src.slice(0, m.index) + m[1] + mods + src.slice(m.index + m[1].length + m[2].length));
+  return hit.rel;
+}
+
 function cleanEnv(extra = {}) {
   const env = {};
   for (const k of PASS_ENV) if (process.env[k] !== undefined) env[k] = process.env[k];
@@ -227,7 +248,7 @@ function runProcess(cmd, args, { cwd, env, onData, timeoutMs }) {
   });
 }
 
-export function createBuildService({ baseDir, timeoutMs = 10 * 60 * 1000 }) {
+export function createBuildService({ baseDir, timeoutMs = 10 * 60 * 1000, onDone = null }) {
   const jobsDir = join(baseDir, 'jobs');
   const cacheDir = join(baseDir, 'cache');
   const jobs = new Map();
@@ -238,7 +259,7 @@ export function createBuildService({ baseDir, timeoutMs = 10 * 60 * 1000 }) {
   mkdirSync(jobsDir, { recursive: true });
 
   const view = j => ({ id: j.id, status: j.status, filename: j.filename, createdAt: j.createdAt, report: j.report, trusted: j.trusted,
-    log: j.log, error: j.error, jar: j.jar ? { name: j.jar.name, size: j.jar.size, plugin: j.jar.plugin } : null });
+    owner: j.owner, auto: j.auto, log: j.log, error: j.error, jar: j.jar ? { name: j.jar.name, size: j.jar.size, plugin: j.jar.plugin } : null });
   const append = (j, text) => {
     j.log += text.split(j.src + '/').join('').split(j.src).join('<project>'); // do not show server paths
 
@@ -247,24 +268,24 @@ export function createBuildService({ baseDir, timeoutMs = 10 * 60 * 1000 }) {
 
   return {
     tools: detectTools,
-    list: () => [...jobs.values()].sort((a, b) => b.createdAt - a.createdAt).map(view),
-    get: id => { const j = jobs.get(id); return j ? view(j) : null; },
+    list: owner => [...jobs.values()].filter(j => owner == null || j.owner === owner).sort((a, b) => b.createdAt - a.createdAt).map(view),
+    get: (id, owner) => { const j = jobs.get(id); return j && (owner == null || j.owner === owner) ? view(j) : null; },
 
     /** Unpacks and inspects. Nothing is compiled or executed. */
-    create(zipBuf, filename) {
+    create(zipBuf, filename, owner = null) {
       const id = randomBytes(6).toString('hex');
       const dir = join(jobsDir, id);
       const src = join(dir, 'src');
       try { extractZip(zipBuf, src); }
       catch (e) { rmSync(dir, { recursive: true, force: true }); throw new BuildError(e instanceof ZipError ? e.message : 'Could not read the zip.'); }
       const report = inspectSource(src);
-      const job = { id, dir, src, status: 'inspected', filename: String(filename || 'source.zip').slice(0, 80), createdAt: Date.now(), report, trusted: false, log: '', error: '', jar: null };
+      const job = { id, dir, src, status: 'inspected', filename: String(filename || 'source.zip').slice(0, 80), createdAt: Date.now(), report, trusted: false, owner, auto: null, log: '', error: '', jar: null };
       jobs.set(id, job);
       return view(job);
     },
 
     /** Starts the build in the background. */
-    start(id, { trust = false } = {}) {
+    start(id, { trust = false, auto = null } = {}) {
       const j = jobs.get(id);
       if (!j) throw new BuildError('Build not found.', 404);
       if (j.status === 'building') throw new BuildError('This build is already running.', 409);
@@ -277,7 +298,7 @@ export function createBuildService({ baseDir, timeoutMs = 10 * 60 * 1000 }) {
       if (j.report.kind === 'maven' && !tools.maven) throw new BuildError('Maven is not installed on this server. See docs/BUILD.md.', 503);
       if (j.report.kind === 'gradle' && !tools.gradle && !wrapperOk) throw new BuildError('Gradle is not installed on this server (or the project\'s own wrapper needs you to trust the code). See docs/BUILD.md.', 503);
 
-      j.trusted = !!trust; j.status = 'building'; j.log = ''; j.error = ''; j.jar = null;
+      j.trusted = !!trust; j.auto = auto; j.status = 'building'; j.log = ''; j.error = ''; j.jar = null;
       running = j.id;
       const root = join(j.src, j.report.root);
       const home = join(cacheDir, 'home');
@@ -294,6 +315,8 @@ export function createBuildService({ baseDir, timeoutMs = 10 * 60 * 1000 }) {
         cmd = 'gradle'; args = ['build', '-x', 'test', '--no-daemon', '--console=plain'];
         env = cleanEnv({ HOME: home, GRADLE_USER_HOME: join(cacheDir, 'gradle'), GRADLE_OPTS: '-Xmx512m' });
       }
+      const unfinal = unfinalMain(root, j.report.plugin?.main);
+      if (unfinal) append(j, `Made ${j.report.plugin.main} non-final so LicenseX can add the license check (${unfinal}).\n`);
       append(j, `$ ${cmd} ${args.join(' ')}\n`);
 
       runProcess(cmd, args, { cwd: root, env, timeoutMs, onData: d => append(j, d.toString()) }).then(r => {
@@ -310,6 +333,7 @@ export function createBuildService({ baseDir, timeoutMs = 10 * 60 * 1000 }) {
         j.jar = { name, path: join(out, name), size: picked.size, plugin: picked.hasPlugin ? { main: picked.main } : null };
         j.status = 'done';
         if (!picked.hasPlugin) append(j, '\nNote: the jar has no plugin.yml, so it is not a Bukkit/Spigot/Paper plugin.\n');
+        if (onDone) try { onDone(j); } catch (e) { append(j, `\nCould not add it to Products: ${e.message}\n`); }
       }).catch(e => { running = null; j.status = 'failed'; j.error = String(e.message || e); });
       return view(j);
     },

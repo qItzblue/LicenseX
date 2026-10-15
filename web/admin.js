@@ -11,7 +11,7 @@ let groups = [];
 const can = perm => (window.__me?.permissions || []).includes(perm);
 const PAGE_DEFS = [
   ['overview', 'Overview', () => true], ['licenses', 'Licenses', () => can('licenses.view')], ['servers', 'Servers', () => can('servers.view')], ['leaks', 'Leak tracer', () => can('licenses.view')],
-  ['products', 'Products', () => can('products.view')], ['build', 'Build', () => window.__me.role === 'platform'], ['groups', 'Groups', () => can('groups.view')],
+  ['products', 'Products', () => can('products.view')], ['build', 'Build', () => window.__me.can_build && can('products.edit')], ['groups', 'Groups', () => can('groups.view')],
   ['team', 'Team', () => can('team.manage')], ['customers', 'Customers', () => can('platform.customers')], ['plans', 'Plans', () => window.__me.role === 'platform'],
   ['billing', 'Billing', () => window.__me.role === 'tenant'], ['settings', 'Settings', () => can('settings.manage')], ['audit', 'Audit log', () => can('audit.view')], ['security', 'Security', () => true],
 ];
@@ -303,7 +303,11 @@ async function products() {
   grid.replaceChildren(...(list.length ? list.map(productCard) : [h('div', { class: 'muted', style: { padding: '8px' } }, can('products.create') ? 'No products yet. Drop a plugin jar above to create your first licensed download.' : 'There are no products you can see yet.')]));
   render(head('Products'),
     h('p', { class: 'muted', style: { marginTop: '-12px' } }, 'Upload your finished plugin jar as it is. LicenseX wraps it so it checks its buyer\'s license before starting, and hands each buyer their own copy with the license built in. For BuiltByBit, use the BuiltByBit build button.'),
-    can('products.create') ? drop : null, grid);
+    !can('products.create') ? null : window.__me.can_build
+      ? h('div', { class: 'card', style: { marginBottom: '16px' } }, h('b', null, 'New products come from the Build page'),
+          h('div', { class: 'muted', style: { margin: '4px 0 10px' } }, 'Upload your plugin\'s source there: it is built, the license check is added, and it shows up here by itself.'),
+          h('button', { class: 'btn primary', onclick: () => (location.hash = 'build') }, 'Go to Build'))
+      : drop, grid);
 }
 
 function productCard(p) {
@@ -443,13 +447,24 @@ function jobCard(j, products, refresh) {
   const actions = h('div', { class: 'row wrap', style: { marginTop: '12px', gap: '8px' } });
   if (j.status === 'inspected' || j.status === 'failed') {
     if (r.needsTrust) actions.append(h('label', { class: 'trustbox' }, trust, 'I have read the findings and trust this code'));
-    actions.append(h('button', { class: 'btn primary', disabled: r.kind === 'none', onclick: () => { if (r.needsTrust && !trust.checked) return toast('Tick the box to confirm you trust this code', true); call('POST', `/api/admin/builds/${j.id}/build`, { trust: r.needsTrust && trust.checked }); } }, j.status === 'failed' ? 'Build again' : 'Build jar'));
+    // Where the jar goes once it is built: a new product (default), an existing one, or nowhere.
+    const dest = h('select', { style: { width: 'auto' }, 'aria-label': 'When built' },
+      can('products.create') && h('option', { value: 'new' }, 'Then add it as a new product'),
+      products.map(p => h('option', { value: p.id }, `Then replace the file of "${p.name}"`)),
+      h('option', { value: 'none' }, 'Just build the jar'));
+    const pre = j.auto?.productId || products.find(p => p.name.toLowerCase() === (r.plugin?.name || '').toLowerCase())?.id;
+    if (pre) dest.value = String(pre);
+    const nameIn = h('input', { placeholder: 'Product name', value: j.auto?.name || r.plugin?.name || j.filename.replace(/\.zip$/i, ''), style: { width: '170px' }, hidden: dest.value !== 'new' });
+    dest.addEventListener('change', () => { nameIn.hidden = dest.value !== 'new'; });
+    const target = () => dest.value === 'none' ? { product: false } : dest.value === 'new' ? { name: nameIn.value } : { productId: Number(dest.value) };
+    actions.append(dest, nameIn, h('button', { class: 'btn primary', disabled: r.kind === 'none', onclick: () => { if (r.needsTrust && !trust.checked) return toast('Tick the box to confirm you trust this code', true); call('POST', `/api/admin/builds/${j.id}/build`, { trust: r.needsTrust && trust.checked, ...target() }); } }, j.status === 'failed' ? 'Build again' : 'Build jar'));
   }
-  if (j.status === 'building') actions.append(h('span', { class: 'muted' }, 'Building… the first build downloads dependencies and can take a few minutes.'));
+  if (j.status === 'building') actions.append(h('span', { class: 'muted' }, 'Building… the first build downloads dependencies and can take a few minutes.' + (j.auto ? ` When it is done it goes into ${j.auto.productId ? 'your product' : `a new product "${j.auto.name}"`} automatically.` : '')));
   if (j.status === 'done' && j.jar) {
     const sel = h('select', { style: { width: 'auto' } }, h('option', { value: '' }, 'New product…'), products.map(p => h('option', { value: p.id }, `Replace the file of "${p.name}"`)));
     const nameIn = h('input', { placeholder: 'Product name', value: r.plugin?.name || '', style: { width: '170px' } });
     sel.addEventListener('change', () => { nameIn.hidden = !!sel.value; });
+    if (j.auto?.done) card.append(h('div', { class: 'integ ok' }, h('b', null, `Added to Products as "${j.auto.done}"`), h('span', null, 'Open the Products page to get its download link.')));
     card.append(h('div', { class: 'integ ok' }, h('b', null, `Built ${j.jar.name}`), h('span', null, `${(j.jar.size / 1024).toFixed(0)} KB${j.jar.plugin?.main ? ' · main ' + j.jar.plugin.main : ' · no plugin.yml in this jar'}`)));
     actions.append(h('a', { class: 'btn primary', href: `/api/admin/builds/${j.id}/jar` }, '⬇ Download jar'), sel, nameIn,
       h('button', { class: 'btn', onclick: () => call('POST', `/api/admin/builds/${j.id}/product`, sel.value ? { productId: Number(sel.value) } : { name: nameIn.value }, 'Saved to Products. Open the Products page to get download links.') }, 'Use as product'));
@@ -482,6 +497,25 @@ const untilText = w => {
   return w.plan_until ? `${how}, active until ${d}` : `${how}, no end date`;
 };
 
+// Patreon: connect once, and every monthly charge renews the plan by itself (server/patreon.js).
+const PATREON_MSG = { active: ['Patreon connected. Your plan is on.', false], linked: ['Patreon connected. Your plan switches on as soon as Patreon reports a payment.', false],
+  taken: ['That Patreon account is already connected to another LicenseX account.', true], denied: ['Patreon was not connected.', true],
+  state: ['That took too long. Try Connect Patreon again.', true], failed: ['Patreon could not be reached. Try again.', true], notconfigured: ['Patreon is not set up on this site.', true] };
+function patreonCard(p) {
+  const q = new URLSearchParams(location.search).get('patreon');
+  if (q && PATREON_MSG[q]) { toast(...PATREON_MSG[q]); history.replaceState(null, '', '/admin#billing'); }
+  if (!p?.enabled) return null;
+  const l = p.linked;
+  return h('div', { class: 'card', style: { marginBottom: '16px', maxWidth: '680px' } },
+    h('h3', { style: { marginBottom: '4px' } }, 'Pay with Patreon'),
+    l ? h('p', { class: 'muted', style: { marginTop: 0, fontSize: '14px' } }, `Connected to Patreon${l.email ? ' (' + l.email + ')' : ''}. `,
+          l.active ? `Paid up${l.next_charge ? ': it renews by itself on ' + new Date(l.next_charge * 1000).toLocaleDateString('en-GB') : ''}.` : 'No active payment right now: your plan switches on when Patreon reports one.')
+      : h('p', { class: 'muted', style: { marginTop: 0, fontSize: '14px' } }, 'Support us on Patreon, then connect it here once. Every monthly payment keeps your plan on automatically. No keys needed, and your Patreon email may differ from this one.'),
+    h('div', { class: 'row wrap', style: { gap: '8px' } },
+      h('a', { class: 'btn primary', href: '/auth/patreon' }, l ? 'Reconnect Patreon' : 'Connect Patreon'),
+      l && h('button', { class: 'btn ghost', onclick: async () => { await api('POST', '/api/billing/patreon/disconnect'); toast('Patreon disconnected'); billingPage(); } }, 'Disconnect')));
+}
+
 async function billingPage() {
   const pricing = await api('GET', '/api/public/pricing');
   const w = WS, site = pricing.site;
@@ -508,6 +542,7 @@ async function billingPage() {
       h('h3', { style: { marginBottom: '4px' } }, 'Activate a key'),
       h('p', { class: 'muted', style: { marginTop: 0, fontSize: '14px' } }, 'Bought a plan on BuiltByBit? Download the file you got there: it contains your access key. Paste it here to switch the plan on.'),
       h('div', { class: 'url-row' }, input, h('button', { class: 'btn primary', type: 'submit' }, 'Activate'))),
+    patreonCard(await api('GET', '/api/billing/patreon').catch(() => null)),
     h('h3', { style: { margin: '24px 0 10px' } }, 'Plans'),
     h('div', { class: 'plan-rows' }, pricing.plans.map(p => h('div', { class: 'card plan-row' + (p.key === w.plan.key ? ' current' : '') },
       h('div', null, h('b', null, p.name), p.highlight ? h('span', { class: 'tag', style: { marginLeft: '8px' } }, 'Popular') : null, h('div', { class: 'muted', style: { fontSize: '13px' } }, `${plugins(p.max_products)} · ${cap(p.max_licenses)} licenses`)),

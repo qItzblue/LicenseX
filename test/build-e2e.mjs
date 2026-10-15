@@ -57,6 +57,10 @@ async function buildFixture(dirName, expectKind, pluginName) {
   assert.equal(done.status, 'done', done.error + '\n' + done.log.slice(-2500));
   console.log(`built ${done.jar.name} (${done.jar.size} bytes), main=${done.jar.plugin.main}`);
   assert.equal(done.jar.plugin.main, 'com.acme.hello.HelloPlugin');
+  // added to Products by itself, named after the plugin
+  assert.equal(done.auto?.done, pluginName, done.log.slice(-500));
+  const auto = (await api('GET', '/api/admin/products')).body.find(p => p.id === done.auto.productId);
+  assert.ok(auto && auto.has_file && auto.name === pluginName, 'the built plugin is a product without any extra step');
 
   const jar = Buffer.from(await (await fetch(`${base}/api/admin/builds/${up.body.id}/jar`, { headers: { Cookie: cookie } })).arrayBuffer());
   assert.ok(listEntries(jar).includes('plugin.yml') && listEntries(jar).includes('com/acme/hello/HelloPlugin.class'));

@@ -75,7 +75,7 @@ test('every admin route is guarded: no silent open doors', () => {
     const path = re.source;
     if (!/^\^\\\/api\\\/(admin|workspace|billing)\\\//.test(path) && !/^\^\\\/api\\\/workspace\$/.test(path)) continue;
     if (/\\\/api\\\/admin\\\/(login|logout)\$/.test(path)) continue;
-    if (/\\\/api\\\/(workspace\\\/ensure|billing\\\/redeem)\$/.test(path)) continue; // act for the signed-in OWNER only (checked in their handlers)
+    if (/\\\/api\\\/(workspace\\\/ensure|billing\\\/redeem|billing\\\/patreon|billing\\\/patreon\\\/disconnect)\$/.test(path)) continue; // act for the signed-in OWNER only (checked in their handlers)
     const label = `${method} ${path}`;
     const guarded = opts.platform || opts.perm || (opts.admin && OPEN.has(`${method} ${path.replace(/\\\//g, '/').replace(/^\^|\$$/g, '')}`));
     assert.ok(guarded, `${label} has no permission guard`);

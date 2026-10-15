@@ -14,6 +14,7 @@ import { injectFiles, listEntries, readEntry, setZipComment, readZipComment } fr
 import { wrapJar, checkWrappable, WrapError } from './wrapjar.js';
 import { registerBuyers } from './buyers.js';
 import { registerTeam } from './team.js';
+import { registerPatreon } from './patreon.js';
 import { accessFor, slotsFor } from './rbac.js';
 import { createTwoFactor, otpauthUri, subjectForEmail, PASSWORD_SUBJECT } from './twofa.js';
 
@@ -326,7 +327,7 @@ route('GET', '/api/admin/me', async ctx => {
   return [200, { ok: true, via: ctx.admin.via, role: ctx.admin.role, name: ctx.admin.name, email: ctx.admin.email || '',
     permissions: [...ctx.access.perms], limited: !!sc, products: sc ? [...sc] : null,
     member_role: ctx.admin.member?.role_name || (ctx.access.owner ? 'Owner' : ''),
-    workspaces: ctx.admin.workspaces || null,
+    workspaces: ctx.admin.workspaces || null, can_build: canBuild(ctx.admin),
     workspace: { id: w.id, name: w.name, house: w.id === HOUSE, suspended: !!w.suspended, plan: ctx.admin.role === 'member' ? null : (({ key, name, max_products, max_licenses, interval, price_cents, currency }) => ({ key, name, max_products, max_licenses, interval, price_cents, currency }))(core.planOf(w.id)) } }];
 }, { admin: true });
 
@@ -824,53 +825,83 @@ route('DELETE', '/api/admin/products/:id', async ctx => {
 // Admin: build from source ---------------------------------------------------------
 // Upload a Maven/Gradle project as a zip -> inspection report -> build -> jar (optionally straight into a product).
 // See docs/BUILD.md for what this does and does not protect against.
-const builds = createBuildService({ baseDir: join(DATA, 'builds') });
+// Customers (not just the site owner) may use it when LICENSEX_CUSTOMER_BUILDS=1. Off by default: a build can run its
+// own code on this server, so only switch it on when every customer is someone you trust (docs/BUILD.md).
+const CUSTOMER_BUILDS = process.env.LICENSEX_CUSTOMER_BUILDS === '1' || fileConfig.customerBuilds === true;
+const canBuild = admin => admin?.role === 'platform' || CUSTOMER_BUILDS;
+// Puts a jar into a product: the chosen existing product, or a new one with that name. Returns the product.
+function jarToProduct(ctx, target, buf, filename) {
+  let p;
+  if (target.productId) p = ownProduct(ctx, target.productId);
+  else {
+    withinPlan(() => core.assertWithin(ctx.wsId, 'products'));
+    const slug = uniqueSlug(target.name);
+    const r = db.prepare('INSERT INTO products(workspace_id,slug,name,token,created_at) VALUES(?,?,?,?,?)').run(ctx.wsId, slug, target.name, randomBytes(12).toString('base64url'), now());
+    p = db.prepare('SELECT * FROM products WHERE id=?').get(r.lastInsertRowid);
+    wl(ctx, 'product.create', slug, target.name);
+  }
+  setProductFile(ctx, p, buf, filename);
+  return p;
+}
+// Which product a request asks for: { productId } or { name }. Checked against the caller's rights.
+function buildTarget(ctx, b, fallbackName) {
+  if (b.productId) return { productId: ownProduct(ctx, int(b.productId, { min: 1 })).id };
+  if (!ctx.access.perms.has('products.create')) throw new HttpError(403, 'You may not create products. Pick an existing product.');
+  const name = str(b.name || fallbackName || '', 60).trim();
+  if (!name) throw new HttpError(400, 'Give the new product a name, or pick an existing product.');
+  return { name };
+}
+const builds = createBuildService({ baseDir: join(DATA, 'builds'), onDone: j => {
+  // Built: put it straight into the product picked when the build started.
+  if (!j.auto) return;
+  const a = j.auto, ctx = { wsId: a.wsId, admin: { email: a.email }, access: { scope: a.scope ? new Set(a.scope) : null } };
+  const p = jarToProduct(ctx, a, readFileSync(j.jar.path), j.jar.name);
+  j.auto = { ...a, productId: p.id, done: p.name };
+} });
 setInterval(() => builds.sweep(), 3600e3).unref();
 const asHttp = fn => { try { return fn(); } catch (e) { if (e instanceof BuildError) throw new HttpError(e.status, e.message); throw e; } };
-route('GET', '/api/admin/builds/tools', async () => [200, builds.tools()], { platform: true });
-route('GET', '/api/admin/builds', async () => [200, builds.list()], { platform: true });
+const buildOpts = { perm: 'products.edit', build: true };
+const ownJob = ctx => { const j = builds.get(ctx.params.id, ctx.wsId); if (!j) throw new HttpError(404, 'Build not found'); return j; };
+route('GET', '/api/admin/builds/tools', async () => [200, builds.tools()], buildOpts);
+route('GET', '/api/admin/builds', async ctx => [200, builds.list(ctx.wsId)], buildOpts);
 route('POST', '/api/admin/builds', async ctx => {
   const tmp = join(DATA, '.build-upload-' + randomBytes(4).toString('hex'));
   const filename = str(ctx.req.headers['x-filename'] || 'source.zip', 80);
   try {
     await saveUpload(ctx.req, tmp);
-    const job = asHttp(() => builds.create(readFileSync(tmp), filename));
+    const job = asHttp(() => builds.create(readFileSync(tmp), filename, ctx.wsId));
     wl(ctx, 'build.upload', job.id, `${filename} ${job.report.kind} findings=${job.report.findings.length}`);
     return [201, job];
   } finally { rmSync(tmp, { force: true }); }
-}, { platform: true });
-route('GET', '/api/admin/builds/:id', async ctx => { const j = builds.get(ctx.params.id); if (!j) throw new HttpError(404, 'Build not found'); return [200, j]; }, { platform: true });
+}, buildOpts);
+route('GET', '/api/admin/builds/:id', async ctx => [200, ownJob(ctx)], buildOpts);
+// Starts the build. Unless { product: false }, the jar is added to a product automatically once it is built:
+// { productId } replaces that product's file, otherwise a new product is made (named { name } or after the plugin).
 route('POST', '/api/admin/builds/:id/build', async ctx => {
-  const b = await body(ctx.req);
-  const job = asHttp(() => builds.start(ctx.params.id, { trust: b.trust === true }));
+  const b = await body(ctx.req), j0 = ownJob(ctx);
+  const target = b.product === false ? null : buildTarget(ctx, b, j0.report?.plugin?.name || j0.filename.replace(/\.zip$/i, ''));
+  if (target?.name) withinPlan(() => core.assertWithin(ctx.wsId, 'products'));
+  const auto = target && { ...target, wsId: ctx.wsId, email: ctx.admin.email || 'admin', scope: ctx.access.scope ? [...ctx.access.scope] : null };
+  const job = asHttp(() => builds.start(ctx.params.id, { trust: b.trust === true, auto }));
   wl(ctx, 'build.start', job.id, `${job.filename} trusted=${job.trusted}`);
   return [202, job];
-}, { platform: true });
+}, buildOpts);
 route('GET', '/api/admin/builds/:id/jar', async ctx => {
+  ownJob(ctx);
   const f = builds.jarFile(ctx.params.id);
   if (!f) throw new HttpError(404, 'No jar for this build');
   return [200, readFileSync(f.path), { 'Content-Type': 'application/java-archive', 'Content-Disposition': `attachment; filename="${f.name.replace(/[^\w.\-]/g, '_')}"` }];
-}, { platform: true });
-// Put the built jar into a product: replace an existing product's file, or create a new product from it.
+}, buildOpts);
+// Put the built jar into a product by hand: replace an existing product's file, or create a new product from it.
 route('POST', '/api/admin/builds/:id/product', async ctx => {
   const b = await body(ctx.req);
+  ownJob(ctx);
   const f = builds.jarFile(ctx.params.id);
   if (!f) throw new HttpError(404, 'No jar for this build');
-  let p;
-  if (b.productId) p = ownProduct(ctx, int(b.productId, { min: 1 }));
-  else {
-    const name = str(b.name, 60).trim();
-    if (!name) throw new HttpError(400, 'Give the new product a name, or pick an existing product.');
-    withinPlan(() => core.assertWithin(ctx.wsId, 'products'));
-    const slug = uniqueSlug(name);
-    const r = db.prepare('INSERT INTO products(workspace_id,slug,name,token,created_at) VALUES(?,?,?,?,?)').run(ctx.wsId, slug, name, randomBytes(12).toString('base64url'), now());
-    p = db.prepare('SELECT * FROM products WHERE id=?').get(r.lastInsertRowid);
-    wl(ctx, 'product.create', slug, name);
-  }
-  setProductFile(ctx, p, readFileSync(f.path), f.name);
+  const p = jarToProduct(ctx, buildTarget(ctx, b), readFileSync(f.path), f.name);
   return [200, productRow(ctx.req, db.prepare('SELECT * FROM products WHERE id=?').get(p.id))];
-}, { platform: true });
-route('DELETE', '/api/admin/builds/:id', async ctx => { asHttp(() => builds.remove(ctx.params.id)); return [200, { ok: true }]; }, { platform: true });
+}, buildOpts);
+route('DELETE', '/api/admin/builds/:id', async ctx => { ownJob(ctx); asHttp(() => builds.remove(ctx.params.id)); return [200, { ok: true }]; }, buildOpts);
 
 // Admin: backup / restore ---------------------------------------------------------
 // Everything (licenses, servers, groups, settings, uploaded plugins) in one zip. Contains every license key and the
@@ -1235,10 +1266,11 @@ function handleDownload(req, res, slug, url) {
 // --- feature modules: each registers its own routes -------------------------------
 // They get the pieces of this file they need through one object, so they can live (and be tested) in their own files.
 const app = { route, db, core, HttpError, body, int, str, rateLimit, recentCount, clientIp, publicBase, sessionUser, cookies, isHttps, secure, sign, signToken, readToken, safeEq,
-  PUBLIC_URL, DATA, SESSION_SECRET, HOUSE, now, hash, normalizeKey, KEY_RE, fileConfig, CONFIG_ADMIN_EMAILS, isAdminUser, workspaceOfUser };
+  PUBLIC_URL, DATA, SESSION_SECRET, HOUSE, now, hash, normalizeKey, KEY_RE, fileConfig, CONFIG_ADMIN_EMAILS, isAdminUser, workspaceOfUser, redirect };
 registerBuyers(app);
 registerTeam(app);
 registerPlanSales(app);
+const patreon = registerPatreon(app);
 
 // --- static + dispatch -----------------------------------------------------
 const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
@@ -1268,6 +1300,7 @@ export const server = createServer(async (req, res) => {
       if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'Method not allowed');
       return handleDownload(req, res, dl[1], url);
     }
+    if (url.pathname === '/auth/patreon' || url.pathname === '/auth/patreon/callback') return await patreon.handle(req, res, url);
     if (url.pathname.startsWith('/auth/')) return await handleAuth(req, res, url);
     if (!url.pathname.startsWith('/api/')) {
       if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'Method not allowed');
@@ -1285,6 +1318,7 @@ export const server = createServer(async (req, res) => {
         if (!guarded) return { admin, wsId: HOUSE, access: null };
         if (!admin) throw new HttpError(401, 'Not signed in');
         if (opts.platform && admin.role !== 'platform') throw new HttpError(403, 'Only the site owner can do that.');
+        if (opts.build && !canBuild(admin)) throw new HttpError(403, 'Build from source is not switched on for customers on this server.');
         const wsId = resolveWorkspace(admin, req, url), access = accessFor(db, admin, wsId);
         const needed = opts.perm ? [].concat(opts.perm) : [];
         if (needed.length && !needed.some(k => access.perms.has(k))) throw new HttpError(403, 'You do not have permission to do that.', 'FORBIDDEN');
