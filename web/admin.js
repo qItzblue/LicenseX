@@ -11,7 +11,7 @@ let groups = [];
 const can = perm => (window.__me?.permissions || []).includes(perm);
 const PAGE_DEFS = [
   ['overview', 'Overview', () => true], ['licenses', 'Licenses', () => can('licenses.view')], ['servers', 'Servers', () => can('servers.view')], ['leaks', 'Leak tracer', () => can('licenses.view')],
-  ['products', 'Products', () => can('products.view')], ['build', 'Build', () => window.__me.role === 'platform'], ['groups', 'Groups', () => can('groups.view')],
+  ['products', 'Products', () => can('products.view')], ['build', 'Build', () => window.__me.can_build && can('products.edit')], ['groups', 'Groups', () => can('groups.view')],
   ['team', 'Team', () => can('team.manage')], ['customers', 'Customers', () => can('platform.customers')], ['plans', 'Plans', () => window.__me.role === 'platform'],
   ['billing', 'Billing', () => window.__me.role === 'tenant'], ['settings', 'Settings', () => can('settings.manage')], ['audit', 'Audit log', () => can('audit.view')], ['security', 'Security', () => true],
 ];
@@ -443,13 +443,24 @@ function jobCard(j, products, refresh) {
   const actions = h('div', { class: 'row wrap', style: { marginTop: '12px', gap: '8px' } });
   if (j.status === 'inspected' || j.status === 'failed') {
     if (r.needsTrust) actions.append(h('label', { class: 'trustbox' }, trust, 'I have read the findings and trust this code'));
-    actions.append(h('button', { class: 'btn primary', disabled: r.kind === 'none', onclick: () => { if (r.needsTrust && !trust.checked) return toast('Tick the box to confirm you trust this code', true); call('POST', `/api/admin/builds/${j.id}/build`, { trust: r.needsTrust && trust.checked }); } }, j.status === 'failed' ? 'Build again' : 'Build jar'));
+    // Where the jar goes once it is built: a new product (default), an existing one, or nowhere.
+    const dest = h('select', { style: { width: 'auto' }, 'aria-label': 'When built' },
+      can('products.create') && h('option', { value: 'new' }, 'Then add it as a new product'),
+      products.map(p => h('option', { value: p.id }, `Then replace the file of "${p.name}"`)),
+      h('option', { value: 'none' }, 'Just build the jar'));
+    const pre = j.auto?.productId || products.find(p => p.name.toLowerCase() === (r.plugin?.name || '').toLowerCase())?.id;
+    if (pre) dest.value = String(pre);
+    const nameIn = h('input', { placeholder: 'Product name', value: j.auto?.name || r.plugin?.name || j.filename.replace(/\.zip$/i, ''), style: { width: '170px' }, hidden: dest.value !== 'new' });
+    dest.addEventListener('change', () => { nameIn.hidden = dest.value !== 'new'; });
+    const target = () => dest.value === 'none' ? { product: false } : dest.value === 'new' ? { name: nameIn.value } : { productId: Number(dest.value) };
+    actions.append(dest, nameIn, h('button', { class: 'btn primary', disabled: r.kind === 'none', onclick: () => { if (r.needsTrust && !trust.checked) return toast('Tick the box to confirm you trust this code', true); call('POST', `/api/admin/builds/${j.id}/build`, { trust: r.needsTrust && trust.checked, ...target() }); } }, j.status === 'failed' ? 'Build again' : 'Build jar'));
   }
-  if (j.status === 'building') actions.append(h('span', { class: 'muted' }, 'Building… the first build downloads dependencies and can take a few minutes.'));
+  if (j.status === 'building') actions.append(h('span', { class: 'muted' }, 'Building… the first build downloads dependencies and can take a few minutes.' + (j.auto ? ` When it is done it goes into ${j.auto.productId ? 'your product' : `a new product "${j.auto.name}"`} automatically.` : '')));
   if (j.status === 'done' && j.jar) {
     const sel = h('select', { style: { width: 'auto' } }, h('option', { value: '' }, 'New product…'), products.map(p => h('option', { value: p.id }, `Replace the file of "${p.name}"`)));
     const nameIn = h('input', { placeholder: 'Product name', value: r.plugin?.name || '', style: { width: '170px' } });
     sel.addEventListener('change', () => { nameIn.hidden = !!sel.value; });
+    if (j.auto?.done) card.append(h('div', { class: 'integ ok' }, h('b', null, `Added to Products as "${j.auto.done}"`), h('span', null, 'Open the Products page to get its download link.')));
     card.append(h('div', { class: 'integ ok' }, h('b', null, `Built ${j.jar.name}`), h('span', null, `${(j.jar.size / 1024).toFixed(0)} KB${j.jar.plugin?.main ? ' · main ' + j.jar.plugin.main : ' · no plugin.yml in this jar'}`)));
     actions.append(h('a', { class: 'btn primary', href: `/api/admin/builds/${j.id}/jar` }, '⬇ Download jar'), sel, nameIn,
       h('button', { class: 'btn', onclick: () => call('POST', `/api/admin/builds/${j.id}/product`, sel.value ? { productId: Number(sel.value) } : { name: nameIn.value }, 'Saved to Products. Open the Products page to get download links.') }, 'Use as product'));

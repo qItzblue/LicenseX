@@ -3,7 +3,15 @@
 Upload your plugin's source as a zip; LicenseX inspects it, compiles it, and gives you the jar. One click then turns that
 jar into a product with licensed downloads.
 
-Admin panel -> **Build**. This is **owner-only**: customers of a paid LicenseX never see it, because it runs build tools on the server.
+Admin panel -> **Build**. By default only the site owner sees it, because it runs build tools on the server.
+
+**Letting customers use it:** set `LICENSEX_CUSTOMER_BUILDS=1`. Customers (and team members who can edit products) then
+get the Build page too. Each workspace only sees its own builds. Read the warning below first: a customer's project
+can run code on your server, so only switch this on if you trust every customer.
+
+**Straight into Products:** before pressing *Build jar*, pick where the jar goes. By default it becomes a new product named
+after the plugin, or it replaces the file of the product with the same name. The product is filled in automatically
+when the build finishes. Choose *Just build the jar* to skip this.
 
 ## The flow
 
