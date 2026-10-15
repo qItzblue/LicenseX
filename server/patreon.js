@@ -17,6 +17,10 @@ export function patreonConfig(fileConfig = {}) {
     clientSecret: process.env.LICENSEX_PATREON_CLIENT_SECRET || f.clientSecret || '',
     webhookSecret: process.env.LICENSEX_PATREON_WEBHOOK_SECRET || f.webhookSecret || '',
     plan: process.env.LICENSEX_PATREON_PLAN || f.plan || 'pro',
+    // which tier gives which plan: { "<tier id>": "<plan key>" }; empty = every paid tier gives `plan`
+    tiers: process.env.LICENSEX_PATREON_TIERS
+      ? Object.fromEntries(process.env.LICENSEX_PATREON_TIERS.split(',').map(x => x.split(':').map(y => y.trim())).filter(x => x[0] && x[1]))
+      : (f.tiers && typeof f.tiers === 'object' ? Object.fromEntries(Object.entries(f.tiers).map(([k, v]) => [String(k), String(v)])) : {}),
   };
   return { ...c, connect: !!(c.clientId && c.clientSecret), webhook: !!c.webhookSecret };
 }
@@ -30,7 +34,8 @@ function memberOf(data, included = []) {
   const user = included.find(x => x.type === 'user' && x.id === userId);
   const ts = v => (v ? Math.floor(Date.parse(v) / 1000) || null : null);
   return { userId, email: String(a.email || user?.attributes?.email || '').toLowerCase(), status: String(a.patron_status || ''),
-    charge: String(a.last_charge_status || ''), lastCharge: ts(a.last_charge_date), nextCharge: ts(a.next_charge_date) };
+    charge: String(a.last_charge_status || ''), lastCharge: ts(a.last_charge_date), nextCharge: ts(a.next_charge_date),
+    tiers: (data?.relationships?.currently_entitled_tiers?.data || []).map(t => String(t.id)) };
 }
 
 export function registerPatreon(app) {
@@ -42,16 +47,23 @@ export function registerPatreon(app) {
   db.exec(`CREATE TABLE IF NOT EXISTS patreon_members (
     user_id TEXT PRIMARY KEY, email TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT '', charge TEXT NOT NULL DEFAULT '',
     last_charge INTEGER, next_charge INTEGER, workspace_id INTEGER UNIQUE, updated_at INTEGER NOT NULL)`);
+  if (!db.prepare('PRAGMA table_info(patreon_members)').all().some(c => c.name === 'tiers')) db.exec("ALTER TABLE patreon_members ADD COLUMN tiers TEXT NOT NULL DEFAULT ''");
 
-  const save = m => db.prepare(`INSERT INTO patreon_members (user_id, email, status, charge, last_charge, next_charge, updated_at) VALUES (?,?,?,?,?,?,?)
-    ON CONFLICT(user_id) DO UPDATE SET email=excluded.email, status=excluded.status, charge=excluded.charge, last_charge=excluded.last_charge, next_charge=excluded.next_charge, updated_at=excluded.updated_at`)
-    .run(m.userId, m.email, m.status, m.charge, m.lastCharge, m.nextCharge, now());
+  const save = m => db.prepare(`INSERT INTO patreon_members (user_id, email, status, charge, last_charge, next_charge, tiers, updated_at) VALUES (?,?,?,?,?,?,?,?)
+    ON CONFLICT(user_id) DO UPDATE SET email=excluded.email, status=excluded.status, charge=excluded.charge, last_charge=excluded.last_charge, next_charge=excluded.next_charge, tiers=excluded.tiers, updated_at=excluded.updated_at`)
+    .run(m.userId, m.email, m.status, m.charge, m.lastCharge, m.nextCharge, (m.tiers || []).join(','), now());
+  /** The plan this patron's tier gives: with a tier list, the priciest plan among their tiers (none if no tier is listed). */
+  function planFor(r) {
+    const mapped = Object.keys(conf.tiers).length;
+    const keys = mapped ? String(r.tiers || '').split(',').map(t => conf.tiers[t]).filter(Boolean) : [conf.plan];
+    return keys.map(k => db.prepare('SELECT * FROM plans WHERE key = ?').get(k)).filter(Boolean).sort((a, b) => b.price_cents - a.price_cents)[0] || null;
+  }
 
   /** Gives the linked account the plan while this patron is paid up. Returns the end date it set, or null. */
   function apply(userId) {
     const r = db.prepare('SELECT * FROM patreon_members WHERE user_id = ?').get(userId);
     if (!r?.workspace_id || r.status !== 'active_patron' || r.charge !== 'Paid') return null;
-    const plan = db.prepare('SELECT * FROM plans WHERE key = ?').get(conf.plan);
+    const plan = planFor(r);
     const w = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(r.workspace_id);
     if (!plan || !w) return null;
     if (w.plan_key !== 'free' && !w.plan_until && w.plan_status !== 'canceled') return null;   // already has a plan with no end date
@@ -88,7 +100,7 @@ export function registerPatreon(app) {
     if (!m.userId) return [200, { ok: true, ignored: true }];
     save(m); autoLink(m);
     const until = apply(m.userId);
-    core.log('patreon', 'patreon.event', String(ctx.req.headers['x-patreon-event'] || ''), `${m.email || m.userId} ${m.status}/${m.charge}`);
+    core.log('patreon', 'patreon.event', String(ctx.req.headers['x-patreon-event'] || ''), `${m.email || m.userId} ${m.status}/${m.charge} tiers=${(m.tiers || []).join(',') || 'none'}`);
     return [200, { ok: true, until }];
   });
 
@@ -124,17 +136,17 @@ export function registerPatreon(app) {
       const tok = await fetch(`${API}/api/oauth2/token`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({ code, grant_type: 'authorization_code', client_id: conf.clientId, client_secret: conf.clientSecret, redirect_uri: redirectUri }) }).then(r => r.json());
       if (!tok.access_token) throw new Error('no access token');
-      const q = 'include=memberships&fields%5Buser%5D=email&fields%5Bmember%5D=patron_status,last_charge_status,last_charge_date,next_charge_date,email';
+      const q = 'include=memberships,memberships.currently_entitled_tiers&fields%5Buser%5D=email&fields%5Bmember%5D=patron_status,last_charge_status,last_charge_date,next_charge_date,email';
       const me = await fetch(`${API}/api/oauth2/v2/identity?${q}`, { headers: { Authorization: `Bearer ${tok.access_token}` } }).then(r => r.json());
       const userId = String(me.data?.id || '');
       if (!userId) throw new Error('no Patreon user');
       const membership = (me.included || []).find(x => x.type === 'member');
-      const m = membership ? memberOf({ ...membership, relationships: { user: { data: { id: userId } } } }) : { userId, status: '', charge: '', lastCharge: null, nextCharge: null, email: '' };
+      const m = membership ? memberOf({ ...membership, relationships: { ...membership.relationships, user: { data: { id: userId } } } }) : { userId, status: '', charge: '', lastCharge: null, nextCharge: null, email: '', tiers: [] };
       m.email ||= String(me.data?.attributes?.email || '').toLowerCase();
       const known = db.prepare('SELECT * FROM patreon_members WHERE user_id = ?').get(userId);
       if (known?.workspace_id && known.workspace_id !== w.id) return back(res, 'patreon=taken');
       // the identity call is fresh, but if Patreon only told us about a charge by webhook, keep that
-      if (!membership && known) Object.assign(m, { status: known.status, charge: known.charge, lastCharge: known.last_charge, nextCharge: known.next_charge });
+      if (!membership && known) Object.assign(m, { status: known.status, charge: known.charge, lastCharge: known.last_charge, nextCharge: known.next_charge, tiers: known.tiers ? known.tiers.split(',') : [] });
       save(m); link(userId, w.id);
       const until = apply(userId);
       core.log('user', 'patreon.connect', m.email || userId, until ? 'plan on' : 'not paying yet', w.id);

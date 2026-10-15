@@ -35,6 +35,7 @@ process.env.LICENSEX_GITHUB_CLIENT_ID = 'id-github'; process.env.LICENSEX_GITHUB
 process.env.LICENSEX_PATREON_TEST_BASE = M + '/patreon';
 process.env.LICENSEX_PATREON_CLIENT_ID = 'pid'; process.env.LICENSEX_PATREON_CLIENT_SECRET = 'psecret';
 process.env.LICENSEX_PATREON_WEBHOOK_SECRET = 'whsec';
+process.env.LICENSEX_PATREON_TIERS = 't-pro:pro, t-big:lifetime';
 const { server } = await import('../server/index.js');
 let base;
 before(() => new Promise(r => server.listen(0, '127.0.0.1', () => { base = `http://127.0.0.1:${server.address().port}`; r(); })));
@@ -44,9 +45,9 @@ const cookiesOf = res => Object.fromEntries(res.headers.getSetCookie().map(c => 
 const raw = (path, cookie) => fetch(base + path, { redirect: 'manual', headers: cookie ? { Cookie: cookie } : {} });
 const json = (method, path, body, cookie) => fetch(base + path, { method, headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}) }, body: body ? JSON.stringify(body) : undefined }).then(async r => ({ status: r.status, body: await r.json() }));
 const day = 86400, nowS = () => Math.floor(Date.now() / 1000), iso = s => new Date(s * 1000).toISOString();
-const member = (userId, { email = '', status = 'active_patron', charge = 'Paid', next = nowS() + 30 * day } = {}) => ({
+const member = (userId, { email = '', status = 'active_patron', charge = 'Paid', next = nowS() + 30 * day, tiers = ['t-pro'] } = {}) => ({
   type: 'member', id: 'm-' + userId, attributes: { email, patron_status: status, last_charge_status: charge, last_charge_date: iso(nowS()), next_charge_date: next ? iso(next) : null },
-  relationships: { user: { data: { id: userId, type: 'user' } } } });
+  relationships: { user: { data: { id: userId, type: 'user' } }, currently_entitled_tiers: { data: tiers.map(id => ({ id, type: 'tier' })) } } });
 const hook = (data, secret = 'whsec') => {
   const body = JSON.stringify({ data, included: [] });
   return fetch(base + '/api/patreon/webhook', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Patreon-Event': 'members:pledge:update', 'X-Patreon-Signature': signPatreon(body, secret) }, body });
@@ -106,4 +107,16 @@ test('a patron whose Patreon email is their sign-in email is linked automaticall
   assert.ok(w.plan_until > nowS() + 89 * day);
   // that Patreon account now belongs to this LicenseX account
   assert.equal((await json('GET', '/api/billing/patreon', null, cookie)).body.linked.email, 'maker@example.com');
+});
+
+test('each Patreon tier gives its own plan; a tier that is not listed gives nothing', async () => {
+  const cookie = await signIn();
+  await hook(member('p2', { email: 'maker@example.com', tiers: ['t-big'], next: nowS() + 120 * day }));
+  let w = await plan(cookie);
+  assert.equal(w.plan_key, 'lifetime');
+  assert.ok(w.plan_until > nowS() + 119 * day, 'a monthly tier still has an end date');
+  // an unknown tier: nothing changes
+  await hook(member('p2', { email: 'maker@example.com', tiers: ['t-other'], next: nowS() + 200 * day }));
+  w = await plan(cookie);
+  assert.equal(w.plan_key, 'lifetime'); assert.ok(w.plan_until < nowS() + 199 * day);
 });

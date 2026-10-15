@@ -59,6 +59,24 @@ or as environment variables: `LICENSEX_PATREON_CLIENT_ID`, `LICENSEX_PATREON_CLI
 
 Restart LicenseX (`sudo systemctl restart licensex`). The Billing page of every customer now shows **Pay with Patreon**.
 
+## 4b. Several tiers, several plans (optional)
+
+Without this, every paid tier gives the `plan` above. To give each tier its own plan, list them by tier id:
+
+```json
+  "patreon": {
+    "clientId": "...", "clientSecret": "...", "webhookSecret": "...",
+    "tiers": { "12345678": "pro", "23456789": "lifetime" }
+  }
+```
+
+(or `LICENSEX_PATREON_TIERS=12345678:pro,23456789:lifetime`). The plan names on the right are the plan **keys** shown in
+**Admin -> Plans** (renaming a plan keeps its key). With a list, a tier that is not in it gives no plan; a patron in
+several listed tiers gets the most expensive plan.
+
+**Finding a tier id:** have someone join the tier (or press **Send test** on the webhook page), then look in LicenseX
+**Audit log** for `patreon.event`: it ends in `tiers=<id>`.
+
 ## 5. Test it
 
 1. On the Patreon webhook page, press **Send test** for `members:pledge:create`. In LicenseX **Audit log** you should see
@@ -73,7 +91,6 @@ Restart LicenseX (`sudo systemctl restart licensex`). The Billing page of every 
   time they already paid for, then drop to Free. Their existing licenses keep working; they just cannot add more than Free allows.
 - Someone with a plan that has no end date (Lifetime, or one you granted by hand without one) is never changed by Patreon.
 - One Patreon account belongs to one LicenseX account. **Disconnect** on the Billing page frees it.
-- Any paid tier counts. If you want only one tier to count, give that tier its own Patreon page or check new patrons
-  under **Customers**.
+- Without a `tiers` list, any paid tier counts (see 4b).
 - I could not test against the real Patreon (only a stand-in that answers like its documented API), so do step 5 before
   you announce it.
