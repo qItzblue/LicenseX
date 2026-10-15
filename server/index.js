@@ -14,6 +14,7 @@ import { injectFiles, listEntries, readEntry, setZipComment, readZipComment } fr
 import { wrapJar, checkWrappable, WrapError } from './wrapjar.js';
 import { registerBuyers } from './buyers.js';
 import { registerTeam } from './team.js';
+import { registerPatreon } from './patreon.js';
 import { accessFor, slotsFor } from './rbac.js';
 import { createTwoFactor, otpauthUri, subjectForEmail, PASSWORD_SUBJECT } from './twofa.js';
 
@@ -1265,10 +1266,11 @@ function handleDownload(req, res, slug, url) {
 // --- feature modules: each registers its own routes -------------------------------
 // They get the pieces of this file they need through one object, so they can live (and be tested) in their own files.
 const app = { route, db, core, HttpError, body, int, str, rateLimit, recentCount, clientIp, publicBase, sessionUser, cookies, isHttps, secure, sign, signToken, readToken, safeEq,
-  PUBLIC_URL, DATA, SESSION_SECRET, HOUSE, now, hash, normalizeKey, KEY_RE, fileConfig, CONFIG_ADMIN_EMAILS, isAdminUser, workspaceOfUser };
+  PUBLIC_URL, DATA, SESSION_SECRET, HOUSE, now, hash, normalizeKey, KEY_RE, fileConfig, CONFIG_ADMIN_EMAILS, isAdminUser, workspaceOfUser, redirect };
 registerBuyers(app);
 registerTeam(app);
 registerPlanSales(app);
+const patreon = registerPatreon(app);
 
 // --- static + dispatch -----------------------------------------------------
 const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
@@ -1298,6 +1300,7 @@ export const server = createServer(async (req, res) => {
       if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'Method not allowed');
       return handleDownload(req, res, dl[1], url);
     }
+    if (url.pathname === '/auth/patreon' || url.pathname === '/auth/patreon/callback') return await patreon.handle(req, res, url);
     if (url.pathname.startsWith('/auth/')) return await handleAuth(req, res, url);
     if (!url.pathname.startsWith('/api/')) {
       if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'Method not allowed');

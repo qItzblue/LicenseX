@@ -497,6 +497,25 @@ const untilText = w => {
   return w.plan_until ? `${how}, active until ${d}` : `${how}, no end date`;
 };
 
+// Patreon: connect once, and every monthly charge renews the plan by itself (server/patreon.js).
+const PATREON_MSG = { active: ['Patreon connected. Your plan is on.', false], linked: ['Patreon connected. Your plan switches on as soon as Patreon reports a payment.', false],
+  taken: ['That Patreon account is already connected to another LicenseX account.', true], denied: ['Patreon was not connected.', true],
+  state: ['That took too long. Try Connect Patreon again.', true], failed: ['Patreon could not be reached. Try again.', true], notconfigured: ['Patreon is not set up on this site.', true] };
+function patreonCard(p) {
+  const q = new URLSearchParams(location.search).get('patreon');
+  if (q && PATREON_MSG[q]) { toast(...PATREON_MSG[q]); history.replaceState(null, '', '/admin#billing'); }
+  if (!p?.enabled) return null;
+  const l = p.linked;
+  return h('div', { class: 'card', style: { marginBottom: '16px', maxWidth: '680px' } },
+    h('h3', { style: { marginBottom: '4px' } }, 'Pay with Patreon'),
+    l ? h('p', { class: 'muted', style: { marginTop: 0, fontSize: '14px' } }, `Connected to Patreon${l.email ? ' (' + l.email + ')' : ''}. `,
+          l.active ? `Paid up${l.next_charge ? ': it renews by itself on ' + new Date(l.next_charge * 1000).toLocaleDateString('en-GB') : ''}.` : 'No active payment right now: your plan switches on when Patreon reports one.')
+      : h('p', { class: 'muted', style: { marginTop: 0, fontSize: '14px' } }, 'Support us on Patreon, then connect it here once. Every monthly payment keeps your plan on automatically. No keys needed, and your Patreon email may differ from this one.'),
+    h('div', { class: 'row wrap', style: { gap: '8px' } },
+      h('a', { class: 'btn primary', href: '/auth/patreon' }, l ? 'Reconnect Patreon' : 'Connect Patreon'),
+      l && h('button', { class: 'btn ghost', onclick: async () => { await api('POST', '/api/billing/patreon/disconnect'); toast('Patreon disconnected'); billingPage(); } }, 'Disconnect')));
+}
+
 async function billingPage() {
   const pricing = await api('GET', '/api/public/pricing');
   const w = WS, site = pricing.site;
@@ -523,6 +542,7 @@ async function billingPage() {
       h('h3', { style: { marginBottom: '4px' } }, 'Activate a key'),
       h('p', { class: 'muted', style: { marginTop: 0, fontSize: '14px' } }, 'Bought a plan on BuiltByBit? Download the file you got there: it contains your access key. Paste it here to switch the plan on.'),
       h('div', { class: 'url-row' }, input, h('button', { class: 'btn primary', type: 'submit' }, 'Activate'))),
+    patreonCard(await api('GET', '/api/billing/patreon').catch(() => null)),
     h('h3', { style: { margin: '24px 0 10px' } }, 'Plans'),
     h('div', { class: 'plan-rows' }, pricing.plans.map(p => h('div', { class: 'card plan-row' + (p.key === w.plan.key ? ' current' : '') },
       h('div', null, h('b', null, p.name), p.highlight ? h('span', { class: 'tag', style: { marginLeft: '8px' } }, 'Popular') : null, h('div', { class: 'muted', style: { fontSize: '13px' } }, `${plugins(p.max_products)} · ${cap(p.max_licenses)} licenses`)),
