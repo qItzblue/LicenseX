@@ -11,7 +11,7 @@ import { planForResource, planSalesSecret, issuePlanKey, lookupKey, redeemKey, r
 import { providerDefs, authorizeUrl, exchangeCode, fetchProfile, parseEmails, normEmail, EMAIL_RE } from './auth.js';
 import { createCore, normalizeKey, KEY_RE, hash, now, PlanError, HOUSE } from './core.js';
 import { injectFiles, listEntries, readEntry, setZipComment, readZipComment } from './jarstamp.js';
-import { wrapJar, checkWrappable, WrapError } from './wrapjar.js';
+import { wrapJar, checkWrappable, readWrappedConfig, WrapError } from './wrapjar.js';
 import { registerBuyers } from './buyers.js';
 import { registerTeam } from './team.js';
 import { registerPatreon } from './patreon.js';
@@ -630,7 +630,7 @@ const MARK_RE = /^[0-9a-f]{16}$/;
 function jarClues(jar) {
   try { listEntries(jar); } catch { throw new HttpError(400, 'That file is not a .jar (or it is damaged).'); }
   let cfg = null;
-  try { const raw = readEntry(jar, 'licensex.json', 64 * 1024); if (raw) cfg = JSON.parse(raw.toString('utf8')); } catch { cfg = null; }
+  try { cfg = readWrappedConfig(jar, SESSION_SECRET); } catch { cfg = null; }
   const key = cfg && typeof cfg.key === 'string' ? normalizeKey(cfg.key) : '';
   let comment = ''; try { comment = readZipComment(jar).trim(); } catch {}
   const marks = [...new Set([cfg?.mark, comment].filter(m => typeof m === 'string' && MARK_RE.test(m)))];
@@ -1221,7 +1221,7 @@ route('DELETE', '/api/admin/plans/:key', async ctx => {
 // Every copy also carries a random `mark` (in licensex.json and in the zip comment) that the leak tracer looks up.
 function licensedJar(req, p, key, mark = '') {
   const jar = readFileSync(productFile(p.slug));
-  const cfg = { url: publicBase(req), key, product: p.name, mark };
+  const cfg = { url: publicBase(req), key, product: p.name, mark, secret: SESSION_SECRET };
   let out;
   try { out = wrapJar(jar, cfg).jar; }
   catch (e) {

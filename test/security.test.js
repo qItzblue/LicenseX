@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { startMock, oauthEnv, googleUser, signIn, signInRaw } from './helpers/oauth-mock.mjs';
 import { totp, verifyTotp, base32Encode, base32Decode } from '../server/twofa.js';
 import { readEntry, injectFiles, setZipComment, readZipComment, listEntries } from '../server/jarstamp.js';
+import { readWrappedConfig } from '../server/wrapjar.js';
 
 // Two-factor sign-in and the leak tracer, through the real HTTP server.
 const mock = await startMock();
@@ -16,6 +17,7 @@ process.env.LICENSEX_SIGNUPS_PER_IP_HOUR = '1000';
 process.env.TRUST_PROXY = '1';
 Object.assign(process.env, oauthEnv(mock.base));
 const { server } = await import('../server/index.js');
+const cfgOf = jar => readWrappedConfig(jar, readFileSync(join(process.env.LICENSEX_DATA, 'session.secret'), 'utf8').trim());
 let base, ipSeq = 0;
 after(() => { server.close(); mock.close(); });
 before(() => new Promise(r => server.listen(0, '127.0.0.1', () => { base = `http://127.0.0.1:${server.address().port}`; r(); })));
@@ -118,9 +120,9 @@ test('the leak tracer finds whose copy a jar is, even when the key was swapped o
   const p = (await call('POST', '/api/admin/products', { name: 'Hello' }, dan)).body;
   await fetch(`${base}/api/admin/products/${p.id}/file`, { method: 'POST', headers: { Cookie: dan, 'X-Filename': 'hello.jar' }, body: plugin });
   const leaked = await download(p, '&user=4242'), other = await download(p, '&user=777');
-  const cfg = JSON.parse(readEntry(leaked, 'licensex.json').toString());
+  const cfg = cfgOf(leaked);
   assert.match(cfg.mark, /^[0-9a-f]{16}$/); assert.equal(readZipComment(leaked), cfg.mark, 'the mark is in two places');
-  assert.notEqual(JSON.parse(readEntry(other, 'licensex.json').toString()).mark, cfg.mark, 'every download has its own mark');
+  assert.notEqual(cfgOf(other).mark, cfg.mark, 'every download has its own mark');
   assert.ok(listEntries(leaked).includes('plugin.yml'), 'the jar is still a normal jar');
 
   const r = await trace(leaked, dan);
@@ -129,12 +131,14 @@ test('the leak tracer finds whose copy a jar is, even when the key was swapped o
   assert.match(r.body.download.ip, /^203\.0\.113\./); assert.equal(r.body.download.user_agent, 'LeakerBrowser/1.0'); assert.equal(r.body.download.bbb_user, '4242');
 
   // the leaker puts somebody else's key in: the mark still says whose copy it is
-  const otherKey = JSON.parse(readEntry(other, 'licensex.json').toString()).key;
+  const otherKey = cfgOf(other).key;
   const swapped = injectFiles(leaked, [{ name: 'licensex.json', content: JSON.stringify({ ...cfg, key: otherKey, mark: undefined }) }]);
   const s = (await trace(setZipComment(swapped, cfg.mark), dan)).body;
   assert.equal(s.verdict, 'key_swapped'); assert.equal(s.license.key, cfg.key); assert.equal(s.other_license.key, otherKey);
   // the config is removed entirely: the zip comment is enough
-  const m = (await trace(setZipComment(injectFiles(leaked, [], { remove: n => n === 'licensex.json' }), cfg.mark), dan)).body;
+  const origNames = new Set(listEntries(plugin));
+  const stripCfg = n => !origNames.has(n) && !n.includes('/') && !/\.(class|ya?ml)$/.test(n);   // the masked config has a random root name
+  const m = (await trace(setZipComment(injectFiles(leaked, [], { remove: stripCfg }), cfg.mark), dan)).body;
   assert.equal(m.verdict, 'mark_only'); assert.equal(m.license.key, cfg.key);
   // marks stripped too: the key alone still finds the license
   assert.equal((await trace(setZipComment(injectFiles(leaked, [{ name: 'licensex.json', content: JSON.stringify({ ...cfg, mark: undefined }) }]), ''), dan)).body.verdict, 'key_only');

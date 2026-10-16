@@ -13,6 +13,7 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.Charset;
 import java.nio.file.Files;
+import java.util.Base64;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -24,6 +25,11 @@ import java.util.regex.Pattern;
 public final class Gate {
     /** For jars sold on BuiltByBit: BuiltByBit overwrites this text with the buyer's key at download time. */
     static final String BBB_LICENSE = "%%__BBB_LICENSE__%%";
+    /** LicenseX rewrites these at wrap time: the embedded-config resource name, and the key its bytes are masked with. */
+    private static final String CFG_NAME = "__LX_CFG__";
+    private static final String CFG_MASK = "__LX_MASK__";
+    private static final String INST_NAME = "__LX_INST__";
+    private static final String OK_NAME = "__LX_OK__";
     private static final long OFFLINE_GRACE_MS = 72L * 3600L * 1000L;
     private static final Charset UTF8 = Charset.forName("UTF-8");
 
@@ -96,10 +102,10 @@ public final class Gate {
     private static void loadConfig(JavaPlugin plugin) {
         key = "";
         baseUrl = "";
-        InputStream in = plugin.getResource("licensex.json");
+        InputStream in = plugin.getResource(CFG_NAME);
         if (in == null) return;
         try {
-            String json = new String(readAll(in), UTF8);
+            String json = unmask(readAll(in));
             baseUrl = field(json, "url").replaceAll("/+$", "");
             String embedded = field(json, "key");
             key = embedded.startsWith("LX-") ? embedded : (BBB_LICENSE.startsWith("LX-") ? BBB_LICENSE : embedded);
@@ -146,7 +152,7 @@ public final class Gate {
     /** Random id stored in the plugin folder: identifies this server instance across restarts and IP changes. */
     private static synchronized String instanceId(JavaPlugin plugin) throws IOException {
         File dir = plugin.getDataFolder();
-        File f = new File(dir, ".licensex-instance");
+        File f = new File(dir, INST_NAME);
         if (f.exists()) {
             String s = new String(Files.readAllBytes(f.toPath()), UTF8).trim();
             if (!s.isEmpty()) return s;
@@ -160,7 +166,7 @@ public final class Gate {
     private static void touch(JavaPlugin plugin) {
         try {
             plugin.getDataFolder().mkdirs();
-            Files.write(new File(plugin.getDataFolder(), ".licensex-ok").toPath(), String.valueOf(System.currentTimeMillis()).getBytes(UTF8));
+            Files.write(new File(plugin.getDataFolder(), OK_NAME).toPath(), String.valueOf(System.currentTimeMillis()).getBytes(UTF8));
         } catch (IOException ignored) {
             // grace period just won't apply
         }
@@ -168,7 +174,7 @@ public final class Gate {
 
     private static boolean withinGrace(JavaPlugin plugin) {
         try {
-            File f = new File(plugin.getDataFolder(), ".licensex-ok");
+            File f = new File(plugin.getDataFolder(), OK_NAME);
             if (!f.exists()) return false;
             long last = Long.parseLong(new String(Files.readAllBytes(f.toPath()), UTF8).trim());
             return System.currentTimeMillis() - last < OFFLINE_GRACE_MS;
@@ -189,6 +195,25 @@ public final class Gate {
         } finally {
             in.close();
         }
+    }
+
+    /** Reverses the light masking LicenseX applies to the embedded config: base64 decode, then XOR with the mask key. */
+    private static String unmask(byte[] raw) {
+        byte[] data;
+        try {
+            data = Base64.getDecoder().decode(new String(raw, UTF8).trim());
+        } catch (RuntimeException notBase64) {
+            return new String(raw, UTF8);   // tolerate an un-masked config
+        }
+        byte[] mask;
+        try {
+            mask = Base64.getDecoder().decode(CFG_MASK);
+        } catch (RuntimeException e) {
+            mask = new byte[0];
+        }
+        if (mask.length > 0)
+            for (int i = 0; i < data.length; i++) data[i] ^= mask[i % mask.length];
+        return new String(data, UTF8);
     }
 
     private static String field(String json, String name) {

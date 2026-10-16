@@ -107,10 +107,10 @@ const settings = (await api('GET', '/api/admin/settings')).body;
 const bbbKey = await (await fetch(base + '/api/v1/builtbybit/license', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
   body: new URLSearchParams({ secret: settings.bbb_secret, user_id: '88', resource_id: '5' }) })).text();
 assert.match(bbbKey, /^LX-/);
-const gateName = listEntries(bbbBuild).find(n => /\/Gate\.class$/.test(n));
+const gateName = listEntries(bbbBuild).find(n => n.endsWith('.class') && readEntry(bbbBuild, n).includes('%%__BBB_LICENSE__%%'));
 const gate = readEntry(bbbBuild, gateName);
 assert.ok(gate.includes('%%__BBB_LICENSE__%%'), 'the BuiltByBit build must contain the placeholder text');
-assert.equal(JSON.parse(readEntry(bbbBuild, 'licensex.json')).key, '', 'no key baked in');
+assert.ok(!listEntries(bbbBuild).includes('licensex.json'), 'config is not a plaintext licensex.json');
 const delivered = injectFiles(bbbBuild, [{ name: gateName, content: mapUtf8(gate, s => s === '%%__BBB_LICENSE__%%' ? bbbKey : s) }]);
 writeFileSync(join(runDir, 'plugins/Hello.jar'), delivered);
 s = start();

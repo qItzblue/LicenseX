@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { startMock, oauthEnv, googleUser, signIn } from './helpers/oauth-mock.mjs';
 import { readEntry } from '../server/jarstamp.js';
+import { readWrappedConfig } from '../server/wrapjar.js';
 
 // Regression tests for what the security review of the roles system found: a limited member must not be able to read
 // other products' licenses by renaming their product, adopt unlinked licenses, or see more than their permissions allow.
@@ -18,6 +19,7 @@ process.env.LICENSEX_MINT_PER_HOUR = '500';
 process.env.TRUST_PROXY = '1';
 Object.assign(process.env, oauthEnv(mock.base));
 const { server } = await import('../server/index.js');
+const cfgOf = jar => readWrappedConfig(jar, readFileSync(join(process.env.LICENSEX_DATA, 'session.secret'), 'utf8').trim());
 let base, boss, alice, aliceWs, prodA, prodB, dev, mon, catalog, plain;
 const people = {};
 after(() => { server.close(); mock.close(); });
@@ -30,7 +32,7 @@ let ipSeq = 0;
 const download = async (p, query = '') => {
   const r = await fetch(`${base}/download/${p.slug}?token=${p.token}${query}`, { headers: { 'X-Forwarded-For': `10.9.${Math.floor(++ipSeq / 200)}.${ipSeq % 200}` } });
   if (r.status !== 200) return { status: r.status };
-  return { status: 200, key: JSON.parse(readEntry(Buffer.from(await r.arrayBuffer()), 'licensex.json').toString()).key };
+  return { status: 200, key: cfgOf(Buffer.from(await r.arrayBuffer())).key };
 };
 async function product(cookie, name) {
   const p = (await call('POST', '/api/admin/products', { name }, cookie)).body;

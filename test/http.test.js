@@ -1,12 +1,14 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { readWrappedConfig } from '../server/wrapjar.js';
 
 process.env.LICENSEX_DATA = mkdtempSync(join(tmpdir(), 'lx-'));
 process.env.LICENSEX_ADMIN_PASSWORD = 'secret-pw';
 const { server } = await import('../server/index.js');
+const cfgOf = jar => readWrappedConfig(jar, readFileSync(join(process.env.LICENSEX_DATA, 'session.secret'), 'utf8').trim());
 let base;
 before(() => new Promise(r => server.listen(0, '127.0.0.1', () => { base = `http://127.0.0.1:${server.address().port}`; r(); })));
 after(() => server.close());
@@ -72,8 +74,9 @@ test('products: upload a jar, download stamps a license per download nonce', asy
   const d1 = await dl(`token=${token}&nonce=buyer-1&user=bob`);
   assert.equal(d1.status, 200);
   assert.equal(d1.type, 'application/java-archive');
-  assert.ok(listEntries(d1.buf).includes('licensex.json'));
-  assert.ok(listEntries(d1.buf).some(n => /^dev\/licensex\/w[0-9a-f]{8}\/Wrapper\.class$/.test(n)), 'plugin is wrapped, not just stamped');
+  assert.ok(!listEntries(d1.buf).includes('licensex.json'), 'config is masked, not a plaintext file');
+  assert.ok(listEntries(d1.buf).includes('META-INF/.sealed'), 'plugin is wrapped, not just stamped');
+  assert.match(cfgOf(d1.buf).key, /^LX-/, 'a license key is embedded in the wrapped config');
 
   const countFor = async () => (await call('GET', '/api/admin/licenses', null, cookie)).body.filter(l => l.product === 'My Plugin').length;
   await dl(`token=${token}&nonce=buyer-1&user=bob`); // same buyer, same download -> no new license

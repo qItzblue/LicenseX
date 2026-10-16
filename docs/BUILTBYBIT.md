@@ -73,7 +73,11 @@ Admin -> **Products** -> drop your finished plugin `.jar` as it is. You do **not
 
 LicenseX reads the jar and shows one of:
 
-- **Auto-integrated**: it wraps your main class with a license check (details below). Good to go.
+- **Auto-integrated**: it wraps your main class with a license check. Good to go. The injected classes, the embedded
+  settings and the runtime files are given random, non-obvious names per plugin, and the embedded settings (server
+  address, key, product) are masked rather than stored as plain text, so a wrapped jar is much harder to find and strip
+  by hand. (This raises the effort to defeat it; nothing client-side is unbreakable by a determined attacker with the
+  source — the real protection is that every copy is license-keyed and traceable.)
 - **Already integrated**: your plugin contains the LicenseX client itself (like `plugin/` in this repo), so it is used as is.
 - **Cannot be integrated**: the reason is shown (for example your main class is `final`, or you use `paper-plugin.yml`).
   Downloads are blocked until you fix it, because LicenseX will never hand out a jar that doesn't enforce the license.

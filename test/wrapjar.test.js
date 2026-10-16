@@ -9,22 +9,43 @@ const hello = readFileSync(new URL('./fixtures/hello/hello-plugin.jar', import.m
 const cfg = { url: 'https://lic.example', key: 'LX-AAAA-BBBB-CCCC-DDDD', product: 'Hello' };
 const fails = (jar, code) => assert.throws(() => wrapJar(jar, cfg), e => e instanceof WrapError && e.code === code, code);
 
+// The wrapper class is the injected one that extends the original main class.
+const wrapperEntry = (jar, pkgSlash) => listEntries(jar).find(n => {
+  if (!n.startsWith(pkgSlash + '/') || n.includes('$') || !n.endsWith('.class')) return false;
+  try { return readClass(readEntry(jar, n)).superName === 'com/acme/hello/HelloPlugin'; } catch { return false; }
+});
+
 test('wraps a plain plugin: new main class extends the original, original untouched', () => {
   const { jar, main, package: pkg } = wrapJar(hello, cfg);
   assert.equal(main, 'com.acme.hello.HelloPlugin');
-  assert.match(pkg, /^dev\.licensex\.w[0-9a-f]{8}$/);
+  assert.match(pkg, /^[a-z][a-z0-9]{5}\.[a-z][a-z0-9]{5}$/);        // random, not "licensex"
+  assert.ok(!pkg.includes('licensex'));
   const names = listEntries(jar);
   for (const n of ['com/acme/hello/HelloPlugin.class', 'config.yml']) assert.ok(names.includes(n), n);
   assert.deepEqual(readEntry(jar, 'com/acme/hello/HelloPlugin.class'), readEntry(hello, 'com/acme/hello/HelloPlugin.class'));
   assert.ok(!names.some(n => n.endsWith('/Stub.class')), 'the placeholder superclass is not shipped');
+  assert.ok(!names.some(n => /licensex/i.test(n)), 'nothing in the jar is named after licensex');
+  assert.ok(!names.includes('licensex.json'), 'no plaintext config file');
 
+  const wn = wrapperEntry(jar, pkg.replace(/\./g, '/'));
+  assert.ok(wn, 'a wrapper class that extends the real main is present');
+  const wrapperClass = wn.slice(wn.lastIndexOf('/') + 1, -'.class'.length);
   const yml = readEntry(jar, 'plugin.yml').toString();
-  assert.match(yml, new RegExp(`^main: ${pkg.replace(/\./g, '\\.')}\\.Wrapper$`, 'm'));
+  assert.match(yml, new RegExp(`^main: ${pkg.replace(/\./g, '\\.')}\\.${wrapperClass}$`, 'm'));
   assert.match(yml, /^name: HelloPlugin$/m);                       // everything else preserved
-  const w = readClass(readEntry(jar, pkg.replace(/\./g, '/') + '/Wrapper.class'));
-  assert.equal(w.superName, 'com/acme/hello/HelloPlugin');         // Wrapper extends the real main class
+  const w = readClass(readEntry(jar, wn));
+  assert.equal(w.superName, 'com/acme/hello/HelloPlugin');         // wrapper extends the real main class
   assert.equal(w.major, 52);                                       // Java 8 bytecode: loads on any server JVM
-  assert.deepEqual(JSON.parse(readEntry(jar, 'licensex.json')), { ...cfg, main, wrapped: 1 });
+  assert.ok(names.includes('META-INF/.sealed'), 'double-wrap marker present');
+});
+
+test('the embedded config is masked, not plaintext: url and key are not greppable', () => {
+  const { jar } = wrapJar(hello, cfg);
+  for (const n of listEntries(jar)) {
+    const b = readEntry(jar, n);
+    assert.ok(!b.includes('LX-AAAA-BBBB-CCCC-DDDD'), `${n} leaks the key`);
+    assert.ok(!b.includes('lic.example'), `${n} leaks the url`);
+  }
 });
 
 test('no leftover references to the template package, and the class files parse', () => {
@@ -77,7 +98,7 @@ test('signature files are removed (a modified signed jar would not load)', () =>
 
 test('BuiltByBit build keeps the placeholder in Gate, and a rewritten class still loads', () => {
   const { jar, package: pkg } = wrapJar(hello, { ...cfg, key: '' });
-  const gateName = pkg.replace(/\./g, '/') + '/Gate.class';
+  const gateName = listEntries(jar).find(n => n.startsWith(pkg.replace(/\./g, '/') + '/') && readEntry(jar, n).includes('%%__BBB_LICENSE__%%'));
   const gate = readEntry(jar, gateName);
   assert.ok(gate.includes('%%__BBB_LICENSE__%%'));
   const key = 'LX-ZZZZ-YYYY-XXXX-WWWW';
