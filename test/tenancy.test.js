@@ -62,7 +62,7 @@ test('customers see only their own licenses, products, groups and servers; ids f
   assert.deepEqual((await call('GET', '/api/admin/licenses', null, alice)).body.map(l => l.key), [licA.key]);
   assert.deepEqual((await call('GET', '/api/admin/licenses', null, bob)).body.map(l => l.key), [licB.key]);
   assert.equal((await call('GET', '/api/admin/licenses?q=a-buyer', null, bob)).body.length, 0, 'search cannot reach across');
-  assert.equal((await call('GET', '/api/admin/products', null, bob)).body.length, 0);
+  assert.equal((await call('GET', '/api/admin/products', null, bob)).body.filter(p => !p.prototype).length, 0);
 
   // every by-id route refuses another workspace's ids
   for (const [m, path, body] of [
@@ -259,4 +259,17 @@ test('public pages leak no workspace internals', async () => {
   const pricing = (await call('GET', '/api/public/pricing')).body;
   assert.ok(pricing.plans.length >= 3 && pricing.plans.every(p => !('active' in p) && !('stripe_price_id' in p)));
   assert.ok(pricing.plans.every(p => 'buy_url' in p), 'every plan carries its BuiltByBit buy link (empty until set)');
+});
+
+test('every account gets the free XHello prototype: it works, does not count toward the plan, and cannot be swapped or deleted', async () => {
+  const carol = await signIn(base, mock, googleUser('dana@prototype.test'));
+  assert.equal((await call('POST', '/api/workspace/ensure', null, carol)).status, 201);
+  const list = (await call('GET', '/api/admin/products', null, carol)).body;
+  const proto = list.find(p => p.prototype);
+  assert.ok(proto && proto.has_file && proto.integration.ok, 'present, with a jar that can be wrapped');
+  assert.equal(proto.filename, 'XHello-1.0.0.jar');
+  assert.equal((await call('GET', '/api/workspace', null, carol)).body.usage.products, 0, 'free: not counted');
+  assert.equal((await call('POST', '/api/admin/products', { name: 'Real one' }, carol)).status, 201, 'the Free plan\'s one plugin is still available');
+  assert.equal((await call('DELETE', `/api/admin/products/${proto.id}`, null, carol)).status, 400);
+  assert.equal((await fetch(`${base}/download/${proto.slug}?token=${proto.token}`)).status, 200, 'buyers can download it');
 });

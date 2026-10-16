@@ -28,7 +28,7 @@ export function createCore(db) {
     workspace: db.prepare('SELECT * FROM workspaces WHERE id = ?'),
     plan: db.prepare('SELECT * FROM plans WHERE key = ?'),
     countLicenses: db.prepare('SELECT COUNT(*) n FROM licenses WHERE workspace_id = ?'),
-    countProducts: db.prepare('SELECT COUNT(*) n FROM products WHERE workspace_id = ?'),
+    countProducts: db.prepare('SELECT COUNT(*) n FROM products WHERE workspace_id = ? AND prototype = 0'),   // the included prototype is free
     setting: db.prepare('SELECT value FROM settings WHERE key = ?'),
     putSetting: db.prepare('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value'),
     licenseByKey: db.prepare('SELECT * FROM licenses WHERE key = ?'),

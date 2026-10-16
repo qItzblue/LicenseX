@@ -323,6 +323,7 @@ function productCard(p) {
         (() => { const blocked = p.integration && !p.integration.ok && !p.integration.integrated;
           return h('span', { class: 'chip ' + (p.enabled && p.has_file && !blocked ? 'active' : 'disabled') }, !p.enabled ? 'Disabled' : !p.has_file ? 'No file' : blocked ? 'Blocked' : 'Live'); })(),
         p.group_id && groupTag(p.group_id))),
+    p.prototype && h('div', { class: 'integ ok' }, h('b', null, 'Free prototype from XdevStudios'), h('span', null, 'Included with every account and does not count toward your plan. Commands: /xhello [player], /xflip, /xroll [sides], /xtime.')),
     integrationNote(p),
     h('div', { class: 'row wrap', style: { gap: '18px', margin: '14px 0', color: 'var(--muted)', fontSize: '13px' } },
       h('span', null, h('b', { style: { color: 'var(--text)', fontSize: '18px' } }, p.downloads), ' downloads'),
@@ -334,11 +335,11 @@ function productCard(p) {
     h('div', { class: 'row wrap', style: { marginTop: '14px', gap: '8px' } },
       h('a', { class: 'btn sm primary', href: p.download_url, target: '_blank' }, '⬇ Test download'),
       can('products.edit') && p.has_file && p.integration && (p.integration.ok || p.integration.integrated) && h('a', { class: 'btn sm', href: wsq(`/api/admin/products/${p.id}/bbb-build`), title: 'The jar to upload to BuiltByBit. BuiltByBit fills in each buyer\'s key.' }, '⬇ BuiltByBit build'),
-      can('products.edit') && h('button', { class: 'btn sm', onclick: () => replaceInput.click() }, p.has_file ? 'Replace file' : 'Upload file'), replaceInput,
+      can('products.edit') && !p.prototype && h('button', { class: 'btn sm', onclick: () => replaceInput.click() }, p.has_file ? 'Replace file' : 'Upload file'), replaceInput,
       can('products.edit') && h('button', { class: 'btn sm', onclick: () => productEdit(p) }, 'Edit'),
       can('products.edit') && h('button', { class: 'btn sm', onclick: patch({ enabled: !p.enabled }, p.enabled ? 'Disabled' : 'Enabled') }, p.enabled ? 'Disable' : 'Enable'),
       can('products.edit') && h('button', { class: 'btn sm', onclick: async () => { if (await confirmDialog('Regenerate download token?', 'The old BuiltByBit URL stops working immediately. Update your resource with the new URL.', 'Regenerate', false)) patch({ regenerate_token: true }, 'New token generated')(); } }, 'New token'),
-      can('products.delete') && h('button', { class: 'btn sm danger', onclick: async () => { if (await confirmDialog('Delete product?', `"${p.name}" and its uploaded file are removed. Issued licenses are not affected.`, 'Delete')) { await api('DELETE', `/api/admin/products/${p.id}`); toast('Deleted'); refresh(); } } }, 'Delete')));
+      can('products.delete') && !p.prototype && h('button', { class: 'btn sm danger', onclick: async () => { if (await confirmDialog('Delete product?', `"${p.name}" and its uploaded file are removed. Issued licenses are not affected.`, 'Delete')) { await api('DELETE', `/api/admin/products/${p.id}`); toast('Deleted'); refresh(); } } }, 'Delete')));
 }
 
 function integrationNote(p) {
@@ -450,7 +451,7 @@ function jobCard(j, products, refresh) {
     // Where the jar goes once it is built: a new product (default), an existing one, or nowhere.
     const dest = h('select', { style: { width: 'auto' }, 'aria-label': 'When built' },
       can('products.create') && h('option', { value: 'new' }, 'Then add it as a new product'),
-      products.map(p => h('option', { value: p.id }, `Then replace the file of "${p.name}"`)),
+      products.filter(p => !p.prototype).map(p => h('option', { value: p.id }, `Then replace the file of "${p.name}"`)),
       h('option', { value: 'none' }, 'Just build the jar'));
     const pre = j.auto?.productId || products.find(p => p.name.toLowerCase() === (r.plugin?.name || '').toLowerCase())?.id;
     if (pre) dest.value = String(pre);
@@ -461,7 +462,7 @@ function jobCard(j, products, refresh) {
   }
   if (j.status === 'building') actions.append(h('span', { class: 'muted' }, 'Building… the first build downloads dependencies and can take a few minutes.' + (j.auto ? ` When it is done it goes into ${j.auto.productId ? 'your product' : `a new product "${j.auto.name}"`} automatically.` : '')));
   if (j.status === 'done' && j.jar) {
-    const sel = h('select', { style: { width: 'auto' } }, h('option', { value: '' }, 'New product…'), products.map(p => h('option', { value: p.id }, `Replace the file of "${p.name}"`)));
+    const sel = h('select', { style: { width: 'auto' } }, h('option', { value: '' }, 'New product…'), products.filter(p => !p.prototype).map(p => h('option', { value: p.id }, `Replace the file of "${p.name}"`)));
     const nameIn = h('input', { placeholder: 'Product name', value: r.plugin?.name || '', style: { width: '170px' } });
     sel.addEventListener('change', () => { nameIn.hidden = !!sel.value; });
     if (j.auto?.done) card.append(h('div', { class: 'integ ok' }, h('b', null, `Added to Products as "${j.auto.done}"`), h('span', null, 'Open the Products page to get its download link.')));

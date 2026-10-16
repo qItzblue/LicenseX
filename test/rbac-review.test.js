@@ -111,7 +111,7 @@ test('a team member gets no workspace-wide totals or billing details from /api/w
 });
 
 test('lists only show counts and product names to roles that may see them', async () => {
-  const prods = (await call('GET', '/api/admin/products', null, catalog)).body;
+  const prods = (await call('GET', '/api/admin/products', null, catalog)).body.filter(p => !p.prototype);   // every account also has the free prototype
   assert.ok(prods.length === 2 && prods.every(p => p.licenses === null), 'a catalogue-only role gets no license counts');
   assert.equal((await call('GET', '/api/admin/products/options', null, plain)).status, 403, 'seeing licenses does not list every product (their names are on the licenses they can see)');
   assert.equal((await call('GET', '/api/admin/products/options', null, catalog)).status, 200, 'seeing products does');

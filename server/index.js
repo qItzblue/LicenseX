@@ -739,7 +739,26 @@ const productRow = (req, p) => {
   return { ...rest, download_url: downloadUrlFor(req, p),
     integration: !p.has_file ? null : { ok: !!wrap_ok, integrated: wrap_code === 'ALREADY_INTEGRATED', code: wrap_code, message: wrap_message, main: main_class } };
 };
+// --- the prototype ------------------------------------------------------------------
+// Every account gets one small ready-made plugin (XHello, source in prototype/xhello) as a product of its own. It works
+// like any product (licenses, downloads, BuiltByBit) but does not count toward the plan, and its file cannot be swapped.
+const PROTOTYPE_JAR = join(ROOT, 'server', 'prototype', 'XHello.jar'), PROTOTYPE_FILE = 'XHello-1.0.0.jar';
+function notPrototype(p, why = 'Its file is provided by us and cannot be replaced.') {
+  if (p.prototype) throw new HttpError(400, `"${p.name}" is the free prototype. ${why}`);
+  return p;
+}
+function ensurePrototype(wsId) {
+  if (!existsSync(PROTOTYPE_JAR)) return;
+  let p = db.prepare('SELECT * FROM products WHERE workspace_id = ? AND prototype = 1').get(wsId);
+  if (!p) {
+    const r = db.prepare('INSERT INTO products(workspace_id,slug,name,token,prototype,created_at) VALUES(?,?,?,?,1,?)').run(wsId, uniqueSlug('xhello'), 'XHello (prototype)', randomBytes(12).toString('base64url'), now());
+    p = db.prepare('SELECT * FROM products WHERE id=?').get(r.lastInsertRowid);
+  }
+  // new accounts, and existing ones whenever we ship a new version of the prototype
+  if (p.filename !== PROTOTYPE_FILE || !existsSync(productFile(p.slug))) setProductFile({ wsId, admin: { email: 'system' } }, p, readFileSync(PROTOTYPE_JAR), PROTOTYPE_FILE);
+}
 route('GET', '/api/admin/products', async ctx => {
+  ensurePrototype(ctx.wsId);
   const [sw, sa] = scopeSql(ctx, 'p.id');
   const rows = db.prepare(`SELECT p.*, (SELECT COUNT(*) FROM licenses l WHERE l.product_id = p.id) licenses FROM products p WHERE p.workspace_id=? AND ${sw} ORDER BY p.id DESC`).all(ctx.wsId, ...sa);
   return [200, rows.map(p => productRow(ctx.req, can(ctx, 'licenses.view') ? p : { ...p, licenses: null }))];
@@ -775,7 +794,7 @@ function setProductFile(ctx, p, buf, filename) {
 // Raw binary upload (the plugin jar). Streamed to a temp file and only swapped in once it checks out, so a bad
 // upload can never replace (or delete) the jar that buyers are currently downloading.
 route('POST', '/api/admin/products/:id/file', async ctx => {
-  const p = ownProduct(ctx, ctx.params.id);
+  const p = notPrototype(ownProduct(ctx, ctx.params.id));
   const filename = str(ctx.req.headers['x-filename'] || 'plugin.jar', 80);
   const tmp = join(DATA, '.product-upload-' + randomBytes(4).toString('hex'));
   try {
@@ -814,7 +833,7 @@ route('PATCH', '/api/admin/products/:id', async ctx => {
   return [200, productRow(ctx.req, db.prepare('SELECT * FROM products WHERE id=?').get(p.id))];
 }, { perm: 'products.edit' });
 route('DELETE', '/api/admin/products/:id', async ctx => {
-  const p = ownProduct(ctx, ctx.params.id);
+  const p = notPrototype(ownProduct(ctx, ctx.params.id), 'It is included with every account. Use Disable to switch it off.');
   rmSync(productFile(p.slug), { force: true });
   db.prepare('UPDATE licenses SET product_id = NULL WHERE product_id = ?').run(p.id); // keep the licenses, just unlinked
   db.prepare('DELETE FROM products WHERE id=?').run(p.id);
@@ -832,7 +851,7 @@ const canBuild = admin => admin?.role === 'platform' || CUSTOMER_BUILDS;
 // Puts a jar into a product: the chosen existing product, or a new one with that name. Returns the product.
 function jarToProduct(ctx, target, buf, filename) {
   let p;
-  if (target.productId) p = ownProduct(ctx, target.productId);
+  if (target.productId) p = notPrototype(ownProduct(ctx, target.productId));
   else {
     withinPlan(() => core.assertWithin(ctx.wsId, 'products'));
     const slug = uniqueSlug(target.name);
@@ -845,7 +864,7 @@ function jarToProduct(ctx, target, buf, filename) {
 }
 // Which product a request asks for: { productId } or { name }. Checked against the caller's rights.
 function buildTarget(ctx, b, fallbackName) {
-  if (b.productId) return { productId: ownProduct(ctx, int(b.productId, { min: 1 })).id };
+  if (b.productId) return { productId: notPrototype(ownProduct(ctx, int(b.productId, { min: 1 }))).id };
   if (!ctx.access.perms.has('products.create')) throw new HttpError(403, 'You may not create products. Pick an existing product.');
   const name = str(b.name || fallbackName || '', 60).trim();
   if (!name) throw new HttpError(400, 'Give the new product a name, or pick an existing product.');
@@ -1066,6 +1085,7 @@ const createWorkspaceFor = (u, { force = false } = {}) => {
   const r = db.prepare('INSERT INTO workspaces (name, owner_email, owner_name, bbb_secret, created_at) VALUES (?,?,?,?,?)')
     .run(str(u.name, 60) || u.email.split('@')[0], u.email, str(u.name, 80), newSecret(), now());
   core.log('user', 'workspace.create', u.email, u.p, Number(r.lastInsertRowid));
+  ensurePrototype(Number(r.lastInsertRowid));
   return db.prepare('SELECT * FROM workspaces WHERE id=?').get(r.lastInsertRowid);
 };
 route('POST', '/api/workspace/ensure', async ctx => {
@@ -1271,6 +1291,7 @@ registerBuyers(app);
 registerTeam(app);
 registerPlanSales(app);
 const patreon = registerPatreon(app);
+for (const { id } of db.prepare('SELECT id FROM workspaces').all()) { try { ensurePrototype(id); } catch (e) { console.error(`[LicenseX] prototype for workspace ${id}: ${e.message}`); } }
 
 // --- static + dispatch -----------------------------------------------------
 const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };

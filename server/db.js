@@ -232,7 +232,8 @@ export const SEED_PLANS = [
 export function migrate(db) {
   // products: integration columns (added in v0.3)
   for (const [name, def] of [['wrap_ok', 'INTEGER NOT NULL DEFAULT 0'], ['wrap_code', "TEXT NOT NULL DEFAULT ''"],
-                             ['wrap_message', "TEXT NOT NULL DEFAULT ''"], ['main_class', "TEXT NOT NULL DEFAULT ''"]])
+                             ['wrap_message', "TEXT NOT NULL DEFAULT ''"], ['main_class', "TEXT NOT NULL DEFAULT ''"],
+                             ['prototype', 'INTEGER NOT NULL DEFAULT 0']])
     if (!hasCol(db, 'products', name)) db.exec(`ALTER TABLE products ADD COLUMN ${name} ${def}`);
 
   // workspaces (v0.6): everything that already exists belongs to the owner's workspace 1
