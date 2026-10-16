@@ -185,3 +185,21 @@ test('backup and restore round-trips licenses, groups, settings and plugin files
   const dl = await fetch(base + `/download/backed-up?token=${prod.token}&user=5`);
   assert.equal(dl.status, 200, 'restored plugin can be downloaded');
 });
+
+
+test('server-computed feature: only a valid license gets a result, and the text comes from the server', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { cookie } = await call('POST', '/api/admin/login', { password: 'secret-pw' });
+  const plugin = readFileSync(new URL('./fixtures/hello/hello-plugin.jar', import.meta.url));
+  const p = (await call('POST', '/api/admin/products', { name: 'Feat' }, cookie)).body;
+  await fetch(base + `/api/admin/products/${p.id}/file`, { method: 'POST', headers: { Cookie: cookie, 'X-Filename': 'x.jar' }, body: plugin });
+  const jar = Buffer.from(await (await fetch(`${base}/download/feat?token=${p.token}&user=9`)).arrayBuffer());
+  const key = cfgOf(jar).key;
+  const feat = (k, params) => fetch(base + '/api/v1/feature', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key: k, instanceId: 'i1', feature: 'roll', params }) }).then(async r => ({ status: r.status, body: await r.json() }));
+  const ok = await feat(key, '20');
+  assert.equal(ok.status, 200);
+  assert.ok(ok.body.ok && ok.body.value >= 1 && ok.body.value <= 20, JSON.stringify(ok.body));
+  assert.match(ok.body.text, /computed on XdevStudios/);
+  assert.equal((await feat('LX-ZZZZ-ZZZZ-ZZZZ-ZZZZ', '6')).status, 403);
+});

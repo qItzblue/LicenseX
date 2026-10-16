@@ -100,6 +100,25 @@ public final class LicenseClient {
         }
     }
 
+    /** Result of a server-computed feature: ok plus the server's text (empty when the server declined or was unreachable). */
+    public record Feature(boolean ok, String text) {}
+
+    /**
+     * Asks the server to compute a feature. The plugin has NO local version of this, so if the license is invalid, or
+     * the call is stripped out, there is simply no result to show. This is the part a "disable the guards" crack
+     * cannot recreate, because it was never in the jar.
+     */
+    public Feature feature(String key, String name, String params) {
+        try {
+            Resp r = post("/api/v1/feature", "{\"key\":" + q(key) + ",\"instanceId\":" + q(instanceId())
+                    + ",\"feature\":" + q(name) + ",\"params\":" + q(params == null ? "" : params) + "}");
+            boolean ok = r.body.matches("(?s).*\"ok\"\\s*:\\s*true.*");
+            return new Feature(ok, field(r.body, "text"));
+        } catch (IOException | RuntimeException e) {
+            return new Feature(false, "");
+        }
+    }
+
     // --- internals ---------------------------------------------------------------
     private record Resp(int status, String body) {}
 

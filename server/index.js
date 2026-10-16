@@ -245,6 +245,25 @@ route('POST', '/api/v1/validate', async ctx => {
   return [r.ok ? 200 : 403, r];
 });
 
+// Server-computed feature: the plugin asks the server to produce a result it does NOT have locally. A stripped copy
+// (license check removed) has no fallback, so the feature simply cannot run. This is the one protection that a
+// "set the guards to false" crack cannot defeat, because the behaviour was never shipped in the jar. Demo: /xroll.
+route('POST', '/api/v1/feature', async ctx => {
+  if (!rateLimit('feat:' + ctx.ip, 600, 60e3)) throw new HttpError(429, 'Too many requests');
+  const b = await body(ctx.req);
+  const lic = core.q.licenseByKey.get(normalizeKey(b.key || ''));
+  if (!lic || core.licenseState(lic) !== 'active') return [403, { ok: false, message: 'License is not valid.' }];
+  const feature = str(b.feature, 40);
+  if (feature === 'roll') {
+    let sides = int(b.params, { min: 2, max: 1000, nullable: true }) ?? 6;
+    const value = 1 + Math.floor(Math.random() * sides);
+    // The displayed text is composed on the server, so it is not present in the jar to copy.
+    const flavour = value === sides ? ' A perfect roll!' : value === 1 ? ' Ouch.' : '';
+    return [200, { ok: true, value, sides, text: `You rolled ${value} (d${sides}).${flavour} — computed on XdevStudios' server.` }];
+  }
+  return [400, { ok: false, message: 'Unknown feature.' }];
+});
+
 // BuiltByBit "External license key" placeholder --------------------------------
 // BuiltByBit POSTs {user_id, resource_id, version_id, secret, ...} (form-encoded) every time a buyer downloads
 // and writes the plain-text response over %%__BBB_LICENSE__%% inside the file. user_id is the buyer, so the same
@@ -742,7 +761,7 @@ const productRow = (req, p) => {
 // --- the prototype ------------------------------------------------------------------
 // Every account gets one small ready-made plugin (XHello, source in prototype/xhello) as a product of its own. It works
 // like any product (licenses, downloads, BuiltByBit) but does not count toward the plan, and its file cannot be swapped.
-const PROTOTYPE_JAR = join(ROOT, 'server', 'prototype', 'XHello.jar'), PROTOTYPE_FILE = 'XHello-1.2.0.jar';
+const PROTOTYPE_JAR = join(ROOT, 'server', 'prototype', 'XHello.jar'), PROTOTYPE_FILE = 'XHello-1.3.0.jar';
 function notPrototype(p, why = 'Its file is provided by us and cannot be replaced.') {
   if (p.prototype) throw new HttpError(400, `"${p.name}" is the free prototype. ${why}`);
   return p;

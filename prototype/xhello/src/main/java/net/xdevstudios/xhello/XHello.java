@@ -111,13 +111,16 @@ public final class XHello extends JavaPlugin {
             }
             case "xroll" -> {
                 if (!guard.gate(this, 2)) return true;
-                int sides = 6;
-                if (args.length > 0) {
-                    try { sides = Integer.parseInt(args[0]); } catch (NumberFormatException e) { sides = 0; }
-                    if (sides < 2 || sides > 1000) { sender.sendMessage(TAG + ChatColor.GRAY + "Pick a number of sides between 2 and 1000."); return true; }
-                }
-                int roll = ThreadLocalRandom.current().nextInt(1, sides + 1);
-                sender.sendMessage(TAG + "You rolled " + ChatColor.GOLD + roll + ChatColor.RESET + " (d" + sides + ").");
+                // SERVER-COMPUTED: the roll's result and text come from XdevStudios' server. There is no local roll in
+                // this jar, so a cracked copy (license stripped) has nothing to fall back on — the command just fails.
+                final String params = args.length > 0 ? args[0] : "";
+                Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
+                    LicenseClient.Feature f = client.feature(key, "roll", params);
+                    Bukkit.getScheduler().runTask(this, () -> {
+                        if (f.ok() && !f.text().isEmpty()) sender.sendMessage(TAG + ChatColor.GOLD + f.text());
+                        else sender.sendMessage(TAG + ChatColor.GRAY + "The dice are unavailable right now (the server did not answer).");
+                    });
+                });
                 return true;
             }
             case "xtime" -> {
