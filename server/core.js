@@ -19,7 +19,7 @@ export class PlanError extends Error {
 }
 export const HOUSE = 1;                 // the owner's own workspace: never limited by a plan
 const GRACE = 3 * 86400;                // slack after a paid period ends, so a late renewal webhook doesn't cut anyone off
-const WS_KEYS = new Set(['default_limit', 'claims_enabled', 'public_removal', 'heartbeat_minutes', 'bbb_group_id']);
+const WS_KEYS = new Set(['default_limit', 'claims_enabled', 'public_removal', 'heartbeat_minutes', 'grace_minutes', 'bbb_group_id']);
 
 export function createCore(db) {
   const q = {
@@ -28,7 +28,7 @@ export function createCore(db) {
     workspace: db.prepare('SELECT * FROM workspaces WHERE id = ?'),
     plan: db.prepare('SELECT * FROM plans WHERE key = ?'),
     countLicenses: db.prepare('SELECT COUNT(*) n FROM licenses WHERE workspace_id = ?'),
-    countProducts: db.prepare('SELECT COUNT(*) n FROM products WHERE workspace_id = ?'),
+    countProducts: db.prepare('SELECT COUNT(*) n FROM products WHERE workspace_id = ? AND prototype = 0'),   // the included prototype is free
     setting: db.prepare('SELECT value FROM settings WHERE key = ?'),
     putSetting: db.prepare('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value'),
     licenseByKey: db.prepare('SELECT * FROM licenses WHERE key = ?'),
@@ -40,7 +40,7 @@ export function createCore(db) {
     audit: db.prepare('INSERT INTO audit(workspace_id,at,actor,action,target,detail) VALUES(?,?,?,?,?,?)'),
   };
 
-  const defaults = { default_limit: '1', claims_enabled: '1', public_removal: '1', heartbeat_minutes: '1',
+  const defaults = { default_limit: '1', claims_enabled: '1', public_removal: '1', heartbeat_minutes: '1', grace_minutes: '1440',
     admin_emails: '', site_name: 'LicenseX', site_tagline: '', discord_url: '', store_url: '', website_url: '', support_email: '', bbb_group_id: '' };
   // Settings that shape a customer's licenses (limits, heartbeat, ...) are per workspace; branding and admin lists are global.
   const getSetting = (k, ws = HOUSE) => (WS_KEYS.has(k) ? q.wsSetting.get(ws, k) : q.setting.get(k))?.value ?? defaults[k];
@@ -168,7 +168,7 @@ export function createCore(db) {
     if (state === 'expired') return { ok: false, code: 'LICENSE_EXPIRED', message: 'This license has expired.' };
 
     const limit = effectiveLimit(lic);
-    const base = { heartbeat_minutes: Number(getSetting('heartbeat_minutes', lic.workspace_id)) };
+    const base = { heartbeat_minutes: Number(getSetting('heartbeat_minutes', lic.workspace_id)), grace_minutes: Number(getSetting('grace_minutes', lic.workspace_id)) };
     let srv = q.server.get(lic.id, instanceId);
     if (srv?.status === 'removed') {
       db.prepare('DELETE FROM servers WHERE id = ?').run(srv.id); // acknowledged; next start registers fresh

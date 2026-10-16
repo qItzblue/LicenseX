@@ -11,9 +11,10 @@ import { planForResource, planSalesSecret, issuePlanKey, lookupKey, redeemKey, r
 import { providerDefs, authorizeUrl, exchangeCode, fetchProfile, parseEmails, normEmail, EMAIL_RE } from './auth.js';
 import { createCore, normalizeKey, KEY_RE, hash, now, PlanError, HOUSE } from './core.js';
 import { injectFiles, listEntries, readEntry, setZipComment, readZipComment } from './jarstamp.js';
-import { wrapJar, checkWrappable, WrapError } from './wrapjar.js';
+import { wrapJar, checkWrappable, readWrappedConfig, WrapError } from './wrapjar.js';
 import { registerBuyers } from './buyers.js';
 import { registerTeam } from './team.js';
+import { registerPatreon } from './patreon.js';
 import { accessFor, slotsFor } from './rbac.js';
 import { createTwoFactor, otpauthUri, subjectForEmail, PASSWORD_SUBJECT } from './twofa.js';
 
@@ -326,7 +327,7 @@ route('GET', '/api/admin/me', async ctx => {
   return [200, { ok: true, via: ctx.admin.via, role: ctx.admin.role, name: ctx.admin.name, email: ctx.admin.email || '',
     permissions: [...ctx.access.perms], limited: !!sc, products: sc ? [...sc] : null,
     member_role: ctx.admin.member?.role_name || (ctx.access.owner ? 'Owner' : ''),
-    workspaces: ctx.admin.workspaces || null,
+    workspaces: ctx.admin.workspaces || null, can_build: canBuild(ctx.admin),
     workspace: { id: w.id, name: w.name, house: w.id === HOUSE, suspended: !!w.suspended, plan: ctx.admin.role === 'member' ? null : (({ key, name, max_products, max_licenses, interval, price_cents, currency }) => ({ key, name, max_products, max_licenses, interval, price_cents, currency }))(core.planOf(w.id)) } }];
 }, { admin: true });
 
@@ -629,7 +630,7 @@ const MARK_RE = /^[0-9a-f]{16}$/;
 function jarClues(jar) {
   try { listEntries(jar); } catch { throw new HttpError(400, 'That file is not a .jar (or it is damaged).'); }
   let cfg = null;
-  try { const raw = readEntry(jar, 'licensex.json', 64 * 1024); if (raw) cfg = JSON.parse(raw.toString('utf8')); } catch { cfg = null; }
+  try { cfg = readWrappedConfig(jar, SESSION_SECRET); } catch { cfg = null; }
   const key = cfg && typeof cfg.key === 'string' ? normalizeKey(cfg.key) : '';
   let comment = ''; try { comment = readZipComment(jar).trim(); } catch {}
   const marks = [...new Set([cfg?.mark, comment].filter(m => typeof m === 'string' && MARK_RE.test(m)))];
@@ -738,7 +739,26 @@ const productRow = (req, p) => {
   return { ...rest, download_url: downloadUrlFor(req, p),
     integration: !p.has_file ? null : { ok: !!wrap_ok, integrated: wrap_code === 'ALREADY_INTEGRATED', code: wrap_code, message: wrap_message, main: main_class } };
 };
+// --- the prototype ------------------------------------------------------------------
+// Every account gets one small ready-made plugin (XHello, source in prototype/xhello) as a product of its own. It works
+// like any product (licenses, downloads, BuiltByBit) but does not count toward the plan, and its file cannot be swapped.
+const PROTOTYPE_JAR = join(ROOT, 'server', 'prototype', 'XHello.jar'), PROTOTYPE_FILE = 'XHello-1.2.0.jar';
+function notPrototype(p, why = 'Its file is provided by us and cannot be replaced.') {
+  if (p.prototype) throw new HttpError(400, `"${p.name}" is the free prototype. ${why}`);
+  return p;
+}
+function ensurePrototype(wsId) {
+  if (!existsSync(PROTOTYPE_JAR)) return;
+  let p = db.prepare('SELECT * FROM products WHERE workspace_id = ? AND prototype = 1').get(wsId);
+  if (!p) {
+    const r = db.prepare('INSERT INTO products(workspace_id,slug,name,token,prototype,created_at) VALUES(?,?,?,?,1,?)').run(wsId, uniqueSlug('xhello'), 'XHello (prototype)', randomBytes(12).toString('base64url'), now());
+    p = db.prepare('SELECT * FROM products WHERE id=?').get(r.lastInsertRowid);
+  }
+  // new accounts, and existing ones whenever we ship a new version of the prototype
+  if (p.filename !== PROTOTYPE_FILE || !existsSync(productFile(p.slug))) setProductFile({ wsId, admin: { email: 'system' } }, p, readFileSync(PROTOTYPE_JAR), PROTOTYPE_FILE);
+}
 route('GET', '/api/admin/products', async ctx => {
+  ensurePrototype(ctx.wsId);
   const [sw, sa] = scopeSql(ctx, 'p.id');
   const rows = db.prepare(`SELECT p.*, (SELECT COUNT(*) FROM licenses l WHERE l.product_id = p.id) licenses FROM products p WHERE p.workspace_id=? AND ${sw} ORDER BY p.id DESC`).all(ctx.wsId, ...sa);
   return [200, rows.map(p => productRow(ctx.req, can(ctx, 'licenses.view') ? p : { ...p, licenses: null }))];
@@ -774,7 +794,7 @@ function setProductFile(ctx, p, buf, filename) {
 // Raw binary upload (the plugin jar). Streamed to a temp file and only swapped in once it checks out, so a bad
 // upload can never replace (or delete) the jar that buyers are currently downloading.
 route('POST', '/api/admin/products/:id/file', async ctx => {
-  const p = ownProduct(ctx, ctx.params.id);
+  const p = notPrototype(ownProduct(ctx, ctx.params.id));
   const filename = str(ctx.req.headers['x-filename'] || 'plugin.jar', 80);
   const tmp = join(DATA, '.product-upload-' + randomBytes(4).toString('hex'));
   try {
@@ -813,7 +833,7 @@ route('PATCH', '/api/admin/products/:id', async ctx => {
   return [200, productRow(ctx.req, db.prepare('SELECT * FROM products WHERE id=?').get(p.id))];
 }, { perm: 'products.edit' });
 route('DELETE', '/api/admin/products/:id', async ctx => {
-  const p = ownProduct(ctx, ctx.params.id);
+  const p = notPrototype(ownProduct(ctx, ctx.params.id), 'It is included with every account. Use Disable to switch it off.');
   rmSync(productFile(p.slug), { force: true });
   db.prepare('UPDATE licenses SET product_id = NULL WHERE product_id = ?').run(p.id); // keep the licenses, just unlinked
   db.prepare('DELETE FROM products WHERE id=?').run(p.id);
@@ -824,53 +844,83 @@ route('DELETE', '/api/admin/products/:id', async ctx => {
 // Admin: build from source ---------------------------------------------------------
 // Upload a Maven/Gradle project as a zip -> inspection report -> build -> jar (optionally straight into a product).
 // See docs/BUILD.md for what this does and does not protect against.
-const builds = createBuildService({ baseDir: join(DATA, 'builds') });
+// Customers (not just the site owner) may use it when LICENSEX_CUSTOMER_BUILDS=1. Off by default: a build can run its
+// own code on this server, so only switch it on when every customer is someone you trust (docs/BUILD.md).
+const CUSTOMER_BUILDS = process.env.LICENSEX_CUSTOMER_BUILDS === '1' || fileConfig.customerBuilds === true;
+const canBuild = admin => admin?.role === 'platform' || CUSTOMER_BUILDS;
+// Puts a jar into a product: the chosen existing product, or a new one with that name. Returns the product.
+function jarToProduct(ctx, target, buf, filename) {
+  let p;
+  if (target.productId) p = notPrototype(ownProduct(ctx, target.productId));
+  else {
+    withinPlan(() => core.assertWithin(ctx.wsId, 'products'));
+    const slug = uniqueSlug(target.name);
+    const r = db.prepare('INSERT INTO products(workspace_id,slug,name,token,created_at) VALUES(?,?,?,?,?)').run(ctx.wsId, slug, target.name, randomBytes(12).toString('base64url'), now());
+    p = db.prepare('SELECT * FROM products WHERE id=?').get(r.lastInsertRowid);
+    wl(ctx, 'product.create', slug, target.name);
+  }
+  setProductFile(ctx, p, buf, filename);
+  return p;
+}
+// Which product a request asks for: { productId } or { name }. Checked against the caller's rights.
+function buildTarget(ctx, b, fallbackName) {
+  if (b.productId) return { productId: notPrototype(ownProduct(ctx, int(b.productId, { min: 1 }))).id };
+  if (!ctx.access.perms.has('products.create')) throw new HttpError(403, 'You may not create products. Pick an existing product.');
+  const name = str(b.name || fallbackName || '', 60).trim();
+  if (!name) throw new HttpError(400, 'Give the new product a name, or pick an existing product.');
+  return { name };
+}
+const builds = createBuildService({ baseDir: join(DATA, 'builds'), onDone: j => {
+  // Built: put it straight into the product picked when the build started.
+  if (!j.auto) return;
+  const a = j.auto, ctx = { wsId: a.wsId, admin: { email: a.email }, access: { scope: a.scope ? new Set(a.scope) : null } };
+  const p = jarToProduct(ctx, a, readFileSync(j.jar.path), j.jar.name);
+  j.auto = { ...a, productId: p.id, done: p.name };
+} });
 setInterval(() => builds.sweep(), 3600e3).unref();
 const asHttp = fn => { try { return fn(); } catch (e) { if (e instanceof BuildError) throw new HttpError(e.status, e.message); throw e; } };
-route('GET', '/api/admin/builds/tools', async () => [200, builds.tools()], { platform: true });
-route('GET', '/api/admin/builds', async () => [200, builds.list()], { platform: true });
+const buildOpts = { perm: 'products.edit', build: true };
+const ownJob = ctx => { const j = builds.get(ctx.params.id, ctx.wsId); if (!j) throw new HttpError(404, 'Build not found'); return j; };
+route('GET', '/api/admin/builds/tools', async () => [200, builds.tools()], buildOpts);
+route('GET', '/api/admin/builds', async ctx => [200, builds.list(ctx.wsId)], buildOpts);
 route('POST', '/api/admin/builds', async ctx => {
   const tmp = join(DATA, '.build-upload-' + randomBytes(4).toString('hex'));
   const filename = str(ctx.req.headers['x-filename'] || 'source.zip', 80);
   try {
     await saveUpload(ctx.req, tmp);
-    const job = asHttp(() => builds.create(readFileSync(tmp), filename));
+    const job = asHttp(() => builds.create(readFileSync(tmp), filename, ctx.wsId));
     wl(ctx, 'build.upload', job.id, `${filename} ${job.report.kind} findings=${job.report.findings.length}`);
     return [201, job];
   } finally { rmSync(tmp, { force: true }); }
-}, { platform: true });
-route('GET', '/api/admin/builds/:id', async ctx => { const j = builds.get(ctx.params.id); if (!j) throw new HttpError(404, 'Build not found'); return [200, j]; }, { platform: true });
+}, buildOpts);
+route('GET', '/api/admin/builds/:id', async ctx => [200, ownJob(ctx)], buildOpts);
+// Starts the build. Unless { product: false }, the jar is added to a product automatically once it is built:
+// { productId } replaces that product's file, otherwise a new product is made (named { name } or after the plugin).
 route('POST', '/api/admin/builds/:id/build', async ctx => {
-  const b = await body(ctx.req);
-  const job = asHttp(() => builds.start(ctx.params.id, { trust: b.trust === true }));
+  const b = await body(ctx.req), j0 = ownJob(ctx);
+  const target = b.product === false ? null : buildTarget(ctx, b, j0.report?.plugin?.name || j0.filename.replace(/\.zip$/i, ''));
+  if (target?.name) withinPlan(() => core.assertWithin(ctx.wsId, 'products'));
+  const auto = target && { ...target, wsId: ctx.wsId, email: ctx.admin.email || 'admin', scope: ctx.access.scope ? [...ctx.access.scope] : null };
+  const job = asHttp(() => builds.start(ctx.params.id, { trust: b.trust === true, auto }));
   wl(ctx, 'build.start', job.id, `${job.filename} trusted=${job.trusted}`);
   return [202, job];
-}, { platform: true });
+}, buildOpts);
 route('GET', '/api/admin/builds/:id/jar', async ctx => {
+  ownJob(ctx);
   const f = builds.jarFile(ctx.params.id);
   if (!f) throw new HttpError(404, 'No jar for this build');
   return [200, readFileSync(f.path), { 'Content-Type': 'application/java-archive', 'Content-Disposition': `attachment; filename="${f.name.replace(/[^\w.\-]/g, '_')}"` }];
-}, { platform: true });
-// Put the built jar into a product: replace an existing product's file, or create a new product from it.
+}, buildOpts);
+// Put the built jar into a product by hand: replace an existing product's file, or create a new product from it.
 route('POST', '/api/admin/builds/:id/product', async ctx => {
   const b = await body(ctx.req);
+  ownJob(ctx);
   const f = builds.jarFile(ctx.params.id);
   if (!f) throw new HttpError(404, 'No jar for this build');
-  let p;
-  if (b.productId) p = ownProduct(ctx, int(b.productId, { min: 1 }));
-  else {
-    const name = str(b.name, 60).trim();
-    if (!name) throw new HttpError(400, 'Give the new product a name, or pick an existing product.');
-    withinPlan(() => core.assertWithin(ctx.wsId, 'products'));
-    const slug = uniqueSlug(name);
-    const r = db.prepare('INSERT INTO products(workspace_id,slug,name,token,created_at) VALUES(?,?,?,?,?)').run(ctx.wsId, slug, name, randomBytes(12).toString('base64url'), now());
-    p = db.prepare('SELECT * FROM products WHERE id=?').get(r.lastInsertRowid);
-    wl(ctx, 'product.create', slug, name);
-  }
-  setProductFile(ctx, p, readFileSync(f.path), f.name);
+  const p = jarToProduct(ctx, buildTarget(ctx, b), readFileSync(f.path), f.name);
   return [200, productRow(ctx.req, db.prepare('SELECT * FROM products WHERE id=?').get(p.id))];
-}, { platform: true });
-route('DELETE', '/api/admin/builds/:id', async ctx => { asHttp(() => builds.remove(ctx.params.id)); return [200, { ok: true }]; }, { platform: true });
+}, buildOpts);
+route('DELETE', '/api/admin/builds/:id', async ctx => { ownJob(ctx); asHttp(() => builds.remove(ctx.params.id)); return [200, { ok: true }]; }, buildOpts);
 
 // Admin: backup / restore ---------------------------------------------------------
 // Everything (licenses, servers, groups, settings, uploaded plugins) in one zip. Contains every license key and the
@@ -940,7 +990,7 @@ route('DELETE', '/api/admin/groups/:id', async ctx => {
 }, { perm: 'groups.manage' });
 
 // Admin: settings + audit -----------------------------------------------------
-const WS_SETTING_KEYS = ['default_limit', 'claims_enabled', 'public_removal', 'heartbeat_minutes', 'bbb_group_id'];
+const WS_SETTING_KEYS = ['default_limit', 'claims_enabled', 'public_removal', 'heartbeat_minutes', 'grace_minutes', 'bbb_group_id'];
 route('GET', '/api/admin/settings', async ctx => {
   const w = ctx.wsId;
   const out = {
@@ -972,6 +1022,7 @@ route('PUT', '/api/admin/settings', async ctx => {
   if ('admin_emails' in b && ctx.admin.role !== 'platform') throw new HttpError(403, 'Only the site owner can change those settings.');
   if ('default_limit' in b) core.setSetting('default_limit', int(b.default_limit, { min: -1, max: 100000 }), w);
   if ('heartbeat_minutes' in b) core.setSetting('heartbeat_minutes', int(b.heartbeat_minutes, { min: 1, max: 1440 }), w);
+  if ('grace_minutes' in b) core.setSetting('grace_minutes', int(b.grace_minutes, { min: 0, max: 20160 }), w);
   for (const k of ['claims_enabled', 'public_removal']) if (k in b) core.setSetting(k, b[k] ? '1' : '0', w);
   if ('bbb_group_id' in b) core.setSetting('bbb_group_id', ownGroup(ctx, b.bbb_group_id ? int(b.bbb_group_id, { min: 1 }) : null) ?? '', w);
   if (b.regenerate_bbb_secret) db.prepare('UPDATE workspaces SET bbb_secret=? WHERE id=?').run(newSecret(), w);
@@ -1035,6 +1086,7 @@ const createWorkspaceFor = (u, { force = false } = {}) => {
   const r = db.prepare('INSERT INTO workspaces (name, owner_email, owner_name, bbb_secret, created_at) VALUES (?,?,?,?,?)')
     .run(str(u.name, 60) || u.email.split('@')[0], u.email, str(u.name, 80), newSecret(), now());
   core.log('user', 'workspace.create', u.email, u.p, Number(r.lastInsertRowid));
+  ensurePrototype(Number(r.lastInsertRowid));
   return db.prepare('SELECT * FROM workspaces WHERE id=?').get(r.lastInsertRowid);
 };
 route('POST', '/api/workspace/ensure', async ctx => {
@@ -1170,7 +1222,7 @@ route('DELETE', '/api/admin/plans/:key', async ctx => {
 // Every copy also carries a random `mark` (in licensex.json and in the zip comment) that the leak tracer looks up.
 function licensedJar(req, p, key, mark = '') {
   const jar = readFileSync(productFile(p.slug));
-  const cfg = { url: publicBase(req), key, product: p.name, mark };
+  const cfg = { url: publicBase(req), key, product: p.name, mark, secret: SESSION_SECRET };
   let out;
   try { out = wrapJar(jar, cfg).jar; }
   catch (e) {
@@ -1235,10 +1287,12 @@ function handleDownload(req, res, slug, url) {
 // --- feature modules: each registers its own routes -------------------------------
 // They get the pieces of this file they need through one object, so they can live (and be tested) in their own files.
 const app = { route, db, core, HttpError, body, int, str, rateLimit, recentCount, clientIp, publicBase, sessionUser, cookies, isHttps, secure, sign, signToken, readToken, safeEq,
-  PUBLIC_URL, DATA, SESSION_SECRET, HOUSE, now, hash, normalizeKey, KEY_RE, fileConfig, CONFIG_ADMIN_EMAILS, isAdminUser, workspaceOfUser };
+  PUBLIC_URL, DATA, SESSION_SECRET, HOUSE, now, hash, normalizeKey, KEY_RE, fileConfig, CONFIG_ADMIN_EMAILS, isAdminUser, workspaceOfUser, redirect };
 registerBuyers(app);
 registerTeam(app);
 registerPlanSales(app);
+const patreon = registerPatreon(app);
+for (const { id } of db.prepare('SELECT id FROM workspaces').all()) { try { ensurePrototype(id); } catch (e) { console.error(`[LicenseX] prototype for workspace ${id}: ${e.message}`); } }
 
 // --- static + dispatch -----------------------------------------------------
 const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
@@ -1268,6 +1322,7 @@ export const server = createServer(async (req, res) => {
       if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'Method not allowed');
       return handleDownload(req, res, dl[1], url);
     }
+    if (url.pathname === '/auth/patreon' || url.pathname === '/auth/patreon/callback') return await patreon.handle(req, res, url);
     if (url.pathname.startsWith('/auth/')) return await handleAuth(req, res, url);
     if (!url.pathname.startsWith('/api/')) {
       if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'Method not allowed');
@@ -1285,6 +1340,7 @@ export const server = createServer(async (req, res) => {
         if (!guarded) return { admin, wsId: HOUSE, access: null };
         if (!admin) throw new HttpError(401, 'Not signed in');
         if (opts.platform && admin.role !== 'platform') throw new HttpError(403, 'Only the site owner can do that.');
+        if (opts.build && !canBuild(admin)) throw new HttpError(403, 'Build from source is not switched on for customers on this server.');
         const wsId = resolveWorkspace(admin, req, url), access = accessFor(db, admin, wsId);
         const needed = opts.perm ? [].concat(opts.perm) : [];
         if (needed.length && !needed.some(k => access.perms.has(k))) throw new HttpError(403, 'You do not have permission to do that.', 'FORBIDDEN');
