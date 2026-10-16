@@ -27,6 +27,7 @@ public final class XHello extends JavaPlugin {
     private boolean ready;
     private long lastGoodMillis = System.currentTimeMillis();
     private BukkitTask heartbeat;
+    private final Guard guard = new Guard();
 
     @Override
     public void onEnable() {
@@ -57,12 +58,13 @@ public final class XHello extends JavaPlugin {
             client.markVerified();
             getLogger().info("[LicenseX] License " + key + " verified. Check or manage it at " + client.portalUrl(key));
         }
+        guard.arm(key);                                   // interlocking license state, woven from the confirmed key
         Bukkit.getScheduler().runTask(this, () -> {
             ready = true;
             getLogger().info("XHello is ready. Try /xhello, /xflip, /xroll and /xtime.");
         });
         long ticks = r.heartbeatMinutes() * 60L * 20L;
-        heartbeat = Bukkit.getScheduler().runTaskTimerAsynchronously(this, this::beat, ticks, ticks);
+        heartbeat = Bukkit.getScheduler().runTaskTimerAsynchronously(this, () -> { beat(); guard.audit(this); }, ticks, ticks);
     }
 
     private LicenseClient.Result check() {
@@ -90,8 +92,11 @@ public final class XHello extends JavaPlugin {
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (!ready) { sender.sendMessage(TAG + ChatColor.GRAY + "Still starting up, try again in a moment."); return true; }
+        // Each command passes a DIFFERENT gate index, so they lean on different interlocking signals. A single patch
+        // that satisfies one command will not satisfy the others, and a failed gate pulls the whole plugin down.
         switch (command.getName().toLowerCase()) {
             case "xhello" -> {
+                if (!guard.gate(this, 0)) return true;
                 if (args.length == 0) { sender.sendMessage(TAG + "Hello, " + sender.getName() + "!"); return true; }
                 Player target = Bukkit.getPlayerExact(args[0]);
                 if (target == null) { sender.sendMessage(TAG + ChatColor.GRAY + args[0] + " is not online."); return true; }
@@ -100,10 +105,12 @@ public final class XHello extends JavaPlugin {
                 return true;
             }
             case "xflip" -> {
+                if (!guard.gate(this, 1)) return true;
                 sender.sendMessage(TAG + "The coin landed on " + ChatColor.GOLD + (ThreadLocalRandom.current().nextBoolean() ? "heads" : "tails") + ChatColor.RESET + ".");
                 return true;
             }
             case "xroll" -> {
+                if (!guard.gate(this, 2)) return true;
                 int sides = 6;
                 if (args.length > 0) {
                     try { sides = Integer.parseInt(args[0]); } catch (NumberFormatException e) { sides = 0; }
@@ -114,6 +121,7 @@ public final class XHello extends JavaPlugin {
                 return true;
             }
             case "xtime" -> {
+                if (!guard.gate(this, 3)) return true;
                 if (!(sender instanceof Player p)) { sender.sendMessage(TAG + "Only players have a world."); return true; }
                 long t = (p.getWorld().getTime() + 6000) % 24000;
                 sender.sendMessage(TAG + "It is " + ChatColor.GOLD + String.format("%02d:%02d", t / 1000, t % 1000 * 60 / 1000) + ChatColor.RESET + " in " + p.getWorld().getName() + ".");

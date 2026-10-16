@@ -742,7 +742,7 @@ const productRow = (req, p) => {
 // --- the prototype ------------------------------------------------------------------
 // Every account gets one small ready-made plugin (XHello, source in prototype/xhello) as a product of its own. It works
 // like any product (licenses, downloads, BuiltByBit) but does not count toward the plan, and its file cannot be swapped.
-const PROTOTYPE_JAR = join(ROOT, 'server', 'prototype', 'XHello.jar'), PROTOTYPE_FILE = 'XHello-1.1.0.jar';
+const PROTOTYPE_JAR = join(ROOT, 'server', 'prototype', 'XHello.jar'), PROTOTYPE_FILE = 'XHello-1.2.0.jar';
 function notPrototype(p, why = 'Its file is provided by us and cannot be replaced.') {
   if (p.prototype) throw new HttpError(400, `"${p.name}" is the free prototype. ${why}`);
   return p;

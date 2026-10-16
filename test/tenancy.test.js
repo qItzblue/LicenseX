@@ -267,7 +267,7 @@ test('every account gets the free XHello prototype: it works, does not count tow
   const list = (await call('GET', '/api/admin/products', null, carol)).body;
   const proto = list.find(p => p.prototype);
   assert.ok(proto && proto.has_file && (proto.integration.ok || proto.integration.integrated), 'present, with the license check built in');
-  assert.equal(proto.filename, 'XHello-1.1.0.jar');
+  assert.equal(proto.filename, 'XHello-1.2.0.jar');
   assert.equal((await call('GET', '/api/workspace', null, carol)).body.usage.products, 0, 'free: not counted');
   assert.equal((await call('POST', '/api/admin/products', { name: 'Real one' }, carol)).status, 201, 'the Free plan\'s one plugin is still available');
   assert.equal((await call('DELETE', `/api/admin/products/${proto.id}`, null, carol)).status, 400);
