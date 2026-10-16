@@ -753,6 +753,7 @@ async function settings() {
   render(head('Settings'), site && !s.public_url_set && !/^(localhost|127\.0\.0\.1)$/.test(location.hostname) ? h('div', { class: 'notice warn' }, h('b', null, 'Set LICENSEX_PUBLIC_URL. '), 'Without it, download links, the address baked into plugins and the sign-in callbacks below are guessed from the browser request and can be wrong behind a proxy. Set it to your real https address (see DEPLOY.md).') : null, site ? h('div', { class: 'notice ok' }, 'Site-wide settings (branding, sign-in, backups) are below the workspace settings. Customers only see the workspace settings.') : null, site ? access : null, bbb, site || (WS.house && s.site_access) ? brand : null, site ? backup : null, site ? await offsiteCard() : null, h('div', { class: 'card', style: { maxWidth: '680px' } },
     num('default_limit', 'Default server limit', 'Applies to licenses with no group and no override. -1 = unlimited.', -1),
     num('heartbeat_minutes', 'Plugin check-in interval (minutes)', 'How often running plugins re-validate. Removals and blocks take effect within this window.', 1),
+    num('grace_minutes', 'Offline grace (minutes)', 'How long a plugin may keep running when it cannot reach this server (last check-in is signed, so it cannot be faked). 1440 = 24h.', 0),
     toggle('claims_enabled', 'Issue licenses on download', 'When off, new downloads cannot claim a license (existing licenses keep working).'),
     toggle('public_removal', 'Let owners remove servers', 'Owners can free a slot from the public license page.')));
 }

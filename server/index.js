@@ -990,7 +990,7 @@ route('DELETE', '/api/admin/groups/:id', async ctx => {
 }, { perm: 'groups.manage' });
 
 // Admin: settings + audit -----------------------------------------------------
-const WS_SETTING_KEYS = ['default_limit', 'claims_enabled', 'public_removal', 'heartbeat_minutes', 'bbb_group_id'];
+const WS_SETTING_KEYS = ['default_limit', 'claims_enabled', 'public_removal', 'heartbeat_minutes', 'grace_minutes', 'bbb_group_id'];
 route('GET', '/api/admin/settings', async ctx => {
   const w = ctx.wsId;
   const out = {
@@ -1022,6 +1022,7 @@ route('PUT', '/api/admin/settings', async ctx => {
   if ('admin_emails' in b && ctx.admin.role !== 'platform') throw new HttpError(403, 'Only the site owner can change those settings.');
   if ('default_limit' in b) core.setSetting('default_limit', int(b.default_limit, { min: -1, max: 100000 }), w);
   if ('heartbeat_minutes' in b) core.setSetting('heartbeat_minutes', int(b.heartbeat_minutes, { min: 1, max: 1440 }), w);
+  if ('grace_minutes' in b) core.setSetting('grace_minutes', int(b.grace_minutes, { min: 0, max: 20160 }), w);
   for (const k of ['claims_enabled', 'public_removal']) if (k in b) core.setSetting(k, b[k] ? '1' : '0', w);
   if ('bbb_group_id' in b) core.setSetting('bbb_group_id', ownGroup(ctx, b.bbb_group_id ? int(b.bbb_group_id, { min: 1 }) : null) ?? '', w);
   if (b.regenerate_bbb_secret) db.prepare('UPDATE workspaces SET bbb_secret=? WHERE id=?').run(newSecret(), w);

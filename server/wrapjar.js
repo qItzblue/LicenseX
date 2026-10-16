@@ -116,6 +116,7 @@ export function wrapJar(jar, { url, key = '', product = '', mark = '', secret = 
   // The config mask is derived from the server secret (not the per-product seed) so the leak tracer can read the
   // config back out of any jar this server made, while url/key/product stay out of plain sight.
   const mask = configMask(secret), maskB64 = mask.toString('base64');
+  const sigKey = Buffer.from(rnd(16)), sigB64 = sigKey.toString('base64');   // signs the offline-grace file so it can't be hand-edited
 
   // Ordered so the per-class names (which contain the template package) are replaced before the bare package.
   const reps = [
@@ -123,7 +124,7 @@ export function wrapJar(jar, { url, key = '', product = '', mark = '', secret = 
     [`${PKG}/Gate`, `${pkg}/${cls.Gate}`], [`${PKG}/Beat`, `${pkg}/${cls.Beat}`],
     [`${PKG}/Disable`, `${pkg}/${cls.Disable}`], [`${PKG}/Wrapper`, `${pkg}/${cls.Wrapper}`],
     [PKG, pkg],
-    ['__LX_CFG__', cfgName], ['__LX_MASK__', maskB64], ['__LX_INST__', instName], ['__LX_OK__', okName],
+    ['__LX_CFG__', cfgName], ['__LX_MASK__', maskB64], ['__LX_INST__', instName], ['__LX_OK__', okName], ['__LX_SIG__', sigB64],
   ];
   const rename = s => reps.reduce((acc, [a, b]) => acc.split(a).join(b), s);
   // Gate.class, Gate$Result.class, Beat.class, Disable.class, Wrapper.class -> their randomized names.

@@ -14,6 +14,8 @@ import java.net.URL;
 import java.nio.charset.Charset;
 import java.nio.file.Files;
 import java.util.Base64;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -30,7 +32,8 @@ public final class Gate {
     private static final String CFG_MASK = "__LX_MASK__";
     private static final String INST_NAME = "__LX_INST__";
     private static final String OK_NAME = "__LX_OK__";
-    private static final long OFFLINE_GRACE_MS = 72L * 3600L * 1000L;
+    private static final String GRACE_SIG = "__LX_SIG__";
+    private static long graceMs = 24L * 3600L * 1000L;   // shortened; the server can narrow it further (grace_minutes)
     private static final Charset UTF8 = Charset.forName("UTF-8");
 
     private static String key = "";
@@ -136,6 +139,8 @@ public final class Gate {
             if (status == 200 && Pattern.compile("\"ok\"\\s*:\\s*true").matcher(resp).find()) {
                 String hb = field(resp, "heartbeat_minutes");
                 if (!hb.isEmpty()) heartbeatMinutes = Integer.parseInt(hb);
+                String gm = field(resp, "grace_minutes");
+                if (!gm.isEmpty()) graceMs = Long.parseLong(gm) * 60L * 1000L;
                 return new Result(true, false, "");
             }
             String msg = field(resp, "message");
@@ -163,10 +168,13 @@ public final class Gate {
         return id;
     }
 
+    // The last-verified time is signed, so a cracker cannot hand-edit the file to a future date and keep the plugin
+    // running offline forever. Without the signature (or with a tampered time) the grace period simply does not apply.
     private static void touch(JavaPlugin plugin) {
         try {
             plugin.getDataFolder().mkdirs();
-            Files.write(new File(plugin.getDataFolder(), OK_NAME).toPath(), String.valueOf(System.currentTimeMillis()).getBytes(UTF8));
+            String now = String.valueOf(System.currentTimeMillis());
+            Files.write(new File(plugin.getDataFolder(), OK_NAME).toPath(), (now + "." + sign(now)).getBytes(UTF8));
         } catch (IOException ignored) {
             // grace period just won't apply
         }
@@ -176,13 +184,31 @@ public final class Gate {
         try {
             File f = new File(plugin.getDataFolder(), OK_NAME);
             if (!f.exists()) return false;
-            long last = Long.parseLong(new String(Files.readAllBytes(f.toPath()), UTF8).trim());
-            return System.currentTimeMillis() - last < OFFLINE_GRACE_MS;
-        } catch (IOException e) {
-            return false;
-        } catch (NumberFormatException e) {
+            String[] parts = new String(Files.readAllBytes(f.toPath()), UTF8).trim().split("\\.", 2);
+            if (parts.length != 2 || !constEq(parts[1], sign(parts[0]))) return false;   // tampered or unsigned
+            long last = Long.parseLong(parts[0]);
+            long age = System.currentTimeMillis() - last;
+            return age >= 0 && age < graceMs;                                            // future-dated is rejected too
+        } catch (IOException | RuntimeException e) {
             return false;
         }
+    }
+
+    private static String sign(String data) {
+        try {
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(Base64.getDecoder().decode(GRACE_SIG), "HmacSHA256"));
+            return Base64.getEncoder().encodeToString(mac.doFinal(data.getBytes(UTF8)));
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private static boolean constEq(String a, String b) {
+        if (a == null || b == null || a.length() != b.length()) return false;
+        int r = 0;
+        for (int i = 0; i < a.length(); i++) r |= a.charAt(i) ^ b.charAt(i);
+        return r == 0;
     }
 
     private static byte[] readAll(InputStream in) throws IOException {
