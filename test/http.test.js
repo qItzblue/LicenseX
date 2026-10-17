@@ -187,19 +187,34 @@ test('backup and restore round-trips licenses, groups, settings and plugin files
 });
 
 
-test('server-computed feature: only a valid license gets a result, and the text comes from the server', async () => {
+
+test('server-computed feature: valid license gets a signed, nonce-bound result; a fake key gets nothing', async () => {
   const { readFileSync } = await import('node:fs');
+  const crypto = await import('node:crypto');
   const { cookie } = await call('POST', '/api/admin/login', { password: 'secret-pw' });
   const plugin = readFileSync(new URL('./fixtures/hello/hello-plugin.jar', import.meta.url));
   const p = (await call('POST', '/api/admin/products', { name: 'Feat' }, cookie)).body;
   await fetch(base + `/api/admin/products/${p.id}/file`, { method: 'POST', headers: { Cookie: cookie, 'X-Filename': 'x.jar' }, body: plugin });
   const jar = Buffer.from(await (await fetch(`${base}/download/feat?token=${p.token}&user=9`)).arrayBuffer());
-  const key = cfgOf(jar).key;
-  const feat = (k, params) => fetch(base + '/api/v1/feature', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ key: k, instanceId: 'i1', feature: 'roll', params }) }).then(async r => ({ status: r.status, body: await r.json() }));
-  const ok = await feat(key, '20');
+  const cfg = cfgOf(jar);
+  const key = cfg.key, pub = cfg.pub;
+  assert.ok(pub, 'the public key is embedded in the config');
+  const pubKey = crypto.createPublicKey({ key: Buffer.from(pub, 'base64'), format: 'der', type: 'spki' });
+  const feat = (k, nonce) => fetch(base + '/api/v1/feature', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key: k, instanceId: 'i1', feature: 'roll', params: '20', nonce }) }).then(async r => ({ status: r.status, body: await r.json() }));
+
+  const nonce = 'abcd1234efgh5678';
+  const ok = await feat(key, nonce);
   assert.equal(ok.status, 200);
-  assert.ok(ok.body.ok && ok.body.value >= 1 && ok.body.value <= 20, JSON.stringify(ok.body));
-  assert.match(ok.body.text, /computed on XdevStudios/);
-  assert.equal((await feat('LX-ZZZZ-ZZZZ-ZZZZ-ZZZZ', '6')).status, 403);
+  const [n, ts, text] = ok.body.data.split('|');
+  assert.equal(n, nonce, 'the response is bound to our nonce');
+  assert.ok(Math.abs(Math.floor(Date.now() / 1000) - Number(ts)) < 10, 'fresh timestamp');
+  assert.match(text, /computed on XdevStudios/);
+  assert.ok(crypto.verify(null, Buffer.from(ok.body.data, 'utf8'), pubKey, Buffer.from(ok.body.sig, 'base64')), 'signature verifies');
+  // a forged signature is rejected on verify (sanity)
+  assert.ok(!crypto.verify(null, Buffer.from('tampered', 'utf8'), pubKey, Buffer.from(ok.body.sig, 'base64')));
+  // bad key -> 403, no data
+  assert.equal((await feat('LX-ZZZZ-ZZZZ-ZZZZ-ZZZZ', nonce)).status, 403);
+  // missing nonce -> rejected
+  assert.equal((await fetch(base + '/api/v1/feature', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key, instanceId: 'i1', feature: 'roll' }) })).status, 400);
 });

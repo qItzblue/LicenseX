@@ -76,7 +76,7 @@ export function readWrappedConfig(jar, secret = '') {
  * key empty for builds whose key is injected later (BuiltByBit placeholder). `secret` makes the generated names
  * unguessable. Throws WrapError when the jar can't be wrapped.
  */
-export function wrapJar(jar, { url, key = '', product = '', mark = '', secret = '' }) {
+export function wrapJar(jar, { url, key = '', product = '', mark = '', secret = '', pub = '' }) {
   let names;
   try { names = listEntries(jar); } catch { throw new WrapError('NOT_A_JAR', 'That file is not a valid .jar archive.'); }
   const has = n => names.includes(n);
@@ -130,7 +130,7 @@ export function wrapJar(jar, { url, key = '', product = '', mark = '', secret = 
   // Gate.class, Gate$Result.class, Beat.class, Disable.class, Wrapper.class -> their randomized names.
   const fileFor = f => { const mm = /^([A-Za-z]+)(\$[A-Za-z0-9]+)?\.class$/.exec(f); return `${pkg}/${cls[mm[1]]}${mm[2] || ''}.class`; };
 
-  const confJson = Buffer.from(JSON.stringify({ url, key, product, main, wrapped: 1, ...(mark ? { mark } : {}) }), 'utf8');
+  const confJson = Buffer.from(JSON.stringify({ url, key, product, main, wrapped: 1, ...(mark ? { mark } : {}), ...(pub ? { pub } : {}) }), 'utf8');
   const masked = Buffer.alloc(confJson.length);
   for (let i = 0; i < confJson.length; i++) masked[i] = confJson[i] ^ mask[i % mask.length];
 

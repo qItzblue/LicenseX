@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import { readFileSync, writeFileSync, existsSync, statSync, createReadStream, createWriteStream, mkdirSync, renameSync, rmSync } from 'node:fs';
 import { join, resolve, relative, isAbsolute, extname, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
+import { randomBytes, createHmac, timingSafeEqual, generateKeyPairSync, sign as edSign, createPrivateKey, createPublicKey } from 'node:crypto';
 import { openDb, DatabaseSync } from './db.js';
 import { createBackup, restoreBackup, RestoreError, backupFiles, zipFiles } from './backup.js';
 import { createOffsite, offsiteConfig, withoutProducts, isEncrypted, decrypt } from './offsite.js';
@@ -107,6 +107,17 @@ function loadSecret(name, make) {
   return v;
 }
 const SESSION_SECRET = loadSecret('session.secret', () => randomBytes(32).toString('hex'));
+// Ed25519 keypair for signing server-computed feature responses. The private key never leaves the server; the plugin
+// carries only the public key (safe to ship: it can verify but cannot forge). Persisted so every restart keeps it.
+const FEATURE_KEY = (() => {
+  const f = join(DATA, 'feature-ed25519.pem');
+  let priv;
+  if (existsSync(f)) priv = createPrivateKey(readFileSync(f));
+  else { const kp = generateKeyPairSync('ed25519'); writeFileSync(f, kp.privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 }); priv = kp.privateKey; }
+  const pub = createPublicKey(priv).export({ type: 'spki', format: 'der' }).toString('base64');
+  return { priv, pub };
+})();
+const signFeature = data => edSign(null, Buffer.from(data, 'utf8'), FEATURE_KEY.priv).toString('base64');
 let ADMIN_PASSWORD = process.env.LICENSEX_ADMIN_PASSWORD || fileConfig.adminPassword;
 if (ADMIN_PASSWORD && /^CHANGE-ME/i.test(ADMIN_PASSWORD)) {
   console.error('[LicenseX] Set a real admin password in licensex.config.json (it still says CHANGE-ME...).');
@@ -245,6 +256,27 @@ route('POST', '/api/v1/validate', async ctx => {
   return [r.ok ? 200 : 403, r];
 });
 
+// --- leak / seat detection -------------------------------------------------------
+// We note the IP each license is used from. A license used from many more places than it is allowed is likely shared
+// or leaked, so we flag it in the audit log (at most once an hour) for the owner to see. Pure server-side: nothing in
+// the jar can suppress it.
+db.exec(`CREATE TABLE IF NOT EXISTS license_ips (license_id INTEGER NOT NULL, ip TEXT NOT NULL, last_seen INTEGER NOT NULL, PRIMARY KEY(license_id, ip))`);
+const seatSeen = db.prepare(`INSERT INTO license_ips(license_id,ip,last_seen) VALUES(?,?,?) ON CONFLICT(license_id,ip) DO UPDATE SET last_seen=excluded.last_seen`);
+const seatCount = db.prepare(`SELECT COUNT(*) n FROM license_ips WHERE license_id=? AND last_seen > ?`);
+const sharingFlaggedAt = new Map();
+function featureSeatSeen(lic, instanceId, ip) {
+  if (!ip) return;
+  const t = now();
+  seatSeen.run(lic.id, ip, t);
+  const distinct = seatCount.get(lic.id, t - 86400).n;
+  const limit = core.effectiveLimit(lic);
+  const allowed = limit === -1 ? Infinity : Math.max(limit, 1);
+  if (distinct > allowed * 2 + 1 && t - (sharingFlaggedAt.get(lic.id) || 0) > 3600) {
+    sharingFlaggedAt.set(lic.id, t);
+    core.log('system', 'license.sharing', lic.key, `${distinct} IP addresses in 24h (allowed about ${allowed === Infinity ? 'unlimited' : allowed})`, lic.workspace_id);
+  }
+}
+
 // Server-computed feature: the plugin asks the server to produce a result it does NOT have locally. A stripped copy
 // (license check removed) has no fallback, so the feature simply cannot run. This is the one protection that a
 // "set the guards to false" crack cannot defeat, because the behaviour was never shipped in the jar. Demo: /xroll.
@@ -253,15 +285,26 @@ route('POST', '/api/v1/feature', async ctx => {
   const b = await body(ctx.req);
   const lic = core.q.licenseByKey.get(normalizeKey(b.key || ''));
   if (!lic || core.licenseState(lic) !== 'active') return [403, { ok: false, message: 'License is not valid.' }];
+  const instanceId = str(b.instanceId, 64);
+  const nonce = str(b.nonce, 64);
+  if (!/^[A-Za-z0-9_-]{8,64}$/.test(nonce)) return [400, { ok: false, message: 'Bad request.' }];
+  // Leak/seat detection: note this instance, and flag the license when it is used from more places than it is allowed.
+  if (instanceId) featureSeatSeen(lic, instanceId, ctx.ip);
+
   const feature = str(b.feature, 40);
+  let text;
   if (feature === 'roll') {
     let sides = int(b.params, { min: 2, max: 1000, nullable: true }) ?? 6;
     const value = 1 + Math.floor(Math.random() * sides);
-    // The displayed text is composed on the server, so it is not present in the jar to copy.
     const flavour = value === sides ? ' A perfect roll!' : value === 1 ? ' Ouch.' : '';
-    return [200, { ok: true, value, sides, text: `You rolled ${value} (d${sides}).${flavour} — computed on XdevStudios' server.` }];
-  }
-  return [400, { ok: false, message: 'Unknown feature.' }];
+    text = `You rolled ${value} (d${sides}).${flavour} — computed on XdevStudios' server.`;
+  } else return [400, { ok: false, message: 'Unknown feature.' }];
+
+  // Sign {nonce, timestamp, text}. The plugin verifies this with the embedded public key and checks the nonce and
+  // freshness, so a fake server cannot forge a response and a recorded response cannot be replayed.
+  const ts = now();
+  const data = `${nonce}|${ts}|${text}`;
+  return [200, { ok: true, data, sig: signFeature(data) }];
 });
 
 // BuiltByBit "External license key" placeholder --------------------------------
@@ -761,7 +804,7 @@ const productRow = (req, p) => {
 // --- the prototype ------------------------------------------------------------------
 // Every account gets one small ready-made plugin (XHello, source in prototype/xhello) as a product of its own. It works
 // like any product (licenses, downloads, BuiltByBit) but does not count toward the plan, and its file cannot be swapped.
-const PROTOTYPE_JAR = join(ROOT, 'server', 'prototype', 'XHello.jar'), PROTOTYPE_FILE = 'XHello-1.3.0.jar';
+const PROTOTYPE_JAR = join(ROOT, 'server', 'prototype', 'XHello.jar'), PROTOTYPE_FILE = 'XHello-1.4.0.jar';
 function notPrototype(p, why = 'Its file is provided by us and cannot be replaced.') {
   if (p.prototype) throw new HttpError(400, `"${p.name}" is the free prototype. ${why}`);
   return p;
@@ -1241,9 +1284,11 @@ route('DELETE', '/api/admin/plans/:key', async ctx => {
 // Every copy also carries a random `mark` (in licensex.json and in the zip comment) that the leak tracer looks up.
 function licensedJar(req, p, key, mark = '') {
   const jar = readFileSync(productFile(p.slug));
-  const cfg = { url: publicBase(req), key, product: p.name, mark, secret: SESSION_SECRET };
+  // cfg is written INTO the jar, so it must never contain server secrets. `secret` (for wrapper name derivation) and
+  // the private key stay server-side; only the public key (pub) is safe to ship.
+  const cfg = { url: publicBase(req), key, product: p.name, mark, pub: FEATURE_KEY.pub };
   let out;
-  try { out = wrapJar(jar, cfg).jar; }
+  try { out = wrapJar(jar, { ...cfg, secret: SESSION_SECRET }).jar; }
   catch (e) {
     if (!(e instanceof WrapError)) throw e;
     if (e.code !== 'ALREADY_INTEGRATED') throw new HttpError(503, `This download is unavailable: ${e.message}`, e.code);

@@ -9,7 +9,13 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.KeyFactory;
+import java.security.PublicKey;
+import java.security.SecureRandom;
+import java.security.Signature;
+import java.security.spec.X509EncodedKeySpec;
 import java.time.Duration;
+import java.util.Base64;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.regex.Matcher;
@@ -36,7 +42,7 @@ public final class LicenseClient {
     }
 
     /** The license details LicenseX stamps into the jar at download time (resource /licensex.json). */
-    public record Embedded(String url, String key, String product) {}
+    public record Embedded(String url, String key, String product, String pub) {}
 
     /**
      * Reads /licensex.json from the jar, written by LicenseX when the buyer downloaded this exact copy.
@@ -47,7 +53,7 @@ public final class LicenseClient {
             if (in == null) return Optional.empty();
             String json = new String(in.readAllBytes(), StandardCharsets.UTF_8);
             String key = field(json, "key");
-            return key.isEmpty() ? Optional.empty() : Optional.of(new Embedded(field(json, "url"), key, field(json, "product")));
+            return key.isEmpty() ? Optional.empty() : Optional.of(new Embedded(field(json, "url"), key, field(json, "product"), field(json, "pub")));
         } catch (IOException e) { return Optional.empty(); }
     }
 
@@ -109,13 +115,35 @@ public final class LicenseClient {
      * cannot recreate, because it was never in the jar.
      */
     public Feature feature(String key, String name, String params) {
+        String pub = embedded().map(Embedded::pub).orElse("");
+        if (pub.isEmpty()) return new Feature(false, "");   // no public key to verify with: fail closed
         try {
+            byte[] nb = new byte[18]; new SecureRandom().nextBytes(nb);
+            String nonce = Base64.getUrlEncoder().withoutPadding().encodeToString(nb);
             Resp r = post("/api/v1/feature", "{\"key\":" + q(key) + ",\"instanceId\":" + q(instanceId())
-                    + ",\"feature\":" + q(name) + ",\"params\":" + q(params == null ? "" : params) + "}");
-            boolean ok = r.body.matches("(?s).*\"ok\"\\s*:\\s*true.*");
-            return new Feature(ok, field(r.body, "text"));
-        } catch (IOException | RuntimeException e) {
+                    + ",\"feature\":" + q(name) + ",\"params\":" + q(params == null ? "" : params) + ",\"nonce\":" + q(nonce) + "}");
+            String data = field(r.body, "data"), sig = field(r.body, "sig");
+            if (data.isEmpty() || sig.isEmpty() || !verify(pub, data, sig)) return new Feature(false, "");
+            String[] parts = data.split("\\|", 3);          // nonce | unix-seconds | text
+            if (parts.length != 3 || !parts[0].equals(nonce)) return new Feature(false, "");   // replay / wrong nonce
+            long ts = Long.parseLong(parts[1]);
+            if (Math.abs(System.currentTimeMillis() / 1000 - ts) > 60) return new Feature(false, "");   // stale
+            return new Feature(true, parts[2]);
+        } catch (Exception e) {
             return new Feature(false, "");
+        }
+    }
+
+    /** Verifies an Ed25519 signature of `data` against the embedded public key. A fake server cannot forge this. */
+    private static boolean verify(String pubB64, String data, String sigB64) {
+        try {
+            PublicKey pk = KeyFactory.getInstance("Ed25519").generatePublic(new X509EncodedKeySpec(Base64.getDecoder().decode(pubB64)));
+            Signature s = Signature.getInstance("Ed25519");
+            s.initVerify(pk);
+            s.update(data.getBytes(StandardCharsets.UTF_8));
+            return s.verify(Base64.getDecoder().decode(sigB64));
+        } catch (Exception e) {
+            return false;
         }
     }
 
