@@ -1,0 +1,3 @@
+# Only needed if you run the raw jar yourself; a jar downloaded from LicenseX carries these already.
+licensex-url: "https://licenses.example.com"
+license-key: ""
