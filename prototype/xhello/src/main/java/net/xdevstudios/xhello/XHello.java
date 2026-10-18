@@ -11,6 +11,7 @@ import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
 
 import dev.licensex.client.LicenseClient;
+import net.xdevstudios.xhello.remote.RemoteFeature;
 
 /**
  * XHello: a tiny prototype plugin from XdevStudios, with the LicenseX client built in (integrated, not wrapped).
@@ -89,6 +90,12 @@ public final class XHello extends JavaPlugin {
     @Override
     public void onDisable() { if (heartbeat != null) heartbeat.cancel(); }
 
+    /** Defines a class from bytes fetched at runtime, with the plugin's own classloader as parent so RemoteFeature resolves. */
+    static final class RemoteLoader extends ClassLoader {
+        RemoteLoader(ClassLoader parent) { super(parent); }
+        Class<?> define(String name, byte[] b) { return defineClass(name, b, 0, b.length); }
+    }
+
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (!ready) { sender.sendMessage(TAG + ChatColor.GRAY + "Still starting up, try again in a moment."); return true; }
@@ -128,6 +135,26 @@ public final class XHello extends JavaPlugin {
                 if (!(sender instanceof Player p)) { sender.sendMessage(TAG + "Only players have a world."); return true; }
                 long t = (p.getWorld().getTime() + 6000) % 24000;
                 sender.sendMessage(TAG + "It is " + ChatColor.GOLD + String.format("%02d:%02d", t / 1000, t % 1000 * 60 / 1000) + ChatColor.RESET + " in " + p.getWorld().getName() + ".");
+                return true;
+            }
+            case "xsecret" -> {
+                if (!guard.gate(this, 4)) return true;
+                // REMOTE CLASS LOADING: the code that produces this command's result is NOT in the jar. We fetch it
+                // (signed) from the server, load it into memory, and run it. Strip the license and the class never
+                // arrives, so there is nothing to run and nothing to crack.
+                final String who = sender.getName();
+                Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
+                    String out;
+                    byte[] code = client.remoteClass(key, "ServerGreeting");
+                    if (code == null) out = ChatColor.GRAY + "This feature is unavailable (the server did not provide it).";
+                    else try {
+                        Class<?> c = new RemoteLoader(getClass().getClassLoader()).define("net.xdevstudios.xhello.remote.ServerGreeting", code);
+                        RemoteFeature f = (RemoteFeature) c.getDeclaredConstructor().newInstance();
+                        out = ChatColor.LIGHT_PURPLE + f.run(who);
+                    } catch (Throwable t) { out = ChatColor.GRAY + "Could not load the feature."; }
+                    final String msg = out;
+                    Bukkit.getScheduler().runTask(this, () -> sender.sendMessage(TAG + msg));
+                });
                 return true;
             }
             default -> { return false; }

@@ -218,3 +218,25 @@ test('server-computed feature: valid license gets a signed, nonce-bound result; 
   // missing nonce -> rejected
   assert.equal((await fetch(base + '/api/v1/feature', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key, instanceId: 'i1', feature: 'roll' }) })).status, 400);
 });
+
+test('remote class loading: a valid license gets signed class bytes; invalid gets none', async () => {
+  const crypto = await import('node:crypto');
+  const { readFileSync, existsSync } = await import('node:fs');
+  if (!existsSync(new URL('../server/prototype/remote/ServerGreeting.class', import.meta.url))) return; // class not built in this checkout
+  const { cookie } = await call('POST', '/api/admin/login', { password: 'secret-pw' });
+  const plugin = readFileSync(new URL('./fixtures/hello/hello-plugin.jar', import.meta.url));
+  const p = (await call('POST', '/api/admin/products', { name: 'Cls' }, cookie)).body;
+  await fetch(base + `/api/admin/products/${p.id}/file`, { method: 'POST', headers: { Cookie: cookie, 'X-Filename': 'x.jar' }, body: plugin });
+  const jar = Buffer.from(await (await fetch(`${base}/download/cls?token=${p.token}&user=1`)).arrayBuffer());
+  const cfg = cfgOf(jar);
+  const pubKey = crypto.createPublicKey({ key: Buffer.from(cfg.pub, 'base64'), format: 'der', type: 'spki' });
+  const getCls = (k, name, nonce) => fetch(base + '/api/v1/class', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key: k, instanceId: 'i1', name, nonce }) }).then(async r => ({ status: r.status, body: await r.json() }));
+  const ok = await getCls(cfg.key, 'ServerGreeting', 'nonce12345678');
+  assert.equal(ok.status, 200);
+  assert.ok(crypto.verify(null, Buffer.from(ok.body.data, 'utf8'), pubKey, Buffer.from(ok.body.sig, 'base64')), 'class bytes are signed');
+  const bytes = Buffer.from(ok.body.data.split('|')[2], 'base64');
+  assert.equal(bytes.readUInt32BE(0), 0xCAFEBABE, 'it is a real class file');
+  assert.equal((await getCls('LX-ZZZZ-ZZZZ-ZZZZ-ZZZZ', 'ServerGreeting', 'nonce12345678')).status, 403);
+  assert.equal((await getCls(cfg.key, 'Nope', 'nonce12345678')).status, 404);
+});

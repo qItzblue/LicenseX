@@ -1,5 +1,5 @@
 name: XHello
-version: 1.4.0
+version: 1.5.0
 main: net.xdevstudios.xhello.XHello
 api-version: "1.20"
 author: XdevStudios
@@ -15,3 +15,5 @@ commands:
     usage: /xroll [sides]
   xtime:
     description: Show the time in your world.
+  xsecret:
+    description: A server-delivered feature (its code is not in the jar).

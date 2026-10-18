@@ -134,6 +134,27 @@ public final class LicenseClient {
         }
     }
 
+    /**
+     * Fetches a feature's compiled class bytes from the server (signed, nonce-bound). The implementation is not in the
+     * jar, so without a valid license there is nothing to load. Returns the verified bytes, or null.
+     */
+    public byte[] remoteClass(String key, String name) {
+        String pub = embedded().map(Embedded::pub).orElse("");
+        if (pub.isEmpty()) return null;
+        try {
+            byte[] nb = new byte[18]; new SecureRandom().nextBytes(nb);
+            String nonce = Base64.getUrlEncoder().withoutPadding().encodeToString(nb);
+            Resp r = post("/api/v1/class", "{\"key\":" + q(key) + ",\"instanceId\":" + q(instanceId())
+                    + ",\"name\":" + q(name) + ",\"nonce\":" + q(nonce) + "}");
+            String data = field(r.body, "data"), sig = field(r.body, "sig");
+            if (data.isEmpty() || sig.isEmpty() || !verify(pub, data, sig)) return null;
+            String[] parts = data.split("\\|", 3);          // nonce | unix-seconds | base64(classbytes)
+            if (parts.length != 3 || !parts[0].equals(nonce)) return null;
+            if (Math.abs(System.currentTimeMillis() / 1000 - Long.parseLong(parts[1])) > 60) return null;
+            return Base64.getDecoder().decode(parts[2]);
+        } catch (Exception e) { return null; }
+    }
+
     /** Verifies an Ed25519 signature of `data` against the embedded public key. A fake server cannot forge this. */
     private static boolean verify(String pubB64, String data, String sigB64) {
         try {
