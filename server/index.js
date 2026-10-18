@@ -1047,6 +1047,42 @@ route('POST', '/api/admin/builds/:id/product', async ctx => {
 }, buildOpts);
 route('DELETE', '/api/admin/builds/:id', async ctx => { ownJob(ctx); asHttp(() => builds.remove(ctx.params.id)); return [200, { ok: true }]; }, buildOpts);
 
+// SDK auto-deploy: for a built thin-client project, register its server-side classes into this workspace's remote
+// store, create the product from the plugin jar, and run the test gate (does the jar correctly EXCLUDE the server
+// classes?). This is the deterministic, trusted-source automated pipeline: no AI, no untrusted-code sandbox.
+route('POST', '/api/admin/builds/:id/sdk-deploy', async ctx => {
+  const b = await body(ctx.req);
+  const job = ownJob(ctx);
+  const f = builds.jarFile(ctx.params.id);
+  if (!f) throw new HttpError(400, 'Build it first.');
+  const serverFiles = builds.serverClassFiles(ctx.params.id);
+  // Test gate: the server-side classes must NOT be present in the jar.
+  const jar = readFileSync(f.path);
+  let names; try { names = listEntries(jar); } catch { names = []; }
+  const leaked = serverFiles.filter(sc => names.some(n => n.endsWith('/' + sc.name + '.class') || n === sc.name + '.class'));
+  const gate = {
+    compiled: true,
+    server_classes: serverFiles.map(s => s.name),
+    classes_excluded_from_jar: leaked.length === 0,
+    leaked_into_jar: leaked.map(s => s.name),
+  };
+  if (!gate.classes_excluded_from_jar)
+    return [409, { ok: false, gate, message: `Server-side classes are present in the jar (${leaked.map(s => s.name).join(', ')}). They must live only in server-src/.` }];
+
+  // Register the server classes into this workspace's remote store.
+  const dir = wsRemoteDir(ctx.wsId); mkdirSync(dir, { recursive: true });
+  for (const sc of serverFiles) {
+    if (!REMOTE_NAME_RE.test(sc.name)) continue;
+    const dest = join(dir, sc.name + '.class'), tmp = dest + '.new-' + randomBytes(4).toString('hex');
+    writeFileSync(tmp, readFileSync(sc.path)); renameSync(tmp, dest);
+    wl(ctx, 'remoteclass.upload', sc.name, 'via sdk-deploy');
+  }
+  // Create / replace the product from the plugin jar.
+  const p = jarToProduct(ctx, buildTarget(ctx, b, job.report?.plugin?.name || job.filename.replace(/\.zip$/i, '')), jar, f.name);
+  wl(ctx, 'build.sdk-deploy', p.slug, `${serverFiles.length} server classes`);
+  return [200, { ok: true, gate, product: productRow(ctx.req, db.prepare('SELECT * FROM products WHERE id=?').get(p.id)), registered: serverFiles.map(s => s.name) }];
+}, buildOpts);
+
 // Admin: backup / restore ---------------------------------------------------------
 // Everything (licenses, servers, groups, settings, uploaded plugins) in one zip. Contains every license key and the
 // BuiltByBit secret, so treat it like a password. Restoring replaces all current data.

@@ -248,6 +248,29 @@ function runProcess(cmd, args, { cwd, env, onData, timeoutMs }) {
   });
 }
 
+
+// Compiles a thin-client project's server-src/ classes (SDK pattern) against the freshly built plugin jar, so the
+// RemoteFeature interface resolves. These .class files are served from the server, never shipped in the jar.
+function compileServerSrc(j, root) {
+  const srcDir = join(root, 'server-src');
+  if (!existsSync(srcDir)) return;
+  const tools = detectTools();
+  if (!tools.java) { throw new Error('no JDK to compile server-side classes'); }
+  const files = [];
+  (function walkJava(d) { for (const n of readdirSync(d)) { const p = join(d, n); statSync(p).isDirectory() ? walkJava(p) : (n.endsWith('.java') && files.push(p)); } })(srcDir);
+  if (!files.length) return;
+  const outDir = join(j.dir, 'server-classes');
+  rmSync(outDir, { recursive: true, force: true }); mkdirSync(outDir, { recursive: true });
+  const cp = j.jar.path;
+  const r = spawnSync('javac', ['--release', '8', '-cp', cp, '-d', outDir, ...files], { env: cleanEnv(), encoding: 'utf8', timeout: 120000 });
+  if (r.status !== 0) throw new Error((r.stderr || r.stdout || 'javac failed').split('\n').slice(0, 6).join(' '));
+  // collect top-level classes (no $ inner classes) by their simple name
+  const classes = [];
+  (function walkCls(d) { for (const n of readdirSync(d)) { const p = join(d, n); statSync(p).isDirectory() ? walkCls(p) : (n.endsWith('.class') && !n.includes('$') && classes.push({ name: n.slice(0, -6), path: p, size: statSync(p).size })); } })(outDir);
+  j.serverClasses = classes;
+  append(j, `\nCompiled ${classes.length} server-side class(es): ${classes.map(c => c.name).join(', ')} (these are NOT in the jar).\n`);
+}
+
 export function createBuildService({ baseDir, timeoutMs = 10 * 60 * 1000, onDone = null }) {
   const jobsDir = join(baseDir, 'jobs');
   const cacheDir = join(baseDir, 'cache');
@@ -259,7 +282,8 @@ export function createBuildService({ baseDir, timeoutMs = 10 * 60 * 1000, onDone
   mkdirSync(jobsDir, { recursive: true });
 
   const view = j => ({ id: j.id, status: j.status, filename: j.filename, createdAt: j.createdAt, report: j.report, trusted: j.trusted,
-    owner: j.owner, auto: j.auto, log: j.log, error: j.error, jar: j.jar ? { name: j.jar.name, size: j.jar.size, plugin: j.jar.plugin } : null });
+    owner: j.owner, auto: j.auto, log: j.log, error: j.error, jar: j.jar ? { name: j.jar.name, size: j.jar.size, plugin: j.jar.plugin } : null,
+    serverClasses: (j.serverClasses || []).map(c => ({ name: c.name, size: c.size })) });
   const append = (j, text) => {
     j.log += text.split(j.src + '/').join('').split(j.src).join('<project>'); // do not show server paths
 
@@ -333,12 +357,15 @@ export function createBuildService({ baseDir, timeoutMs = 10 * 60 * 1000, onDone
         j.jar = { name, path: join(out, name), size: picked.size, plugin: picked.hasPlugin ? { main: picked.main } : null };
         j.status = 'done';
         if (!picked.hasPlugin) append(j, '\nNote: the jar has no plugin.yml, so it is not a Bukkit/Spigot/Paper plugin.\n');
+        // SDK thin-client projects: compile the server-side classes (server-src/) that must NOT ship in the jar.
+        try { compileServerSrc(j, root); } catch (e) { append(j, `\nServer-side classes could not be compiled: ${e.message}\n`); }
         if (onDone) try { onDone(j); } catch (e) { append(j, `\nCould not add it to Products: ${e.message}\n`); }
       }).catch(e => { running = null; j.status = 'failed'; j.error = String(e.message || e); });
       return view(j);
     },
 
     jarFile(id) { const j = jobs.get(id); return j?.jar ? { path: j.jar.path, name: j.jar.name } : null; },
+    serverClassFiles(id) { const j = jobs.get(id); return (j?.serverClasses || []).map(c => ({ name: c.name, path: c.path })); },
     remove(id) { const j = jobs.get(id); if (!j) return false; if (j.status === 'building') throw new BuildError('Wait for the build to finish.', 409); rmSync(j.dir, { recursive: true, force: true }); jobs.delete(id); return true; },
     /** Deletes finished jobs older than `maxAgeMs`. */
     sweep(maxAgeMs = 24 * 3600e3) { for (const j of [...jobs.values()]) if (j.status !== 'building' && Date.now() - j.createdAt > maxAgeMs) { rmSync(j.dir, { recursive: true, force: true }); jobs.delete(j.id); } },
