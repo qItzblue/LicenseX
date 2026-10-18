@@ -1,5 +1,5 @@
 import { createServer } from 'node:http';
-import { readFileSync, writeFileSync, existsSync, statSync, createReadStream, createWriteStream, mkdirSync, renameSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, statSync, readdirSync, createReadStream, createWriteStream, mkdirSync, renameSync, rmSync } from 'node:fs';
 import { join, resolve, relative, isAbsolute, extname, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes, createHmac, timingSafeEqual, generateKeyPairSync, sign as edSign, createPrivateKey, createPublicKey } from 'node:crypto';
@@ -279,8 +279,20 @@ function featureSeatSeen(lic, instanceId, ip) {
 
 // Remote class loading: serve the compiled bytecode of a feature class to valid licenses only, signed. The plugin
 // loads it into memory at runtime; it is never in the jar, so a stripped copy simply cannot run the feature.
-const REMOTE_CLASS_DIR = join(ROOT, 'server', 'prototype', 'remote');
-const remoteClassBytes = name => { const f = join(REMOTE_CLASS_DIR, name + '.class'); return /^[A-Za-z][A-Za-z0-9]{0,40}$/.test(name) && existsSync(f) ? readFileSync(f) : null; };
+//
+// Multi-tenant isolation: each creator's server-side classes live under data/remote/<workspace>/. A license is only
+// ever served classes from ITS OWN workspace, or from the platform owner's global store (server/prototype/remote/,
+// used by the built-in XHello demo). One creator can never fetch another creator's private server code.
+const GLOBAL_REMOTE_DIR = join(ROOT, 'server', 'prototype', 'remote');
+const REMOTE_NAME_RE = /^[A-Za-z][A-Za-z0-9]{0,40}$/;
+const wsRemoteDir = wsId => join(DATA, 'remote', String(wsId));
+function remoteClassBytes(wsId, name) {
+  if (!REMOTE_NAME_RE.test(name)) return null;                 // no path traversal: strict class-name charset
+  const own = join(wsRemoteDir(wsId), name + '.class');
+  if (existsSync(own)) return readFileSync(own);
+  const global = join(GLOBAL_REMOTE_DIR, name + '.class');     // platform owner's shared classes (the demo)
+  return existsSync(global) ? readFileSync(global) : null;
+}
 route('POST', '/api/v1/class', async ctx => {
   if (!rateLimit('cls:' + ctx.ip, 300, 60e3)) throw new HttpError(429, 'Too many requests');
   const b = await body(ctx.req);
@@ -288,7 +300,7 @@ route('POST', '/api/v1/class', async ctx => {
   if (!lic || core.licenseState(lic) !== 'active') return [403, { ok: false, message: 'License is not valid.' }];
   const nonce = str(b.nonce, 64);
   if (!/^[A-Za-z0-9_-]{8,64}$/.test(nonce)) return [400, { ok: false, message: 'Bad request.' }];
-  const bytes = remoteClassBytes(str(b.name, 40));
+  const bytes = remoteClassBytes(lic.workspace_id, str(b.name, 40));   // only this license's own workspace (or global)
   if (!bytes) return [404, { ok: false, message: 'No such feature.' }];
   featureSeatSeen(lic, str(b.instanceId, 64), ctx.ip);
   const ts = now();
@@ -849,6 +861,38 @@ route('GET', '/api/admin/products/options', async ctx => {
   const [sw, sa] = scopeSql(ctx, 'id');
   return [200, db.prepare(`SELECT id, name FROM products WHERE workspace_id=? AND ${sw} ORDER BY name`).all(ctx.wsId, ...sa)];
 }, { perm: ['licenses.create', 'licenses.edit', 'products.view'] });
+// Remote-class management: a creator uploads the compiled bytecode of their server-side feature classes. Stored
+// under their OWN workspace only. Platform/products.edit auth, .class validated, size-capped. These are then served
+// by POST /api/v1/class to that creator's licenses (see the SDK in sdk/).
+route('GET', '/api/admin/remote-classes', async ctx => {
+  const dir = wsRemoteDir(ctx.wsId);
+  const names = existsSync(dir) ? readdirSync(dir).filter(f => f.endsWith('.class')).map(f => f.slice(0, -6)) : [];
+  return [200, names.map(name => ({ name, size: statSync(join(dir, name + '.class')).size })) ];
+}, { perm: 'products.edit' });
+route('POST', '/api/admin/remote-classes/:name', async ctx => {
+  const name = str(ctx.params.name, 40);
+  if (!REMOTE_NAME_RE.test(name)) throw new HttpError(400, 'Invalid class name.');
+  const tmp = join(DATA, '.remote-upload-' + randomBytes(4).toString('hex'));
+  try {
+    await saveUpload(ctx.req, tmp, 1024 * 1024);                 // 1 MB cap per class
+    const buf = readFileSync(tmp);
+    if (buf.length < 4 || buf.readUInt32BE(0) !== 0xCAFEBABE) throw new HttpError(400, 'That is not a Java .class file.');
+    const dir = wsRemoteDir(ctx.wsId);
+    mkdirSync(dir, { recursive: true });
+    const dest = join(dir, name + '.class');
+    const t = dest + '.new-' + randomBytes(4).toString('hex');
+    writeFileSync(t, buf); renameSync(t, dest);
+    wl(ctx, 'remoteclass.upload', name, `${buf.length}B`);
+    return [200, { ok: true, name, size: buf.length }];
+  } finally { rmSync(tmp, { force: true }); }
+}, { perm: 'products.edit' });
+route('DELETE', '/api/admin/remote-classes/:name', async ctx => {
+  const name = str(ctx.params.name, 40);
+  if (!REMOTE_NAME_RE.test(name)) throw new HttpError(400, 'Invalid class name.');
+  rmSync(join(wsRemoteDir(ctx.wsId), name + '.class'), { force: true });
+  wl(ctx, 'remoteclass.delete', name, '');
+  return [200, { ok: true }];
+}, { perm: 'products.edit' });
 route('POST', '/api/admin/products', async ctx => {
   const b = await body(ctx.req);
   const name = str(b.name, 60).trim();

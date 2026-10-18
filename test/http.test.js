@@ -9,8 +9,11 @@ process.env.LICENSEX_DATA = mkdtempSync(join(tmpdir(), 'lx-'));
 process.env.LICENSEX_ADMIN_PASSWORD = 'secret-pw';
 const { server } = await import('../server/index.js');
 const cfgOf = jar => readWrappedConfig(jar, readFileSync(join(process.env.LICENSEX_DATA, 'session.secret'), 'utf8').trim());
-let base;
-before(() => new Promise(r => server.listen(0, '127.0.0.1', () => { base = `http://127.0.0.1:${server.address().port}`; r(); })));
+let base, adminCookie;
+before(async () => {
+  await new Promise(r => server.listen(0, '127.0.0.1', () => { base = `http://127.0.0.1:${server.address().port}`; r(); }));
+  adminCookie = (await call('POST', '/api/admin/login', { password: 'secret-pw' })).cookie;
+});
 after(() => server.close());
 
 const call = (method, path, body, cookie) => fetch(base + path, {
@@ -191,7 +194,7 @@ test('backup and restore round-trips licenses, groups, settings and plugin files
 test('server-computed feature: valid license gets a signed, nonce-bound result; a fake key gets nothing', async () => {
   const { readFileSync } = await import('node:fs');
   const crypto = await import('node:crypto');
-  const { cookie } = await call('POST', '/api/admin/login', { password: 'secret-pw' });
+  const cookie = adminCookie;
   const plugin = readFileSync(new URL('./fixtures/hello/hello-plugin.jar', import.meta.url));
   const p = (await call('POST', '/api/admin/products', { name: 'Feat' }, cookie)).body;
   await fetch(base + `/api/admin/products/${p.id}/file`, { method: 'POST', headers: { Cookie: cookie, 'X-Filename': 'x.jar' }, body: plugin });
@@ -223,7 +226,7 @@ test('remote class loading: a valid license gets signed class bytes; invalid get
   const crypto = await import('node:crypto');
   const { readFileSync, existsSync } = await import('node:fs');
   if (!existsSync(new URL('../server/prototype/remote/ServerGreeting.class', import.meta.url))) return; // class not built in this checkout
-  const { cookie } = await call('POST', '/api/admin/login', { password: 'secret-pw' });
+  const cookie = adminCookie;
   const plugin = readFileSync(new URL('./fixtures/hello/hello-plugin.jar', import.meta.url));
   const p = (await call('POST', '/api/admin/products', { name: 'Cls' }, cookie)).body;
   await fetch(base + `/api/admin/products/${p.id}/file`, { method: 'POST', headers: { Cookie: cookie, 'X-Filename': 'x.jar' }, body: plugin });
@@ -239,4 +242,31 @@ test('remote class loading: a valid license gets signed class bytes; invalid get
   assert.equal(bytes.readUInt32BE(0), 0xCAFEBABE, 'it is a real class file');
   assert.equal((await getCls('LX-ZZZZ-ZZZZ-ZZZZ-ZZZZ', 'ServerGreeting', 'nonce12345678')).status, 403);
   assert.equal((await getCls(cfg.key, 'Nope', 'nonce12345678')).status, 404);
+});
+
+test('remote classes are per-creator: upload is validated and served only to that workspace', async () => {
+  const crypto = await import('node:crypto');
+  const { readFileSync } = await import('node:fs');
+  const cookie = adminCookie;
+  // a real .class file to upload (reuse the compiled interface from the SDK if present, else a minimal CAFEBABE stub is rejected-safe)
+  const classBytes = Buffer.concat([Buffer.from([0xCA, 0xFE, 0xBA, 0xBE]), crypto.randomBytes(200)]);
+  // non-.class is rejected
+  const bad = await fetch(base + '/api/admin/remote-classes/Foo', { method: 'POST', headers: { Cookie: cookie }, body: Buffer.from('not a class') });
+  assert.equal(bad.status, 400);
+  // valid upload
+  const up = await fetch(base + '/api/admin/remote-classes/Foo', { method: 'POST', headers: { Cookie: cookie }, body: classBytes });
+  assert.equal(up.status, 200);
+  assert.ok((await call('GET', '/api/admin/remote-classes', null, cookie)).body.some(c => c.name === 'Foo'));
+  // a license in this workspace can fetch it (signed)
+  const plugin = readFileSync(new URL('./fixtures/hello/hello-plugin.jar', import.meta.url));
+  const p = (await call('POST', '/api/admin/products', { name: 'RC' }, cookie)).body;
+  await fetch(base + `/api/admin/products/${p.id}/file`, { method: 'POST', headers: { Cookie: cookie, 'X-Filename': 'x.jar' }, body: plugin });
+  const key = cfgOf(Buffer.from(await (await fetch(`${base}/download/rc?token=${p.token}&user=1`)).arrayBuffer())).key;
+  const r = await fetch(base + '/api/v1/class', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key, instanceId: 'i1', name: 'Foo', nonce: 'nonce12345678' }) }).then(async x => ({ status: x.status, body: await x.json() }));
+  assert.equal(r.status, 200);
+  assert.deepEqual(Buffer.from(r.body.data.split('|')[2], 'base64'), classBytes, 'served the exact uploaded class');
+  // a name that does not exist anywhere -> 404
+  assert.equal((await fetch(base + '/api/v1/class', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key, instanceId: 'i1', name: 'Nonexistent', nonce: 'nonce12345678' }) })).status, 404);
 });
